@@ -193,6 +193,15 @@ async function getPubkey(
   return { x: BigInt(x), y: BigInt(y) };
 }
 
+/** Check if an account has registered a BabyJubJub pubkey (view function, never reverts). */
+async function hasPubkey(
+  wallet: ethers.Wallet,
+  addr: string
+): Promise<boolean> {
+  const contract = new ethers.Contract(JANUS_TOKEN_EVM_ADDR, JANUS_TOKEN_ABI, wallet);
+  return contract.hasPubkey(addr);
+}
+
 async function getSlotRaw(
   wallet: ethers.Wallet,
   addr: string
@@ -293,8 +302,9 @@ async function main(): Promise<number> {
   console.log("── Step 3: Register BabyJubJub pubkeys ──────────────\n");
 
   for (const acct of accounts) {
-    const existing = await getPubkey(acct.evmWallet, acct.evmWallet.address);
-    if (existing.x !== BigInt(0) || existing.y !== BigInt(1)) {
+    // Use hasPubkey() view function — never reverts
+    const isRegistered = await hasPubkey(acct.evmWallet, acct.evmWallet.address);
+    if (isRegistered) {
       pass(`${acct.name}: pubkey already registered`);
       continue;
     }
