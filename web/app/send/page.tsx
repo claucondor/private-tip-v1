@@ -1,63 +1,94 @@
-/// Send Tip page -- Send confidential tips with hidden amounts.
+/// Send Shielded Tip page — v0.3.
 ///
 /// Flow:
-/// 1. User connects wallet (checks auth via useFlowCurrentUser)
-/// 2. User enters recipient address, amount, optional memo
-/// 3. Validate inputs (address format, sufficient balance, valid amount)
-/// 4. Fetch recipient's BabyJubJub pubkey from JanusToken via @openjanus/sdk/tokens
-/// 5. Generate cryptographic randomness + build encrypt-consistency proof
-/// 6. Submit wrapAndEncrypt transaction via FCL
-/// 7. Show transaction status (pending → confirmed/failed)
-/// 8. On success: show tipID, reset form
+///   1. User connects wallet (useFlowCurrentUser).
+///   2. Pre-condition: user must have a shielded balance (wrap N FLOW first).
+///      For the demo, the wallet's (balance, blinding) pair is held in
+///      sessionStorage under "openjanus:shielded:<addr>". Realistic apps
+///      derive it from a wallet-signed message via HKDF.
+///   3. User enters recipient Flow address, amount (wei), optional memo.
+///   4. Resolve recipient Flow → COA EVM hex.
+///   5. Server generates the confidential-transfer Groth16 proof.
+///   6. Submit the Cadence transaction that calls JanusFlow.shieldedTransfer
+///      and PrivateTip.recordTip atomically.
+///   7. Show transaction status + the resulting Pedersen ciphertext (visual
+///      proof that the amount is hidden).
+///   8. PERSIST the new (balance, blinding) so the user can send another tip.
 
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { useFlowCurrentUser, useFlowMutate } from "@onflow/react-sdk";
+import { useFlowCurrentUser } from "@onflow/react-sdk";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Gift, Loader2, CheckCircle, XCircle, AlertTriangle, EyeOff } from "lucide-react";
+import {
+  ArrowLeft,
+  Gift,
+  Loader2,
+  CheckCircle,
+  XCircle,
+  AlertTriangle,
+  EyeOff,
+  Shield,
+} from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { useAppStore } from "@/lib/store";
 import { useRouter } from "next/navigation";
 
-import TipForm from "@/components/TipForm";
-import type { TipFormData } from "@/components/TipForm";
-import RecipientPubkeyDisplay from "@/components/RecipientPubkeyDisplay";
-import type { RecipientPubkeyData } from "@/components/RecipientPubkeyDisplay";
-import PrivacyDisclosure from "@/components/PrivacyDisclosure";
-
 import {
   isValidFlowAddress,
   isValidFlowAmount,
-  checkRecipientPubkey,
-  generateEncryptProof,
+  getCoaEvmAddress,
+  sendShieldedTipAction,
+  formatPoint,
+  parseFlowToWei,
+  formatWeiToFlow,
+  PRIVATE_TIP_CADENCE,
+  JANUS_FLOW_EVM,
+  SDK_VERSION,
+  type Point,
 } from "@/lib/tip-actions";
-import type { Point } from "@openjanus/sdk";
+
+// --- Local-storage helpers for (balance, blinding) -----------------------------
+
+interface ShieldedState {
+  balanceWei: string;
+  blinding: string;
+}
+
+function shieldedKey(addr: string): string {
+  return `openjanus:shielded:${addr.toLowerCase()}`;
+}
+
+function loadShieldedState(addr: string): ShieldedState | null {
+  if (typeof window === "undefined") return null;
+  const raw = sessionStorage.getItem(shieldedKey(addr));
+  return raw ? (JSON.parse(raw) as ShieldedState) : null;
+}
+
+function saveShieldedState(addr: string, state: ShieldedState): void {
+  if (typeof window === "undefined") return;
+  sessionStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+}
 
 // --- Types ---------------------------------------------------------------------
 
-type SendTipStatus =
+type SendStatus =
   | "idle"
+  | "needs_wrap"
   | "validating"
-  | "fetching_pubkey"
+  | "resolving_coa"
   | "building_proof"
   | "submitting"
-  | "confirming"
   | "success"
   | "error";
 
-interface SendTipState {
-  status: SendTipStatus;
-  tipID: number | null;
+interface SendState {
+  status: SendStatus;
   error: string | null;
   txId: string | null;
+  newCommit: Point | null;
 }
-
-// --- Constants ------------------------------------------------------------------
-
-/** Min FLOW balance required -- a dust amount to cover transaction fees. */
-const MIN_FLOW_BALANCE = 0.001;
 
 // --- Component -----------------------------------------------------------------
 
@@ -67,237 +98,178 @@ export default function SendTipPage() {
   const isLoggedIn = !!user?.loggedIn && !!user?.addr;
   const userAddress = user?.addr ?? null;
 
-  // Zustand store
-  const wallet = useAppStore((s) => s.wallet);
   const addSentTip = useAppStore((s) => s.addSentTip);
 
-  // FCL mutation
-  const {
-    mutateAsync: submitTx,
-    isPending: isTxPending,
-    data: txData,
-  } = useFlowMutate();
+  const [recipient, setRecipient] = useState("");
+  const [amount, setAmount] = useState("");
+  const [memo, setMemo] = useState("");
 
-  // -- State ------------------------------------------------------------------
-
-  const [sendState, setSendState] = useState<SendTipState>({
+  const [shielded, setShielded] = useState<ShieldedState | null>(null);
+  const [sendState, setSendState] = useState<SendState>({
     status: "idle",
-    tipID: null,
     error: null,
     txId: null,
+    newCommit: null,
   });
 
-  const [recipientPubkey, setRecipientPubkey] = useState<Point | null>(null);
-  const [pubkeyFetching, setPubkeyFetching] = useState(false);
-  const [pubkeyError, setPubkeyError] = useState<string | null>(null);
-  const [encryptResult, setEncryptResult] = useState<{
-    ciphertext: { c1: [string, string]; c2: [string, string] };
-    proof: string[];
-    publicInputs: string[];
-  } | null>(null);
-  const [tipData, setTipData] = useState<TipFormData | null>(null);
+  // Load shielded state on user-change.
+  useEffect(() => {
+    if (!userAddress) return;
+    const s = loadShieldedState(userAddress);
+    if (!s) {
+      setSendState({
+        status: "needs_wrap",
+        error: null,
+        txId: null,
+        newCommit: null,
+      });
+    } else {
+      setShielded(s);
+      setSendState({
+        status: "idle",
+        error: null,
+        txId: null,
+        newCommit: null,
+      });
+    }
+  }, [userAddress]);
 
-  // -- Handlers ----------------------------------------------------------------
+  const handleSendTip = useCallback(async () => {
+    if (!userAddress || !shielded) {
+      toast.error("Wallet not connected or shielded balance missing.");
+      return;
+    }
 
-  /**
-   * Handle form submission -- the core tip flow.
-   * 1. Validate inputs
-   * 2. Fetch recipient pubkey
-   * 3. Generate encrypt proof
-   * 4. Submit wrapAndEncrypt transaction
-   */
-  const handleSendTip = useCallback(
-    async (data: TipFormData) => {
-      if (!userAddress) {
-        toast.error("Wallet not connected. Please connect first.");
-        return;
-      }
+    setSendState({ status: "validating", error: null, txId: null, newCommit: null });
 
-      setTipData(data);
-      setSendState({ status: "validating", tipID: null, error: null, txId: null });
+    if (!isValidFlowAddress(recipient)) {
+      setSendState({
+        status: "error",
+        error: "Invalid recipient Flow address (must be 0x + 16 hex).",
+        txId: null,
+        newCommit: null,
+      });
+      return;
+    }
+    if (!isValidFlowAmount(amount)) {
+      setSendState({
+        status: "error",
+        error: "Invalid amount.",
+        txId: null,
+        newCommit: null,
+      });
+      return;
+    }
+    if (recipient.toLowerCase() === userAddress.toLowerCase()) {
+      setSendState({
+        status: "error",
+        error: "Cannot send a shielded tip to yourself (EVM contract forbids).",
+        txId: null,
+        newCommit: null,
+      });
+      return;
+    }
 
-      // Step 1: Validate inputs
-      if (!isValidFlowAddress(data.recipient)) {
-        setSendState({
-          status: "error",
-          tipID: null,
-          error: "Invalid recipient Flow address format.",
-          txId: null,
-        });
-        return;
-      }
+    const amountWei = parseFlowToWei(amount);
+    const oldBalanceWei = BigInt(shielded.balanceWei);
+    if (amountWei > oldBalanceWei) {
+      setSendState({
+        status: "error",
+        error: `Insufficient shielded balance: have ${formatWeiToFlow(oldBalanceWei)} FLOW, need ${amount} FLOW.`,
+        txId: null,
+        newCommit: null,
+      });
+      return;
+    }
 
-      if (!isValidFlowAmount(data.amount)) {
-        setSendState({
-          status: "error",
-          tipID: null,
-          error: "Invalid amount. Enter a positive number with up to 8 decimal places.",
-          txId: null,
-        });
-        return;
-      }
+    setSendState({
+      status: "resolving_coa",
+      error: null,
+      txId: null,
+      newCommit: null,
+    });
 
-      if (data.recipient.toLowerCase() === userAddress.toLowerCase()) {
-        setSendState({
-          status: "error",
-          tipID: null,
-          error: "You cannot send a tip to yourself.",
-          txId: null,
-        });
-        return;
-      }
+    let recipientCoaHex: string;
+    try {
+      recipientCoaHex = await getCoaEvmAddress(recipient);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "COA resolution failed";
+      setSendState({
+        status: "error",
+        error: msg,
+        txId: null,
+        newCommit: null,
+      });
+      return;
+    }
 
-      // Step 2: Fetch recipient pubkey
-      setSendState({ status: "fetching_pubkey", tipID: null, error: null, txId: null });
-      setPubkeyFetching(true);
-      setPubkeyError(null);
+    setSendState({
+      status: "building_proof",
+      error: null,
+      txId: null,
+      newCommit: null,
+    });
 
-      try {
-        const pk = await checkRecipientPubkey(data.recipient);
-        if (!pk) {
-          setPubkeyError("Recipient has not registered an encryption pubkey. They must register first.");
-          setSendState({
-            status: "error",
-            tipID: null,
-            error: "Recipient has not registered an encryption pubkey.",
-            txId: null,
-          });
-          return;
-        }
-        setRecipientPubkey(pk);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Failed to fetch recipient pubkey";
-        setPubkeyError(msg);
-        setSendState({ status: "error", tipID: null, error: msg, txId: null });
-        return;
-      } finally {
-        setPubkeyFetching(false);
-      }
+    try {
+      setSendState({
+        status: "submitting",
+        error: null,
+        txId: null,
+        newCommit: null,
+      });
+      const result = await sendShieldedTipAction({
+        recipientFlowAddr: recipient,
+        recipientCoaHex,
+        transferAmountWei: amountWei,
+        oldBalanceWei,
+        oldBlinding: BigInt(shielded.blinding),
+        memo: memo || undefined,
+      });
 
-      // Step 3: Generate encrypt consistency proof
-      setSendState({ status: "building_proof", tipID: null, error: null, txId: null });
-      try {
-        const proofResult = await generateEncryptProof(data.amount, recipientPubkey!);
-        setEncryptResult(proofResult);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Failed to generate encryption proof";
-        setSendState({ status: "error", tipID: null, error: msg, txId: null });
-        return;
-      }
+      // PERSIST new (balance, blinding) so next tip works.
+      const newState: ShieldedState = {
+        balanceWei: result.newBalanceWei.toString(),
+        blinding: result.newBlinding.toString(),
+      };
+      saveShieldedState(userAddress, newState);
+      setShielded(newState);
 
-      // Step 4: Submit wrapAndEncrypt transaction via FCL
-      // Uses useFlowMutate's mutateAsync to send the Cadence transaction.
-      // The transaction template is the JanusFlow wrapAndEncrypt Cadence tx
-      // which takes: amount, recipient, c1x, c1y, c2x, c2y, proof, pubInputs
-      setSendState({ status: "submitting", tipID: null, error: null, txId: null });
+      addSentTip({
+        tipID: Date.now(),
+        sender: userAddress,
+        recipient,
+        timestamp: new Date().toISOString(),
+        memo: memo || null,
+        claimed: false,
+      });
 
-      try {
-        const c1 = encryptResult!.ciphertext.c1;
-        const c2 = encryptResult!.ciphertext.c2;
-        const proofArray = encryptResult!.proof;
-        const pubInputsArray = encryptResult!.publicInputs;
+      setSendState({
+        status: "success",
+        error: null,
+        txId: result.txId,
+        newCommit: result.newCommit,
+      });
+      toast.success("Shielded tip sent!", {
+        description: "Amount is HIDDEN on-chain. Ciphertext shown below.",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Send failed";
+      setSendState({
+        status: "error",
+        error: msg,
+        txId: null,
+        newCommit: null,
+      });
+      toast.error("Send failed", { description: msg });
+    }
+  }, [userAddress, shielded, recipient, amount, memo, addSentTip]);
 
-        // Convert string[] to bigint[] for the Cadence arguments
-        const proofUint = proofArray.map((s: string) => BigInt(s));
-        const pubInputsUint = pubInputsArray.map((s: string) => BigInt(s));
-
-        const txId = await submitTx({
-          cadence: `
-            import JanusFlow from 0x5dcbeb41055ec57e
-            import FungibleToken from 0x9a0766d93b6608b7
-            import FlowToken from 0x7e60df042a9c0868
-
-            transaction(
-                amount: UFix64,
-                recipient: Address,
-                c1x: UInt256, c1y: UInt256,
-                c2x: UInt256, c2y: UInt256,
-                proof: [UInt256],
-                pubInputs: [UInt256]
-            ) {
-                let vault: @FlowToken.Vault
-
-                prepare(signer: auth(BorrowValue) &Account) {
-                    let flowVault = signer.storage.borrow<auth(FungibleToken.Withdraw) &FlowToken.Vault>(
-                        from: /storage/flowTokenVault
-                    ) ?? panic("No FlowToken.Vault in signer storage")
-                    self.vault <- flowVault.withdraw(amount: amount)
-                }
-
-                execute {
-                    JanusFlow.wrapAndEncrypt(
-                        vault: <-self.vault,
-                        recipient: recipient,
-                        c1x: c1x, c1y: c1y,
-                        c2x: c2x, c2y: c2y,
-                        proof: proof,
-                        pubInputs: pubInputs
-                    )
-                }
-            }
-          `,
-          args: (arg: any, t: any) => [
-            arg(data.amount, t.UFix64),
-            arg(data.recipient, t.Address),
-            arg(c1[0], t.UInt256),
-            arg(c1[1], t.UInt256),
-            arg(c2[0], t.UInt256),
-            arg(c2[1], t.UInt256),
-            arg(proofUint, t.Array(t.UInt256)),
-            arg(pubInputsUint, t.Array(t.UInt256)),
-          ],
-          limit: 9999,
-        });
-
-        setSendState({
-          status: "confirming",
-          tipID: null,
-          error: null,
-          txId,
-        });
-
-        // Add to local store
-        addSentTip({
-          tipID: Date.now(), // placeholder until we parse the event
-          sender: userAddress,
-          recipient: data.recipient,
-          timestamp: new Date().toISOString(),
-          memo: data.memo || null,
-          claimed: false,
-        });
-
-        // Reset form
-        setTipData(null);
-        setRecipientPubkey(null);
-        setEncryptResult(null);
-        setSendState({ status: "success", tipID: null, error: null, txId });
-
-        toast.success("Tip sent! ", {
-          description: "Your confidential tip has been sent successfully.",
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Transaction failed";
-        setSendState({ status: "error", tipID: null, error: msg, txId: null });
-        toast.error("Send failed", {
-          description: msg,
-        });
-      }
-    },
-    [userAddress, recipientPubkey, encryptResult, addSentTip, submitTx]
-  );
-
-  // -- Compute derived values -----------------------------------------------
-
-  const isSubmitting = sendState.status === "submitting" ||
-    sendState.status === "confirming" ||
+  const isSubmitting =
+    sendState.status === "validating" ||
+    sendState.status === "resolving_coa" ||
     sendState.status === "building_proof" ||
-    sendState.status === "fetching_pubkey";
+    sendState.status === "submitting";
 
-  const submitError = sendState.status === "error" ? sendState.error : null;
-
-  // -- Render ----------------------------------------------------------------
-
-  // Not logged in state
   if (!isLoggedIn) {
     return (
       <div className="max-w-lg mx-auto px-4 py-12">
@@ -310,14 +282,13 @@ export default function SendTipPage() {
             Back
           </Link>
         </div>
-
         <div className="flex flex-col items-center text-center py-16">
           <div className="w-16 h-16 rounded-2xl bg-blue-100 dark:bg-blue-950 flex items-center justify-center mb-6">
             <Gift className="w-8 h-8 text-blue-600 dark:text-blue-400" />
           </div>
           <h2 className="text-xl font-bold mb-2">Connect Your Wallet</h2>
           <p className="text-sm text-muted-foreground mb-6 max-w-sm">
-            Connect your wallet to send confidential tips with hidden amounts.
+            Connect your wallet to send shielded tips.
           </p>
           <Button onClick={() => authenticate()} size="lg">
             Connect Wallet
@@ -327,9 +298,72 @@ export default function SendTipPage() {
     );
   }
 
+  // Needs wrap screen — pre-condition for the new orchestrator architecture.
+  if (sendState.status === "needs_wrap") {
+    return (
+      <div className="max-w-lg mx-auto px-4 py-12">
+        <div className="mb-8">
+          <Link
+            href="/"
+            className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4 mr-1" />
+            Back
+          </Link>
+        </div>
+        <div className="flex items-center gap-3 mb-8">
+          <div className="w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-950 flex items-center justify-center">
+            <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold">Wrap First</h1>
+            <p className="text-sm text-muted-foreground">
+              v0.3 orchestrator requires a pre-funded shielded slot
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/30 dark:bg-amber-950/20 p-6 space-y-4">
+          <p className="text-sm text-amber-800 dark:text-amber-200">
+            <strong>Pre-condition:</strong> PrivateTip v0.3 is a pure
+            orchestrator over JanusFlow. Per-tip escrow is gone. To send
+            shielded tips you must first wrap N FLOW into your JanusFlow
+            shielded slot.
+          </p>
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            The wrap is a one-time visible deposit (msg.value boundary).
+            Subsequent tips draw down your shielded balance, with amounts
+            hidden by Pedersen commitments.
+          </p>
+          <p className="text-xs text-muted-foreground font-mono">
+            Wrap on the Cadence CLI: <br />
+            <code>flow transactions send ./cadence/transactions/jf_wrap.cdc ...</code><br />
+            Or run the smoke test: <code>node scripts/v03-smoke.mjs</code>
+          </p>
+          <div className="border-t border-amber-200 dark:border-amber-800 pt-4">
+            <p className="text-xs text-muted-foreground mb-2">
+              MVP shortcut: paste your current shielded state
+            </p>
+            <PasteShieldedStateForm
+              addr={userAddress!}
+              onSaved={(s) => {
+                setShielded(s);
+                setSendState({
+                  status: "idle",
+                  error: null,
+                  txId: null,
+                  newCommit: null,
+                });
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-lg mx-auto px-4 py-12">
-      {/* Back + Header */}
       <div className="mb-8">
         <Link
           href="/"
@@ -345,103 +379,150 @@ export default function SendTipPage() {
           <Gift className="w-5 h-5 text-blue-600 dark:text-blue-400" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold">Send a Tip</h1>
+          <h1 className="text-2xl font-bold">Send a Shielded Tip</h1>
           <p className="text-sm text-muted-foreground">
-            Send a confidential tip with hidden amount
+            Amount hidden — only sender, recipient, memo, and timestamp visible.
           </p>
         </div>
       </div>
 
-      {/* Privacy Disclosure */}
-      <PrivacyDisclosure compact className="mb-6" />
-
-      {/* Tip Form */}
-      <TipForm
-        onSubmit={handleSendTip}
-        isSubmitting={isSubmitting}
-        submitError={submitError}
-        disabled={sendState.status === "success"}
-      />
-
-      {/* Status Display */}
-      {sendState.status !== "idle" && sendState.status !== "success" && (
-        <div className="mt-6 space-y-3">
-          {/* Validating */}
-          {sendState.status === "validating" && (
-            <div className="rounded-lg bg-muted p-3 text-sm text-muted-foreground flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Validating inputs...
+      {/* Shielded balance summary */}
+      {shielded && (
+        <div className="mb-6 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-4">
+          <div className="flex items-start gap-3">
+            <Shield className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+            <div className="text-xs flex-1">
+              <p className="font-medium text-foreground mb-1">
+                Your shielded balance (local-known)
+              </p>
+              <p className="text-sm text-emerald-700 dark:text-emerald-300 font-mono">
+                {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
+              </p>
+              <p className="text-[10px] text-muted-foreground mt-1">
+                (decryptable with your locally-stored blinding;
+                on-chain only the Pedersen commit point is visible)
+              </p>
             </div>
-          )}
-
-          {/* Fetching pubkey */}
-          {sendState.status === "fetching_pubkey" && (
-            <div className="rounded-lg bg-blue-50 dark:bg-blue-950/30 p-3 text-sm text-blue-700 dark:text-blue-300 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Checking recipient encryption pubkey...
-            </div>
-          )}
-
-          {/* Building proof */}
-          {sendState.status === "building_proof" && (
-            <div className="rounded-lg bg-purple-50 dark:bg-purple-950/30 p-3 text-sm text-purple-700 dark:text-purple-300 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Generating encryption proof (this may take a moment)...
-            </div>
-          )}
-
-          {/* Submitting */}
-          {sendState.status === "submitting" && (
-            <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 p-3 text-sm text-amber-700 dark:text-amber-300 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Submitting confidential tip transaction...
-            </div>
-          )}
-
-          {/* Confirming */}
-          {sendState.status === "confirming" && (
-            <div className="rounded-lg bg-green-50 dark:bg-green-950/30 p-3 text-sm text-green-700 dark:text-green-300 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Confirming transaction...
-            </div>
-          )}
+          </div>
         </div>
       )}
 
-      {/* Success state */}
-      {sendState.status === "success" && (
-        <div className="mt-6 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-6 text-center">
-          <div className="w-12 h-12 rounded-xl bg-emerald-100 dark:bg-emerald-950 flex items-center justify-center mx-auto mb-4">
-            <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
-          </div>
-          <h3 className="text-lg font-bold mb-1">Tip Sent! </h3>
-          <p className="text-sm text-muted-foreground mb-4">
-            Your confidential tip has been sent to {tipData?.recipient?.slice(0, 10)}...
-            {sendState.txId && (
-              <span className="block mt-1 text-xs font-mono">
-                Tx: {sendState.txId.slice(0, 18)}...
-              </span>
-            )}
+      {/* Form */}
+      <div className="rounded-xl border border-border bg-card p-6 space-y-4">
+        <div>
+          <label className="text-xs font-medium text-muted-foreground mb-1 block">
+            Recipient (Flow address)
+          </label>
+          <input
+            type="text"
+            value={recipient}
+            onChange={(e) => setRecipient(e.target.value)}
+            placeholder="0x..."
+            className="w-full px-3 py-2 text-sm font-mono border rounded bg-background"
+            disabled={isSubmitting || sendState.status === "success"}
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground mb-1 block">
+            Amount (FLOW)
+          </label>
+          <input
+            type="text"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder="e.g. 1.5"
+            className="w-full px-3 py-2 text-sm border rounded bg-background"
+            disabled={isSubmitting || sendState.status === "success"}
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">
+            Hidden on-chain. Visible only to you (sender) and your recipient (after decrypt).
           </p>
-          <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-            <EyeOff className="w-3 h-3" />
-            Amount is cryptographically hidden
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground mb-1 block">
+            Memo (optional, max 280 chars)
+          </label>
+          <input
+            type="text"
+            value={memo}
+            onChange={(e) => setMemo(e.target.value)}
+            placeholder="Thanks for the tip!"
+            maxLength={280}
+            className="w-full px-3 py-2 text-sm border rounded bg-background"
+            disabled={isSubmitting || sendState.status === "success"}
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">
+            Memo IS visible on-chain (in the TipSentShielded event).
+          </p>
+        </div>
+        <Button
+          onClick={handleSendTip}
+          className="w-full"
+          size="lg"
+          disabled={isSubmitting || sendState.status === "success" || !shielded}
+        >
+          {isSubmitting ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              {sendState.status === "validating" && "Validating…"}
+              {sendState.status === "resolving_coa" && "Resolving recipient COA…"}
+              {sendState.status === "building_proof" && "Generating Groth16 proof…"}
+              {sendState.status === "submitting" && "Submitting…"}
+            </>
+          ) : (
+            <>
+              <Shield className="w-4 h-4 mr-2" />
+              Send Shielded Tip
+            </>
+          )}
+        </Button>
+      </div>
+
+      {/* Success: show ciphertext (visual proof of hiding) */}
+      {sendState.status === "success" && sendState.newCommit && (
+        <div className="mt-6 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-6">
+          <div className="flex items-start gap-3 mb-3">
+            <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <div>
+              <h3 className="text-lg font-bold mb-1">Shielded tip sent!</h3>
+              <p className="text-xs text-muted-foreground">
+                Amount HIDDEN on calldata, events, and storage. Only the
+                Pedersen commit point updated on-chain.
+              </p>
+            </div>
           </div>
-          <div className="flex gap-3 mt-4 justify-center">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => router.push("/tips")}
-            >
+          <div className="mb-3">
+            <p className="text-xs font-medium text-foreground mb-1">
+              Your new residual commitment (point on BabyJubJub):
+            </p>
+            <p className="font-mono text-[10px] break-all text-emerald-700 dark:text-emerald-300">
+              {formatPoint(sendState.newCommit)}
+            </p>
+          </div>
+          <div className="mb-3">
+            <p className="text-xs font-medium text-foreground mb-1">Transaction:</p>
+            <p className="font-mono text-[10px] break-all">{sendState.txId}</p>
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-4">
+            <EyeOff className="w-3 h-3" />
+            Amount cryptographically hidden via Pedersen commitment
+          </div>
+          <div className="flex gap-3 justify-center">
+            <Button variant="outline" size="sm" onClick={() => router.push("/tips")}>
               View My Tips
             </Button>
             <Button
               size="sm"
               onClick={() => {
-                setSendState({ status: "idle", tipID: null, error: null, txId: null });
-                setTipData(null);
-                setRecipientPubkey(null);
-                setEncryptResult(null);
+                setSendState({
+                  status: "idle",
+                  error: null,
+                  txId: null,
+                  newCommit: null,
+                });
+                setRecipient("");
+                setAmount("");
+                setMemo("");
               }}
             >
               Send Another
@@ -450,47 +531,74 @@ export default function SendTipPage() {
         </div>
       )}
 
-      {/* Error display */}
-      {submitError && (
+      {sendState.status === "error" && sendState.error && (
         <div className="mt-4 rounded-lg border border-destructive/20 bg-destructive/5 p-4">
           <div className="flex items-start gap-3">
             <XCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-destructive mb-1">
-                Tip failed
-              </p>
-              <p className="text-xs text-destructive/80">{submitError}</p>
+              <p className="text-sm font-medium text-destructive mb-1">Send failed</p>
+              <p className="text-xs text-destructive/80">{sendState.error}</p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Pubkey status info (non-blocking) */}
-      {recipientPubkey && !isSubmitting && (
-        <div className="mt-4">
-          <RecipientPubkeyDisplay
-            address={tipData?.recipient}
-            pubkeyData={
-              {
-                x: `0x${recipientPubkey.x.toString(16)}`,
-                y: `0x${recipientPubkey.y.toString(16)}`,
-              } as RecipientPubkeyData
-            }
-            isLoading={false}
-          />
-        </div>
-      )}
+      {/* Footer: addresses */}
+      <div className="mt-8 text-[10px] text-muted-foreground space-y-0.5">
+        <p>SDK: @openjanus/sdk@{SDK_VERSION}</p>
+        <p>JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span></p>
+        <p>PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span></p>
+      </div>
+    </div>
+  );
+}
 
-      {pubkeyError && !isSubmitting && (
-        <div className="mt-4 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/30 p-3">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-            <p className="text-xs text-amber-700 dark:text-amber-300">
-              {pubkeyError}
-            </p>
-          </div>
-        </div>
-      )}
+// --- Paste-shielded-state form (MVP escape hatch) -----------------------------
+
+function PasteShieldedStateForm({
+  addr,
+  onSaved,
+}: {
+  addr: string;
+  onSaved: (s: ShieldedState) => void;
+}) {
+  const [balanceFlow, setBalanceFlow] = useState("");
+  const [blinding, setBlinding] = useState("");
+
+  const handleSave = () => {
+    try {
+      const balanceWei = parseFlowToWei(balanceFlow).toString();
+      const blindingDec = BigInt(blinding.trim()).toString();
+      const s: ShieldedState = { balanceWei, blinding: blindingDec };
+      saveShieldedState(addr, s);
+      onSaved(s);
+      toast.success("Shielded state saved (session only)");
+    } catch (err) {
+      toast.error("Invalid input", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <input
+        type="text"
+        placeholder="Cleartext balance (FLOW, e.g. 5)"
+        value={balanceFlow}
+        onChange={(e) => setBalanceFlow(e.target.value)}
+        className="w-full px-3 py-2 text-xs font-mono border rounded bg-background"
+      />
+      <input
+        type="text"
+        placeholder="Blinding factor (decimal)"
+        value={blinding}
+        onChange={(e) => setBlinding(e.target.value)}
+        className="w-full px-3 py-2 text-xs font-mono border rounded bg-background"
+      />
+      <Button size="sm" variant="outline" onClick={handleSave} className="w-full">
+        Save (session only)
+      </Button>
     </div>
   );
 }

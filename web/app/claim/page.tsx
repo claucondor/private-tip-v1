@@ -1,20 +1,25 @@
-/// Claim Tips page -- Withdraw accumulated confidential tips.
+/// Claim/Unwrap page — v0.3.
+///
+/// PrivateTip v0.3 is an ORCHESTRATOR — there is no per-tip claim. Recipients
+/// unwrap from their JanusFlow shielded slot whenever they want to cash out.
+/// The shielded balance is the homomorphic sum of all wraps + received tips
+/// minus all sent tips + unwraps.
 ///
 /// Flow:
-/// 1. User connects wallet
-/// 2. Poll encrypted balance from JanusToken slot via @openjanus/sdk/tokens
-/// 3. Pre-compute BSGS decrypt on poll (50-100ms, near-instant for reasonable amounts)
-/// 4. Show accumulated decrypted balance
-/// 5. User clicks "Claim"
-/// 6. Build decrypt-open proof via buildDecryptProof from @openjanus/sdk/crypto
-/// 7. Submit combined decryptAndUnwrap + claimTip transactions via FCL
-/// 8. Show transaction status (pending → confirmed/failed)
-/// 9. On success: show claimed amount, reset state
+///   1. User connects wallet.
+///   2. Load (balance, blinding) from sessionStorage (set during wrap/receive).
+///      If absent, the user pastes them (MVP escape hatch).
+///   3. Show current shielded balance (decrypted via the locally-stored
+///      blinding) + the on-chain Pedersen commitment (read directly from EVM).
+///   4. User enters amount to unwrap.
+///   5. Submit Cadence transaction that calls JanusFlow.unwrap, releasing the
+///      visible amount to the user's COA EVM address.
+///   6. PERSIST new (balance, blinding) so the next operation works.
 
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { useFlowCurrentUser, useFlowMutate, useFlowQuery } from "@onflow/react-sdk";
+import { useFlowCurrentUser } from "@onflow/react-sdk";
 import { Button } from "@/components/ui/button";
 import {
   ArrowLeft,
@@ -22,40 +27,52 @@ import {
   Loader2,
   CheckCircle,
   XCircle,
-  Key,
-  AlertTriangle,
-  EyeOff,
+  Shield,
   Coins,
-  Gift,
+  EyeOff,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { useAppStore } from "@/lib/store";
-
-import BalanceDisplay from "@/components/BalanceDisplay";
-import type { BalanceStatus } from "@/components/BalanceDisplay";
-import PrivacyDisclosure from "@/components/PrivacyDisclosure";
 
 import {
-  getJanusFlow,
-  generateDecryptProof,
-  formatAttoflowToFlow,
-  checkRecipientPubkey,
+  getCoaEvmAddress,
+  getCommitment,
+  unwrapAction,
+  parseFlowToWei,
+  formatWeiToFlow,
+  formatPoint,
+  PRIVATE_TIP_CADENCE,
+  JANUS_FLOW_EVM,
+  SDK_VERSION,
+  type Point,
 } from "@/lib/tip-actions";
-import type { Ciphertext } from "@openjanus/sdk/tokens";
 
-// --- Types ---------------------------------------------------------------------
+interface ShieldedState {
+  balanceWei: string;
+  blinding: string;
+}
+
+function shieldedKey(addr: string): string {
+  return `openjanus:shielded:${addr.toLowerCase()}`;
+}
+
+function loadShieldedState(addr: string): ShieldedState | null {
+  if (typeof window === "undefined") return null;
+  const raw = sessionStorage.getItem(shieldedKey(addr));
+  return raw ? (JSON.parse(raw) as ShieldedState) : null;
+}
+
+function saveShieldedState(addr: string, state: ShieldedState): void {
+  if (typeof window === "undefined") return;
+  sessionStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+}
 
 type ClaimStatus =
-  | "idle"
-  | "checking_pubkey"
-  | "loading_slot"
-  | "decrypting"
-  | "ready_to_claim"
+  | "loading"
+  | "ready"
+  | "needs_state"
   | "building_proof"
   | "submitting"
-  | "confirming"
   | "success"
   | "error";
 
@@ -63,312 +80,163 @@ interface ClaimState {
   status: ClaimStatus;
   error: string | null;
   txId: string | null;
-  claimedAmount: string | null;
+  unwrappedFlow: string | null;
 }
 
-// --- Component -----------------------------------------------------------------
-
-export default function ClaimTipsPage() {
-  const router = useRouter();
+export default function ClaimPage() {
   const { user, authenticate } = useFlowCurrentUser();
   const isLoggedIn = !!user?.loggedIn && !!user?.addr;
   const userAddress = user?.addr ?? null;
 
-  // Zustand store
-  const pubkey = useAppStore((s) => s.pubkey);
-  const receivedTips = useAppStore((s) => s.tips.received);
-  const setPubkey = useAppStore((s) => s.setPubkey);
-  const markTipClaimed = useAppStore((s) => s.markTipClaimed);
-
-  // -- State ------------------------------------------------------------------
-
+  const [shielded, setShielded] = useState<ShieldedState | null>(null);
+  const [coaHex, setCoaHex] = useState<string | null>(null);
+  const [chainCommit, setChainCommit] = useState<Point | null>(null);
+  const [amountFlow, setAmountFlow] = useState("");
   const [claimState, setClaimState] = useState<ClaimState>({
-    status: "idle",
+    status: "loading",
     error: null,
     txId: null,
-    claimedAmount: null,
+    unwrappedFlow: null,
   });
 
-  const [encryptedSlot, setEncryptedSlot] = useState<Ciphertext | null>(null);
-  const [decryptedBalance, setDecryptedBalance] = useState<bigint | null>(null);
-  const [decryptProofResult, setDecryptProofResult] = useState<{
-    proof: string[];
-    publicInputs: string[];
-  } | null>(null);
-  const [pollInterval, setPollInterval] = useState<ReturnType<typeof setInterval> | null>(null);
-
-  // FCL mutation
-  const { mutateAsync: submitTx, isPending: isTxPending } = useFlowMutate();
-
-  // -- Fetch slot and decrypt on mount ---------------------------------------
+  // -- Initial load: COA + on-chain commit + local shielded state --------------
 
   useEffect(() => {
-    // Only run when wallet is connected
     if (!userAddress) return;
 
     let cancelled = false;
 
-    const fetchAndDecrypt = async () => {
+    (async () => {
       try {
-        setClaimState((prev) => ({
-          ...prev,
-          status: "checking_pubkey",
-          error: null,
-        }));
-
-        // Step 1: Check if user has pubkey registered
-        const pk = await checkRecipientPubkey(userAddress);
-        if (!pk) {
-          setClaimState({
-            status: "error",
-            error:
-              "You need to register an encryption pubkey before you can claim tips. Register your pubkey first.",
-            txId: null,
-            claimedAmount: null,
-          });
-          return;
-        }
-
-        // Store the pubkey in the zustand store
-        setPubkey({
-          x: `0x${pk.x.toString(16)}`,
-          y: `0x${pk.y.toString(16)}`,
-          registered: true,
-        });
-
+        const coa = await getCoaEvmAddress(userAddress);
         if (cancelled) return;
+        setCoaHex(coa);
 
-        // Step 2: Fetch encrypted slot
-        setClaimState((prev) => ({
-          ...prev,
-          status: "loading_slot",
-          error: null,
-        }));
-
-        const janusFlow = await getJanusFlow();
-        const slot = await janusFlow.getSlot(userAddress);
-
+        const c = await getCommitment(coa);
         if (cancelled) return;
+        setChainCommit(c);
 
-        setEncryptedSlot(slot);
-
-        // Check if slot is empty (identity ciphertext)
-        // Identity point on BabyJubJub is (x=0, y=1)
-        const isIdentity =
-          slot.c1.x === BigInt(0) &&
-          slot.c1.y === BigInt(1) &&
-          slot.c2.x === BigInt(0) &&
-          slot.c2.y === BigInt(1);
-
-        if (isIdentity) {
+        const s = loadShieldedState(userAddress);
+        if (!s) {
           setClaimState({
-            status: "idle",
+            status: "needs_state",
             error: null,
             txId: null,
-            claimedAmount: null,
+            unwrappedFlow: null,
           });
-          setDecryptedBalance(null);
           return;
         }
-
-        // Step 3: Decrypt via BSGS
-        setClaimState((prev) => ({
-          ...prev,
-          status: "decrypting",
-          error: null,
-        }));
-
-        // For BSGS, we need the secret key. In a real app, the user provides this.
-        // For the MVP, we use a placeholder -- the actual flow requires key management.
-        // The BSGS decrypt is done in the tip-actions helper.
-        // We show the encrypted balance as-is and prompt the user to claim.
-
-        // The user provides their secret key to decrypt.
-        // For now, we compute the encrypted description for display.
+        setShielded(s);
         setClaimState({
-          status: "ready_to_claim",
+          status: "ready",
           error: null,
           txId: null,
-          claimedAmount: null,
+          unwrappedFlow: null,
         });
       } catch (err) {
         if (!cancelled) {
-          const msg =
-            err instanceof Error ? err.message : "Failed to load balance";
           setClaimState({
             status: "error",
-            error: msg,
+            error: err instanceof Error ? err.message : "Load failed",
             txId: null,
-            claimedAmount: null,
+            unwrappedFlow: null,
           });
         }
       }
-    };
-
-    fetchAndDecrypt();
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [userAddress, setPubkey]);
+  }, [userAddress]);
 
-  // -- Claim handler ---------------------------------------------------------
+  // -- Unwrap handler ---------------------------------------------------------
 
-  const handleClaim = useCallback(async () => {
-    if (!userAddress || !encryptedSlot) {
-      toast.error("No encrypted balance to claim.");
+  const handleUnwrap = useCallback(async () => {
+    if (!userAddress || !shielded || !coaHex) {
+      toast.error("Missing state — refresh and try again.");
       return;
     }
 
-    setClaimState((prev) => ({
-      ...prev,
+    let amountWei: bigint;
+    try {
+      amountWei = parseFlowToWei(amountFlow);
+      if (amountWei <= BigInt(0)) throw new Error("Amount must be > 0");
+    } catch (err) {
+      setClaimState((p) => ({
+        ...p,
+        status: "error",
+        error: err instanceof Error ? err.message : "Invalid amount",
+      }));
+      return;
+    }
+
+    const oldBalance = BigInt(shielded.balanceWei);
+    if (amountWei > oldBalance) {
+      setClaimState((p) => ({
+        ...p,
+        status: "error",
+        error: `Insufficient shielded balance: have ${formatWeiToFlow(oldBalance)} FLOW, claim ${amountFlow} FLOW`,
+      }));
+      return;
+    }
+
+    setClaimState({
       status: "building_proof",
       error: null,
-    }));
+      txId: null,
+      unwrappedFlow: null,
+    });
 
     try {
-      // Step 1: Parse the amount from the encrypted slot
-      // In production, the user provides their BabyJubJub secret key.
-      // For the MVP, we use a placeholder secret key and compute the decrypt proof.
-      // The actual amount is represented by the ElGamal ciphertext.
-
-      // Note: In a production app, the user would:
-      //   1. Provide their BabyJubJub secret key (securely stored)
-      //   2. The frontend would run BSGS to recover the amount
-      //   3. Then call buildDecryptProof with the recovered amount + secret key
-      //
-      // For the MVP integration, we assume the secret key and amount
-      // are provided by the user or stored securely.
-
-      // Step 2: Build decrypt proof
-      setClaimState((prev) => ({
-        ...prev,
-        status: "building_proof",
-        error: null,
-      }));
-
-      // Placeholder: amount is estimated from the encrypted slot data
-      // Real implementation: BSGS decrypt with user's secret key
-      const estimatedAmount = BigInt(0); // BSGS result replaces this
-
-      const proofResult = await generateDecryptProof(
-        encryptedSlot,
-        BigInt(0), // placeholder: user's secret key
-        estimatedAmount
-      );
-      setDecryptProofResult(proofResult);
-
-      // Step 3: Submit decryptAndUnwrap transaction via FCL
-      // Uses useFlowMutate's mutateAsync to send the Cadence transaction.
-      // The transaction template is the JanusFlow decryptAndUnwrap Cadence tx
-      // which takes: amount, to, proof, pubInputs
-      setClaimState((prev) => ({
-        ...prev,
+      setClaimState({
         status: "submitting",
         error: null,
-      }));
-
-      const proofUint = proofResult.proof.map((s: string) => BigInt(s));
-      const pubInputsUint = proofResult.publicInputs.map((s: string) => BigInt(s));
-
-      const txId = await submitTx({
-        cadence: `
-          import JanusFlow from 0x5dcbeb41055ec57e
-          import FungibleToken from 0x9a0766d93b6608b7
-          import FlowToken from 0x7e60df042a9c0868
-
-          transaction(
-              amount: UFix64,
-              to: Address,
-              proof: [UInt256],
-              pubInputs: [UInt256]
-          ) {
-              prepare(signer: auth(BorrowValue) &Account) {}
-              execute {
-                  let vault <- JanusFlow.decryptAndUnwrap(
-                      amount: amount,
-                      proof: proof,
-                      pubInputs: pubInputs
-                  )
-                  let recipientRef = getAccount(to)
-                      .capabilities
-                      .borrow<&{FungibleToken.Receiver}>(/public/flowTokenReceiver)
-                      ?? panic("No FlowToken.Receiver on recipient")
-                  recipientRef.deposit(from: <-vault)
-              }
-          }
-        `,
-        args: (arg: any, t: any) => [
-          arg(formatAttoflowToFlow(estimatedAmount), t.UFix64),
-          arg(userAddress, t.Address),
-          arg(proofUint, t.Array(t.UInt256)),
-          arg(pubInputsUint, t.Array(t.UInt256)),
-        ],
-        limit: 9999,
+        txId: null,
+        unwrappedFlow: null,
       });
 
-      // Step 4: Success
+      const result = await unwrapAction({
+        claimedAmountWei: amountWei,
+        recipientEvmHex: coaHex,
+        oldBalanceWei: oldBalance,
+        oldBlinding: BigInt(shielded.blinding),
+      });
+
+      // Persist new state
+      const newState: ShieldedState = {
+        balanceWei: result.newBalanceWei.toString(),
+        blinding: result.newBlinding.toString(),
+      };
+      saveShieldedState(userAddress, newState);
+      setShielded(newState);
+
+      // Refresh chain commit
+      const c = await getCommitment(coaHex);
+      setChainCommit(c);
+
       setClaimState({
         status: "success",
         error: null,
-        txId,
-        claimedAmount: formatAttoflowToFlow(estimatedAmount),
+        txId: result.txId,
+        unwrappedFlow: formatWeiToFlow(amountWei),
       });
-
-      // Mark all unclaimed received tips as claimed in the store
-      receivedTips.forEach((tip) => {
-        if (!tip.claimed && tip.recipient.toLowerCase() === userAddress.toLowerCase()) {
-          markTipClaimed(tip.tipID);
-        }
-      });
-
-      toast.success("Tips claimed successfully!", {
-        description: `Claimed amount deposited to your wallet.`,
+      toast.success("Unwrap successful!", {
+        description: `${formatWeiToFlow(amountWei)} FLOW released to your COA.`,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Claim failed";
       setClaimState({
         status: "error",
-        error: msg,
+        error: err instanceof Error ? err.message : "Unwrap failed",
         txId: null,
-        claimedAmount: null,
-      });
-      toast.error("Claim failed", {
-        description: msg,
+        unwrappedFlow: null,
       });
     }
-  }, [userAddress, encryptedSlot, receivedTips, markTipClaimed, submitTx]);
-
-  // -- Derived values -------------------------------------------------------
+  }, [userAddress, shielded, coaHex, amountFlow]);
 
   const isSubmitting =
-    claimState.status === "building_proof" ||
-    claimState.status === "submitting" ||
-    claimState.status === "confirming";
+    claimState.status === "building_proof" || claimState.status === "submitting";
 
-  const submitError = claimState.status === "error" ? claimState.error : null;
-
-  // Map claim state to BalanceDisplay status
-  const getBalanceStatus = (): BalanceStatus => {
-    switch (claimState.status) {
-      case "loading_slot":
-      case "decrypting":
-      case "checking_pubkey":
-        return "loading";
-      case "ready_to_claim":
-        return "ready";
-      case "idle":
-        return "empty";
-      case "error":
-        return "error";
-      default:
-        return "empty";
-    }
-  };
-
-  // -- Render ----------------------------------------------------------------
-
-  // Not logged in state
   if (!isLoggedIn) {
     return (
       <div className="max-w-lg mx-auto px-4 py-12">
@@ -381,14 +249,13 @@ export default function ClaimTipsPage() {
             Back
           </Link>
         </div>
-
         <div className="flex flex-col items-center text-center py-16">
           <div className="w-16 h-16 rounded-2xl bg-emerald-100 dark:bg-emerald-950 flex items-center justify-center mb-6">
             <Wallet className="w-8 h-8 text-emerald-600 dark:text-emerald-400" />
           </div>
           <h2 className="text-xl font-bold mb-2">Connect Your Wallet</h2>
           <p className="text-sm text-muted-foreground mb-6 max-w-sm">
-            Connect your wallet to claim accumulated confidential tips.
+            Connect your wallet to unwrap your shielded balance.
           </p>
           <Button onClick={() => authenticate()} size="lg">
             Connect Wallet
@@ -400,7 +267,6 @@ export default function ClaimTipsPage() {
 
   return (
     <div className="max-w-lg mx-auto px-4 py-12">
-      {/* Back + Header */}
       <div className="mb-8">
         <Link
           href="/"
@@ -416,191 +282,202 @@ export default function ClaimTipsPage() {
           <Wallet className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold">Claim Tips</h1>
+          <h1 className="text-2xl font-bold">Unwrap Shielded Balance</h1>
           <p className="text-sm text-muted-foreground">
-            Withdraw all accumulated confidential tips
+            Release FLOW from your shielded slot to your COA (boundary out)
           </p>
         </div>
       </div>
 
-      {/* Privacy Disclosure */}
-      <PrivacyDisclosure compact className="mb-6" />
-
-      {/* Balance Display */}
-      <div className="mb-6">
-        <BalanceDisplay
-          status={getBalanceStatus()}
-          balance={
-            decryptedBalance
-              ? formatAttoflowToFlow(decryptedBalance)
-              : null
-          }
-          encryptedDescription={
-            encryptedSlot
-               ? `Encrypted slot: ${encryptedSlot.c1.x.toString(16).slice(0, 8)}...`
-              : null
-          }
-          error={submitError ?? undefined}
-        />
+      {/* Balance card */}
+      <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/30 dark:bg-emerald-950/20 p-6 mb-6">
+        <div className="flex items-start gap-3">
+          <Shield className="w-6 h-6 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-xs font-medium text-foreground mb-1">
+              Your shielded balance
+            </p>
+            {shielded ? (
+              <p className="text-2xl font-bold text-emerald-700 dark:text-emerald-300">
+                {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Local shielded state unknown
+              </p>
+            )}
+            {chainCommit && (
+              <div className="mt-2 text-[10px] text-muted-foreground">
+                <p>On-chain Pedersen commitment:</p>
+                <p className="font-mono break-all">
+                  {formatPoint(chainCommit).slice(0, 80)}…
+                </p>
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground mt-2">
+              Balance is decrypted locally with your stored blinding factor.
+              On-chain observers see only the commitment point.
+            </p>
+          </div>
+        </div>
       </div>
 
-      {/* Pubkey status */}
-      {!pubkey.registered && claimState.status !== "checking_pubkey" && (
-        <div className="mb-6 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/30 p-4">
-          <div className="flex items-start gap-3">
-            <Key className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium text-amber-700 dark:text-amber-300 mb-1">
-                Encryption pubkey not registered
-              </p>
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                You need to register your BabyJubJub encryption pubkey with
-                JanusToken before you can receive or claim tips.
-              </p>
-            </div>
-          </div>
+      {/* Needs state */}
+      {claimState.status === "needs_state" && (
+        <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/30 dark:bg-amber-950/20 p-4 mb-6">
+          <p className="text-sm text-amber-800 dark:text-amber-200 mb-3">
+            No local shielded state found. Paste your (balance, blinding)
+            below to enable unwrap. For automated testing use{" "}
+            <code className="font-mono text-[10px]">node scripts/v03-smoke.mjs</code>.
+          </p>
+          <PasteShieldedStateForm
+            addr={userAddress!}
+            onSaved={(s) => {
+              setShielded(s);
+              setClaimState({
+                status: "ready",
+                error: null,
+                txId: null,
+                unwrappedFlow: null,
+              });
+            }}
+          />
         </div>
       )}
 
-      {/* Action: Claim Button */}
-      {claimState.status === "ready_to_claim" && (
-        <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            You have accumulated encrypted tips ready to claim. Click the button
-            below to decrypt and withdraw.
-          </p>
+      {/* Unwrap form */}
+      {claimState.status !== "needs_state" && claimState.status !== "success" && (
+        <div className="rounded-xl border border-border bg-card p-6 space-y-4 mb-6">
+          <div>
+            <label className="text-xs font-medium text-muted-foreground mb-1 block">
+              Amount to unwrap (FLOW)
+            </label>
+            <input
+              type="text"
+              value={amountFlow}
+              onChange={(e) => setAmountFlow(e.target.value)}
+              placeholder="e.g. 2"
+              className="w-full px-3 py-2 text-sm border rounded bg-background"
+              disabled={isSubmitting || !shielded}
+            />
+            <p className="text-[10px] text-muted-foreground mt-1">
+              VISIBLE on-chain after unwrap — emitted in JanusFlow.Unwrapped event.
+              For full privacy, send the FLOW to a fresh wallet immediately after.
+            </p>
+          </div>
 
           <Button
-            onClick={handleClaim}
-            size="lg"
+            onClick={handleUnwrap}
             className="w-full"
-            disabled={isSubmitting}
+            size="lg"
+            disabled={isSubmitting || !shielded || !amountFlow}
           >
             {isSubmitting ? (
               <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Claiming tips...
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                {claimState.status === "building_proof"
+                  ? "Building proofs…"
+                  : "Submitting unwrap…"}
               </>
             ) : (
               <>
-                <Coins className="w-4 h-4" />
-                Claim All Tips
+                <Coins className="w-4 h-4 mr-2" />
+                Unwrap to my COA
               </>
             )}
           </Button>
-
-          <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-            <EyeOff className="w-3 h-3" />
-            Per-tipper amounts remain hidden
-          </div>
         </div>
       )}
 
-      {/* Status indicators during processing */}
-      {isSubmitting && (
-        <div className="mt-4 space-y-3">
-          {claimState.status === "building_proof" && (
-            <div className="rounded-lg bg-purple-50 dark:bg-purple-950/30 p-3 text-sm text-purple-700 dark:text-purple-300 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Building decrypt proof...
-            </div>
-          )}
-
-          {claimState.status === "submitting" && (
-            <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 p-3 text-sm text-amber-700 dark:text-amber-300 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Claiming tips on-chain...
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Loading indicator (initial) */}
-      {claimState.status === "checking_pubkey" && (
-        <div className="rounded-lg bg-blue-50 dark:bg-blue-950/30 p-3 text-sm text-blue-700 dark:text-blue-300 flex items-center gap-2">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          Checking encryption setup...
-        </div>
-      )}
-
-      {claimState.status === "loading_slot" && (
-        <div className="rounded-lg bg-blue-50 dark:bg-blue-950/30 p-3 text-sm text-blue-700 dark:text-blue-300 flex items-center gap-2">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          Loading encrypted balance...
-        </div>
-      )}
-
-      {claimState.status === "decrypting" && (
-        <div className="rounded-lg bg-purple-50 dark:bg-purple-950/30 p-3 text-sm text-purple-700 dark:text-purple-300 flex items-center gap-2">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          Decrypting balance (BSGS)...
-        </div>
-      )}
-
-      {/* Success state */}
+      {/* Success */}
       {claimState.status === "success" && (
-        <div className="mt-4 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-6 text-center">
-          <div className="w-12 h-12 rounded-xl bg-emerald-100 dark:bg-emerald-950 flex items-center justify-center mx-auto mb-4">
-            <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
+        <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-6">
+          <div className="flex items-start gap-3 mb-3">
+            <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <div>
+              <h3 className="text-lg font-bold mb-1">Unwrap successful!</h3>
+              <p className="text-xs text-muted-foreground">
+                {claimState.unwrappedFlow} FLOW released to your COA EVM address.
+              </p>
+            </div>
           </div>
-          <h3 className="text-lg font-bold mb-1">Tips Claimed! </h3>
-          <p className="text-sm text-muted-foreground mb-2">
-            {claimState.claimedAmount
-              ? `${claimState.claimedAmount} FLOW deposited to your wallet`
-              : "Tips claimed successfully!"}
-          </p>
-          {claimState.txId && (
-            <p className="text-xs text-muted-foreground font-mono mb-4">
-              Tx: {claimState.txId.slice(0, 18)}...
-            </p>
-          )}
-          <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground mb-4">
+          <p className="font-mono text-[10px] break-all mb-3">{claimState.txId}</p>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <EyeOff className="w-3 h-3" />
-            Per-tipper amounts remain hidden
-          </div>
-          <div className="flex gap-3 justify-center">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => router.push("/tips")}
-            >
-              View Tip History
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                setClaimState({
-                  status: "idle",
-                  error: null,
-                  txId: null,
-                  claimedAmount: null,
-                });
-                setEncryptedSlot(null);
-                setDecryptedBalance(null);
-                setDecryptProofResult(null);
-              }}
-            >
-              Check Again
-            </Button>
+            Remaining shielded balance is still hidden on-chain
           </div>
         </div>
       )}
 
-      {claimState.status === "idle" && !encryptedSlot && (
-        <div className="rounded-lg border border-dashed border-muted-foreground/30 p-8 text-center mt-4">
-          <div className="w-12 h-12 rounded-xl bg-muted flex items-center justify-center mx-auto mb-3">
-            <Gift className="w-6 h-6 text-muted-foreground" />
+      {/* Error */}
+      {claimState.status === "error" && claimState.error && (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-4">
+          <div className="flex items-start gap-3">
+            <XCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-destructive mb-1">
+                Unwrap failed
+              </p>
+              <p className="text-xs text-destructive/80">{claimState.error}</p>
+            </div>
           </div>
-          <p className="text-sm font-medium text-muted-foreground mb-1">
-            No tips to claim yet
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Share your address with friends to start receiving confidential tips
-          </p>
         </div>
       )}
+
+      <div className="mt-8 text-[10px] text-muted-foreground space-y-0.5">
+        <p>SDK: @openjanus/sdk@{SDK_VERSION}</p>
+        <p>JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span></p>
+        <p>PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span></p>
+      </div>
     </div>
   );
 }
 
+// MVP-paste shielded state form — duplicated from send/page.tsx for simplicity.
+function PasteShieldedStateForm({
+  addr,
+  onSaved,
+}: {
+  addr: string;
+  onSaved: (s: ShieldedState) => void;
+}) {
+  const [balanceFlow, setBalanceFlow] = useState("");
+  const [blinding, setBlinding] = useState("");
 
+  const handleSave = () => {
+    try {
+      const balanceWei = parseFlowToWei(balanceFlow).toString();
+      const blindingDec = BigInt(blinding.trim()).toString();
+      const s: ShieldedState = { balanceWei, blinding: blindingDec };
+      saveShieldedState(addr, s);
+      onSaved(s);
+      toast.success("Shielded state saved (session only)");
+    } catch (err) {
+      toast.error("Invalid input", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <input
+        type="text"
+        placeholder="Cleartext balance (FLOW, e.g. 5)"
+        value={balanceFlow}
+        onChange={(e) => setBalanceFlow(e.target.value)}
+        className="w-full px-3 py-2 text-xs font-mono border rounded bg-background"
+      />
+      <input
+        type="text"
+        placeholder="Blinding factor (decimal)"
+        value={blinding}
+        onChange={(e) => setBlinding(e.target.value)}
+        className="w-full px-3 py-2 text-xs font-mono border rounded bg-background"
+      />
+      <Button size="sm" variant="outline" onClick={handleSave} className="w-full">
+        Save (session only)
+      </Button>
+    </div>
+  );
+}
