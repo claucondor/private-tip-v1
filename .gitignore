@@ -1,0 +1,15 @@
+# flow
+emulator-account.pkey
+imports
+.env
+.opencode/
+node_modules/
+
+# operator-private notes — never commit (per operator request 2026-05-27)
+DEMO-READINESS*.md
+
+# next build artifacts
+.next/
+
+# misc
+.tmp_test_script.cdc
