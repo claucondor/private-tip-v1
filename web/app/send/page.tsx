@@ -335,10 +335,14 @@ export default function SendTipPage() {
             Subsequent tips draw down your shielded balance, with amounts
             hidden by Pedersen commitments.
           </p>
-          <p className="text-xs text-muted-foreground font-mono">
-            Wrap on the Cadence CLI: <br />
-            <code>flow transactions send ./cadence/transactions/jf_wrap.cdc ...</code><br />
-            Or run the smoke test: <code>node scripts/v03-smoke.mjs</code>
+          <Link href="/wrap">
+            <Button size="sm" className="w-full">
+              Open Wrap page
+            </Button>
+          </Link>
+          <p className="text-[10px] text-muted-foreground">
+            Alternative: run <code className="font-mono">node scripts/v03-smoke.mjs</code>{" "}
+            from the CLI for fully-automated wrap.
           </p>
           <div className="border-t border-amber-200 dark:border-amber-800 pt-4">
             <p className="text-xs text-muted-foreground mb-2">
