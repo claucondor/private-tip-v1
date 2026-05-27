@@ -1,30 +1,41 @@
-/// Unwrap FLOW via the JanusFlow Cadence router.
+/// Unwrap FLOW from the caller's shielded slot via JanusFlow router (v0.3).
 ///
-/// The router (1) calls EVM JanusToken via the signer's COA with the unwrap calldata,
-/// (2) clears the signer's commitment, and (3) releases FLOW from the router's vault
-/// into `recipient`'s FlowToken vault.
+/// Calls JanusFlow.unwrap(...) which:
+///   1. Calls the EVM JanusFlow proxy via signer's COA to release the claimed
+///      amount to `recipientEVMHex`.
+///   2. Verifies amount-disclose proof (claimedAmount ↔ txCommit) and
+///      confidential-transfer proof (storedCommit = txCommit + newCommit).
 ///
-/// @param claimedAmount  Amount in UFix64 FLOW being unwrapped (matches ZK proof)
-/// @param recipient      Cadence Address to receive the released FLOW
-/// @param calldataHex    ABI-encoded calldata for JanusToken.unwrap(claimedUnits, ...)
+/// claimedAmount and recipient are VISIBLE — this is the unwrap boundary.
+///
+/// @param claimedAmount         UFix64 FLOW being unwrapped
+/// @param recipientEVMHex       EVM hex address to receive the FLOW
+/// @param txCommit              [Cx, Cy] for amount-disclose
+/// @param amountProof           uint256[8] amount-disclose proof
+/// @param transferPublicInputs  uint256[6] [C_old, C_tx, C_new]
+/// @param transferProof         uint256[8] confidential-transfer proof
+/// @param calldataHex           ABI-encoded calldata for JanusFlow.unwrap(...)
+
 import JanusFlow from 0x5dcbeb41055ec57e
 
 transaction(
     claimedAmount: UFix64,
-    recipient: Address,
+    recipientEVMHex: String,
+    txCommit: [UInt256],
+    amountProof: [UInt256],
+    transferPublicInputs: [UInt256],
+    transferProof: [UInt256],
     calldataHex: String
 ) {
-    let signerRef: auth(BorrowValue) &Account
-
     prepare(signer: auth(BorrowValue) &Account) {
-        self.signerRef = signer
-    }
-
-    execute {
         JanusFlow.unwrap(
-            signer: self.signerRef,
+            signer: signer,
             claimedAmount: claimedAmount,
-            recipient: recipient,
+            recipientEVMHex: recipientEVMHex,
+            txCommit: txCommit,
+            amountProof: amountProof,
+            transferPublicInputs: transferPublicInputs,
+            transferProof: transferProof,
             calldataHex: calldataHex
         )
     }
