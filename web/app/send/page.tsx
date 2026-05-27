@@ -39,6 +39,7 @@ import {
   isValidFlowAddress,
   isValidFlowAmount,
   getCoaEvmAddress,
+  recipientHasCoa,
   sendShieldedTipAction,
   formatPoint,
   parseFlowToWei,
@@ -104,6 +105,16 @@ export default function SendTipPage() {
   const [amount, setAmount] = useState("");
   const [memo, setMemo] = useState("");
 
+  // Recipient COA validation (debounced on recipient change). Three states:
+  //   null      — not checked yet (input invalid or empty)
+  //   true      — recipient has a COA at /public/evm; they can unwrap
+  //   false     — no COA; warn user (override possible)
+  const [recipientCoaOk, setRecipientCoaOk] = useState<boolean | null>(null);
+  const [recipientCoaChecking, setRecipientCoaChecking] = useState(false);
+  // Set to true once the user has acknowledged the "no COA" warning,
+  // letting them proceed with the send.
+  const [coaWarningAcknowledged, setCoaWarningAcknowledged] = useState(false);
+
   const [shielded, setShielded] = useState<ShieldedState | null>(null);
   const [sendState, setSendState] = useState<SendState>({
     status: "idle",
@@ -111,6 +122,33 @@ export default function SendTipPage() {
     txId: null,
     newCommit: null,
   });
+
+  // Debounced recipient-COA check. Runs whenever the recipient field becomes
+  // a syntactically valid Flow address, so we can surface the warning BEFORE
+  // the user clicks Send (preventing accidental "stuck" tips).
+  useEffect(() => {
+    setCoaWarningAcknowledged(false);
+    if (!isValidFlowAddress(recipient)) {
+      setRecipientCoaOk(null);
+      return;
+    }
+    let cancelled = false;
+    setRecipientCoaChecking(true);
+    const t = setTimeout(async () => {
+      try {
+        const ok = await recipientHasCoa(recipient);
+        if (!cancelled) setRecipientCoaOk(ok);
+      } catch {
+        if (!cancelled) setRecipientCoaOk(false);
+      } finally {
+        if (!cancelled) setRecipientCoaChecking(false);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [recipient]);
 
   // Load shielded state on user-change.
   useEffect(() => {
@@ -164,6 +202,29 @@ export default function SendTipPage() {
       setSendState({
         status: "error",
         error: "Cannot send a shielded tip to yourself (EVM contract forbids).",
+        txId: null,
+        newCommit: null,
+      });
+      return;
+    }
+
+    // Block send if recipient has no COA AND the user hasn't acknowledged
+    // the warning. The transferred FLOW would land in a COA address the
+    // recipient doesn't control — they would need to set up a COA later to
+    // unwrap. We let them proceed if they explicitly accept the risk
+    // (e.g. they're sending to themselves on a fresh wallet they'll later
+    // set up). recipientCoaOk === null means we never finished checking;
+    // in that case we run a synchronous check here.
+    let coaOk = recipientCoaOk;
+    if (coaOk === null) {
+      coaOk = await recipientHasCoa(recipient);
+      setRecipientCoaOk(coaOk);
+    }
+    if (!coaOk && !coaWarningAcknowledged) {
+      setSendState({
+        status: "error",
+        error:
+          "Recipient has no COA at /public/evm. They cannot unwrap this tip until they set one up. Acknowledge the warning below to proceed anyway.",
         txId: null,
         newCommit: null,
       });
@@ -262,7 +323,16 @@ export default function SendTipPage() {
       });
       toast.error("Send failed", { description: msg });
     }
-  }, [userAddress, shielded, recipient, amount, memo, addSentTip]);
+  }, [
+    userAddress,
+    shielded,
+    recipient,
+    amount,
+    memo,
+    addSentTip,
+    recipientCoaOk,
+    coaWarningAcknowledged,
+  ]);
 
   const isSubmitting =
     sendState.status === "validating" ||
@@ -425,6 +495,49 @@ export default function SendTipPage() {
             className="w-full px-3 py-2 text-sm font-mono border rounded bg-background"
             disabled={isSubmitting || sendState.status === "success"}
           />
+          {/* COA validator: surfaces "no COA" risk BEFORE submit. */}
+          {isValidFlowAddress(recipient) && (
+            <div className="mt-2">
+              {recipientCoaChecking && (
+                <p className="text-[10px] text-muted-foreground">
+                  Checking recipient COA…
+                </p>
+              )}
+              {!recipientCoaChecking && recipientCoaOk === true && (
+                <p className="text-[10px] text-emerald-700 dark:text-emerald-400">
+                  ✓ Recipient has a COA — they can unwrap this tip.
+                </p>
+              )}
+              {!recipientCoaChecking && recipientCoaOk === false && (
+                <div className="rounded border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-950/30 p-2 mt-1">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                    <div className="text-[10px] text-amber-800 dark:text-amber-200 space-y-1">
+                      <p className="font-medium">
+                        Recipient has no COA at /public/evm.
+                      </p>
+                      <p>
+                        They can&apos;t unwrap this tip until they set one up
+                        (e.g. via this app&apos;s /wrap page). The FLOW
+                        will sit in their shielded slot until then.
+                      </p>
+                      <label className="flex items-center gap-1.5 mt-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={coaWarningAcknowledged}
+                          onChange={(e) =>
+                            setCoaWarningAcknowledged(e.target.checked)
+                          }
+                          className="h-3 w-3"
+                        />
+                        <span>Send anyway — I understand the risk.</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <div>
           <label className="text-xs font-medium text-muted-foreground mb-1 block">
