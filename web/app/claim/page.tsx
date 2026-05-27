@@ -196,11 +196,15 @@ export default function ClaimPage() {
         unwrappedFlow: null,
       });
 
+      // Use the atomic bundle: unwrap + sweep COA -> Cadence FlowToken.Vault
+      // in the same transaction. User sees FLOW in their wallet immediately
+      // — no follow-up "withdraw from COA" step.
       const result = await unwrapAction({
         claimedAmountWei: amountWei,
         recipientEvmHex: coaHex,
         oldBalanceWei: oldBalance,
         oldBlinding: BigInt(shielded.blinding),
+        toCadenceVault: true,
       });
 
       // Persist new state
@@ -222,7 +226,7 @@ export default function ClaimPage() {
         unwrappedFlow: formatWeiToFlow(amountWei),
       });
       toast.success("Unwrap successful!", {
-        description: `${formatWeiToFlow(amountWei)} FLOW released to your COA.`,
+        description: `${formatWeiToFlow(amountWei)} FLOW deposited to your Cadence vault.`,
       });
     } catch (err) {
       setClaimState({
@@ -284,7 +288,7 @@ export default function ClaimPage() {
         <div>
           <h1 className="text-2xl font-bold">Unwrap Shielded Balance</h1>
           <p className="text-sm text-muted-foreground">
-            Release FLOW from your shielded slot to your COA (boundary out)
+            FLOW arrives directly in your Cadence vault (one click)
           </p>
         </div>
       </div>
@@ -382,10 +386,14 @@ export default function ClaimPage() {
             ) : (
               <>
                 <Coins className="w-4 h-4 mr-2" />
-                Unwrap to my COA
+                Unwrap to Cadence Vault
               </>
             )}
           </Button>
+          <p className="text-[10px] text-muted-foreground -mt-2">
+            Atomic: EVM unwrap + COA → Cadence vault sweep in a single
+            transaction. No follow-up step.
+          </p>
         </div>
       )}
 
@@ -397,7 +405,7 @@ export default function ClaimPage() {
             <div>
               <h3 className="text-lg font-bold mb-1">Unwrap successful!</h3>
               <p className="text-xs text-muted-foreground">
-                {claimState.unwrappedFlow} FLOW released to your COA EVM address.
+                {claimState.unwrappedFlow} FLOW now in your Cadence vault.
               </p>
             </div>
           </div>
