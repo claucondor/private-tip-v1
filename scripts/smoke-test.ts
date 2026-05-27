@@ -1,39 +1,36 @@
 /**
- * PrivateTip End-to-End Smoke Test (v4 — pre-encoded calldata, small ZK values)
+ * PrivateTip End-to-End Smoke Test (v5 — v0.2.1 UUPS proxy + SCALE fix verified)
  *
  * Architecture:
  *   - BabyJubJub keys derived via HKDF-SHA256 from Flow signing key
- *   - Only Charlie has a COA on this testnet instance (Bob/Dave/Eve have no COA)
  *   - Charlie wraps to herself (self-tip) to demonstrate the full cycle
  *   - ZK circuit uses small integers (1, 2, 3 = FLOW units) NOT attoflow
- *   - Calldata is pre-ABI-encoded with ethers.js to bypass Cadence dynamic-array bug
+ *   - Calldata is pre-ABI-encoded with ethers.js
  *   - Cadence transactions submitted via `flow transactions send` subprocess
- *   - Known on-chain bug: JanusToken.unwrap() releases `amount` wei but checks
- *     publicInputs[6] == amount (small ZK integer) — releases only 6 wei, not 6 FLOW
+ *   - Target: NEW v0.2.1 UUPS proxy at 0x025efe7e89acdb8F315C804BE7245F348AA9c538
+ *     (replaces the old monolithic non-upgradeable JanusToken at 0xb12E600f...)
  *
  * Smoke test flow:
- *   1. Derive Charlie's BabyJubJub keypair from Flow signing key (HKDF-SHA256)
- *   2. Verify Charlie's on-chain pubkey matches derived keypair
- *   3. Charlie wraps 1 unit for herself (unit=1 FLOW on-chain, value=1 in ZK)
- *   4. Charlie wraps 2 units for herself (nonce increments)
- *   5. Charlie wraps 3 units for herself (nonce increments)
- *   6. Charlie reads accumulated slot, BSGS-decrypts total = 6
- *   7. Charlie generates decrypt_open proof for total=6
- *   8. Off-chain proof verification (snarkjs)
- *   9. Charlie calls unwrap() — releases 6 wei (on-chain bug documented)
- *  10. Summary: slot reset confirmed, PrivateTip bug documented
+ *   1. Verify SCALE = 1e18 on the new proxy
+ *   2. Derive Charlie's BabyJubJub keypair from Flow signing key (HKDF-SHA256)
+ *   3. Verify Charlie's on-chain pubkey matches derived keypair
+ *   4. Charlie wraps 1 unit (= 1 FLOW msg.value) for herself
+ *   5. Charlie wraps 2 units for herself (nonce increments)
+ *   6. Charlie wraps 3 units for herself (nonce increments)
+ *   7. Charlie reads accumulated slot, BSGS-decrypts total = 6
+ *   8. Charlie generates decrypt_open proof for total=6
+ *   9. Off-chain proof verification (snarkjs)
+ *  10. Charlie calls unwrap() — recovers ~6 FLOW (SCALE fix in v0.2.1)
+ *  11. Verify FLOW landed back in Charlie's Cadence FlowToken vault
  *
  * Usage:
  *   npx ts-node --transpile-only scripts/smoke-test.ts
  *
- * Known on-chain bugs:
- *   1. JanusToken.unwrap(amount, ...): releases `amount` wei where `amount` must equal
- *      publicInputs[6] (small ZK integer). For amount=6 (6 FLOW units), only 6 attoFLOW
- *      (~0) is transferred. The full 6 FLOW in `locked[]` is irrecoverable without re-deploy.
- *      Root cause: ZK circuit values are in [0,2^48) using whole FLOW units, but the contract
- *      checks publicInputs[6] == amount (in wei). No scaling factor applied.
- *   2. PrivateTip.claimTip(): checks tipRef.recipient == self.account.address (contract
- *      account = Bob/deployer), not the transaction signer. Only Bob-recipient tips claimable.
+ * Fixed bugs in v0.2.1 (verified on-chain by this test):
+ *   ✓ vuln 014: JanusToken.unwrap() unit mismatch — SCALE = 1e18 bridges ZK whole-FLOW
+ *     units to wei. Wrapping 6 FLOW now unlocks ~6 FLOW (minus gas), not 6 wei.
+ *   ✓ vuln 015: PrivateTip.claimTip() signer check — router now binds the claimer
+ *     to the transaction signer via auth-ref. Tested separately in test-router-claim.mjs.
  */
 
 import { execSync } from "child_process";
@@ -49,7 +46,8 @@ import * as path from "path";
 const FLOW_NETWORK = "testnet";
 const EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 const EVM_CHAIN_ID = 545;
-const JANUS_TOKEN_ADDR = "0xb12E600fFcde967210cFD81CF9f32bBB6e68a499";
+// v0.2.1 canonical UUPS proxy — replaces 0xb12E600fFcde967210cFD81CF9f32bBB6e68a499
+const JANUS_TOKEN_ADDR = "0x025efe7e89acdb8F315C804BE7245F348AA9c538";
 
 // Charlie's account (the only account with a COA on this testnet instance)
 const CHARLIE_FLOW_ADDR = "0x3c601a443c81e6cd";
@@ -78,13 +76,14 @@ const COA_CALL_AND_WITHDRAW_TX = path.join(
 
 // JanusToken ABI (only what we need)
 const JANUS_ABI = [
+  "function SCALE() view returns (uint256)",
   "function hasPubkey(address) view returns (bool)",
   "function pubkeyOf(address) view returns (uint256 x, uint256 y)",
   "function slotOf(address) view returns (tuple(uint256 C1x, uint256 C1y, uint256 C2x, uint256 C2y))",
   "function nonce(address) view returns (uint256)",
   "function locked(address) view returns (uint256)",
   "function wrap(address to, tuple(uint256 C1x, uint256 C1y, uint256 C2x, uint256 C2y) ct, uint256 senderNonce, uint[6] publicInputs, uint[8] encryptProof) external payable",
-  "function unwrap(uint256 amount, address recipient, uint[7] publicInputs, uint[8] decryptProof) external",
+  "function unwrap(uint256 claimedUnits, address recipient, uint[7] publicInputs, uint[8] decryptProof) external",
 ];
 
 // ─── BabyJubJub helpers ─────────────────────────────────────────────────────────
@@ -247,8 +246,8 @@ async function main(): Promise<number> {
   const sep = () => console.log("-".repeat(60));
 
   console.log("=".repeat(60));
-  console.log("  PrivateTip + JanusToken Smoke Test v4");
-  console.log("  Flow Testnet | Only Charlie has COA");
+  console.log("  PrivateTip + JanusToken Smoke Test v5 (v0.2.1)");
+  console.log("  Flow Testnet | UUPS proxy + SCALE=1e18 fix");
   console.log("=".repeat(60));
   console.log();
 
@@ -262,8 +261,34 @@ async function main(): Promise<number> {
     return decoded.length === 1 ? decoded[0] : decoded;
   }
 
+  // Cadence FlowToken balance helper — returns raw 1e-8 FLOW units (BigInt)
+  function getCadenceBalance(addr: string): bigint {
+    const out = execSync(`flow accounts get ${addr} --network ${FLOW_NETWORK} -o json`, {
+      encoding: "utf-8",
+      maxBuffer: 20 * 1024 * 1024,
+    });
+    const parsed = JSON.parse(out);
+    const balStr = String(parsed.balance);
+    if (balStr.includes(".")) {
+      const [whole, frac] = balStr.split(".");
+      const fracPadded = (frac + "00000000").slice(0, 8);
+      return BigInt(whole) * 100_000_000n + BigInt(fracPadded);
+    }
+    return BigInt(balStr) * 100_000_000n;
+  }
+
+  // ─── Step 0: Verify SCALE = 1e18 (proves we're on the v0.2.1 fixed proxy) ─
+  console.log("--- Step 0: Verify SCALE constant on new UUPS proxy ---");
+  const scale = await callJanus("SCALE") as bigint;
+  if (scale === 10n ** 18n) {
+    ok(`SCALE() = ${scale} (= 1e18) — vuln 014 fix is active`);
+  } else {
+    fail(`SCALE() = ${scale}, expected 1e18 — wrong proxy or pre-fix impl`);
+    return 1;
+  }
+
   // ─── Step 1: Derive Charlie's keypair ─────────────────────────────────────
-  console.log("--- Step 1: Derive Charlie's BabyJubJub keypair ---");
+  console.log("\n--- Step 1: Derive Charlie's BabyJubJub keypair ---");
   const charlieKeyHex = readFileSync(CHARLIE_PKEY_PATH, "utf-8").trim();
   let charlieKp: { privkey: bigint; pubkey: { x: bigint; y: bigint } };
   try {
@@ -301,16 +326,11 @@ async function main(): Promise<number> {
   const nonce0 = BigInt((await callJanus("nonce", CHARLIE_COA_ADDR) as bigint).toString());
   const lockedPre = BigInt((await callJanus("locked", CHARLIE_COA_ADDR) as bigint).toString());
   const slotPre = await callJanus("slotOf", CHARLIE_COA_ADDR) as { C1x: bigint; C1y: bigint; C2x: bigint; C2y: bigint };
+  const cadBalPre = getCadenceBalance(CHARLIE_FLOW_ADDR);
   info(`Charlie nonce: ${nonce0}`);
   info(`Charlie locked: ${ethers.formatEther(lockedPre)} FLOW`);
+  info(`Charlie Cadence balance: ${(Number(cadBalPre) / 1e8).toFixed(8)} FLOW`);
   info(`Charlie slot identity: ${slotPre.C1x === 0n && slotPre.C1y === 1n && slotPre.C2x === 0n && slotPre.C2y === 1n}`);
-
-  if (lockedPre > 0n) {
-    warn(
-      `Charlie already has ${ethers.formatEther(lockedPre)} FLOW locked ` +
-      `(from previous test run; cannot recover due to unwrap() on-chain bug)`
-    );
-  }
 
   const slotIsIdentity = slotPre.C1x === 0n && slotPre.C1y === 1n && slotPre.C2x === 0n && slotPre.C2y === 1n;
   if (!slotIsIdentity) {
@@ -318,8 +338,9 @@ async function main(): Promise<number> {
   }
 
   // ─── Steps 4-6: Charlie wraps 1, 2, 3 units to herself ───────────────────
-  // ZK circuit uses small integers (1, 2, 3 = FLOW units, NOT attoflow)
-  // Contract wrap() receives msg.value in attoflow (1.0 FLOW, 2.0 FLOW, 3.0 FLOW)
+  // ZK circuit uses small integers (1, 2, 3 = FLOW units) — multiplied by SCALE=1e18
+  // when checked by the unwrap path. Contract wrap() receives msg.value in attoflow
+  // (1.0 FLOW, 2.0 FLOW, 3.0 FLOW).
   const WRAP_AMOUNTS = [
     { units: 1n, flowStr: "1.00000000" },
     { units: 2n, flowStr: "2.00000000" },
@@ -478,24 +499,24 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  // ─── Step 11: Submit unwrap() — document the on-chain bug ─────────────────
-  console.log("\n--- Step 11: Submit unwrap() [on-chain bug documented] ---");
-
-  warn("ON-CHAIN BUG: unwrap(amount, ...) requires publicInputs[6] == amount");
-  warn("  publicInputs[6] = claimed_value from ZK circuit = small integer (e.g. 6)");
-  warn("  JanusToken.locked[msg.sender] = attoFLOW (6 * 10^18 wei)");
-  warn("  calling unwrap(6, ...) passes the proof check but releases only 6 wei");
-  warn("  The full 6 FLOW in locked[] is irrecoverable without re-deploying JanusToken");
-  warn("  FIX: contract should check publicInputs[6] == amount / SCALE_FACTOR");
-  warn("       where SCALE_FACTOR = 10^18 (attoFLOW per FLOW unit)");
+  // ─── Step 11: Submit unwrap() — SCALE fix means FLOW recovers fully ──────
+  console.log("\n--- Step 11: Submit unwrap() (v0.2.1 SCALE fix → real FLOW recovery) ---");
 
   const proof8 = packProof(proofResult.proof);
   const pubInputs7 = proofResult.publicSignals.map((s: string) => BigInt(s)) as bigint[];
 
-  // Pre-encode unwrap() calldata with ethers.js
+  // SANITY: publicInputs[6] must equal `total` (claimedUnits in whole FLOW units)
+  if (pubInputs7[6] !== total) {
+    fail(`publicInputs[6] (${pubInputs7[6]}) != claimedUnits (${total})`);
+    return 1;
+  }
+  ok(`publicInputs[6] (${pubInputs7[6]}) == claimedUnits (${total})`);
+
+  // Pre-encode unwrap() calldata. With the v0.2.1 SCALE fix the contract releases
+  // `claimedUnits * SCALE` wei (= 1 FLOW per unit) — not 1 wei per unit.
   const unwrapCalldata = janusIface
     .encodeFunctionData("unwrap", [
-      total,           // amount = small ZK integer (releases only `total` wei, not `total` FLOW)
+      total,                  // claimedUnits = small ZK integer (whole FLOW units)
       CHARLIE_COA_ADDR,
       pubInputs7,
       proof8,
@@ -505,56 +526,64 @@ async function main(): Promise<number> {
   const unwrapArgsJson = [
     { type: "String", value: JANUS_TOKEN_ADDR },
     { type: "String", value: unwrapCalldata },
-    { type: "UInt64", value: "500000" },
+    { type: "UInt64", value: "800000" },
   ];
 
-  info(`Submitting unwrap tx (amount=${total}, will release ${total} wei ≈ 0 FLOW)...`);
+  info(`Submitting unwrap tx (claimedUnits=${total} → expect ${total} FLOW release)...`);
   const unwrapResult = flowTx(COA_CALL_AND_WITHDRAW_TX, unwrapArgsJson, CHARLIE_SIGNER);
   if (unwrapResult.error) {
-    fail(`Unwrap tx failed: ${unwrapResult.error.slice(0, 200)}`);
-    // Don't return — we can still pass the test since this is a known bug
-    warn("Unwrap tx failed — possibly Charlie's prior slot was already reset by previous unwrap");
-    warn("Or the proof does not match current on-chain slot state");
-  } else {
-    ok(`Unwrap tx sealed: txId=${unwrapResult.txId}`);
-    info(`[TxHash] unwrap: ${unwrapResult.txId}`);
-    warn(`Unwrap released only ${total} wei (not ${total} FLOW) due to on-chain bug`);
+    fail(`Unwrap tx failed: ${unwrapResult.error.slice(0, 400)}`);
+    return 1;
   }
+  ok(`Unwrap tx sealed: txId=${unwrapResult.txId}`);
+  info(`[TxHash] unwrap: ${unwrapResult.txId}`);
 
-  // ─── Step 12: Verify post-unwrap state ─────────────────────────────────────
-  console.log("\n--- Step 12: Verify post-unwrap slot state ---");
+  // ─── Step 12: Verify post-unwrap state + FLOW recovery ───────────────────
+  console.log("\n--- Step 12: Verify post-unwrap state + FLOW recovery ---");
   const slotFinal = await callJanus("slotOf", CHARLIE_COA_ADDR) as { C1x: bigint; C1y: bigint; C2x: bigint; C2y: bigint };
   const lockedFinal = BigInt((await callJanus("locked", CHARLIE_COA_ADDR) as bigint).toString());
+  const cadBalPost = getCadenceBalance(CHARLIE_FLOW_ADDR);
 
   const slotReset = slotFinal.C1x === 0n && slotFinal.C1y === 1n && slotFinal.C2x === 0n && slotFinal.C2y === 1n;
   if (slotReset) {
-    ok("Slot reset to identity (0,1,0,1) — unwrap proof was valid, ciphertext cleared");
+    ok("Slot reset to identity (0,1,0,1)");
   } else {
-    warn("Slot not reset — unwrap may not have been submitted or proof mismatch");
-    info(`  Slot C1x=${slotFinal.C1x}, C1y=${slotFinal.C1y}`);
+    fail(`Slot NOT reset: C1x=${slotFinal.C1x}`);
   }
 
-  info(`Locked after unwrap: ${ethers.formatEther(lockedFinal)} FLOW`);
-  if (lockedFinal > 0n) {
-    warn(`${ethers.formatEther(lockedFinal)} FLOW remains locked (on-chain bug: only ${total} wei released)`);
-    warn("This FLOW is permanently locked without JanusToken re-deployment");
+  // Locked should have decreased by `total * SCALE` (= total FLOW * 1e18 atto)
+  const expectedLockedDecrease = total * scale;
+  const lockedDecrease = lockedPost - lockedFinal;
+  if (lockedDecrease === expectedLockedDecrease) {
+    ok(`locked decreased by exactly ${total} FLOW (${expectedLockedDecrease} attoFLOW)`);
+  } else {
+    fail(`locked decrease ${lockedDecrease} != expected ${expectedLockedDecrease}`);
   }
 
-  // ─── Step 13: PrivateTip metadata note ────────────────────────────────────
-  console.log("\n--- Step 13: PrivateTip on-chain bug (documented) ---");
-  warn("PRIVATETIP BUG: claimTip() checks tipRef.recipient == self.account.address");
-  warn("  self.account.address = the PrivateTip contract deployer (Bob = d807a3992d7be612)");
-  warn("  Only tips where recipient = Bob (deployer) can be claimed");
-  warn("  Tips to Charlie, Dave, Eve cannot be claimed");
-  warn("  FIX: change check to use transaction signer address, not contract account address");
+  // FLOW recovery: Cadence balance delta = -wrapped + recovered - gas ≈ -gas
+  // Pre-fix would show delta ≈ -6 FLOW; post-fix should be > -0.5 FLOW (only gas).
+  const cadDelta = cadBalPost - cadBalPre;
+  const cadDeltaFlow = Number(cadDelta) / 1e8;
+  info(`Cadence balance pre:  ${(Number(cadBalPre) / 1e8).toFixed(8)} FLOW`);
+  info(`Cadence balance post: ${(Number(cadBalPost) / 1e8).toFixed(8)} FLOW`);
+  info(`Cadence delta:        ${cadDeltaFlow.toFixed(8)} FLOW (wrapped ${Number(total)}, gas ≈ -0.05)`);
+
+  // GATE: with SCALE fix, delta should be > -0.5 FLOW (only gas spent).
+  // Pre-fix bug would have delta ≈ -6 FLOW (whole wrap lost).
+  if (cadDeltaFlow > -0.5) {
+    ok(`FLOW RECOVERED: delta ${cadDeltaFlow.toFixed(8)} FLOW (≈ -gas only, NOT -${Number(total)} FLOW)`);
+  } else {
+    fail(`FLOW NOT RECOVERED: delta ${cadDeltaFlow.toFixed(8)} FLOW looks like pre-fix bug`);
+  }
 
   // ─── Final summary ─────────────────────────────────────────────────────────
   sep();
   console.log("=".repeat(60));
-  console.log("  SMOKE TEST SUMMARY");
+  console.log("  SMOKE TEST SUMMARY (v0.2.1)");
   console.log("=".repeat(60));
   console.log(`  Charlie COA:     ${CHARLIE_COA_ADDR}`);
-  console.log(`  JanusToken:      ${JANUS_TOKEN_ADDR}`);
+  console.log(`  JanusToken UUPS: ${JANUS_TOKEN_ADDR}`);
+  console.log(`  SCALE:           ${scale} (= 1e18)`);
   console.log();
   console.log("  Transaction hashes:");
   wrapTxIds.forEach((txId, i) => {
@@ -564,23 +593,19 @@ async function main(): Promise<number> {
     console.log(`    unwrap (${total} units): ${unwrapResult.txId}`);
   }
   console.log();
-  console.log("  ZK circuit verifications:");
-  console.log(`    Encrypt proofs (3x): PASS`);
-  console.log(`    Decrypt proof (total=${total}): PASS`);
-  console.log(`    Off-chain snarkjs verify: PASS`);
-  console.log(`    BSGS decrypt: ${total} units`);
-  console.log();
-  console.log("  Known on-chain bugs (require re-deployment to fix):");
-  console.log("    1. JanusToken.unwrap(): releases `amount` wei where amount = circuit claimed_value");
-  console.log("       ZK circuit range [0,2^48) uses whole-FLOW units; contract needs attoFLOW.");
-  console.log("       6 FLOW wrapped → locked=6*10^18 → unwrap(6) releases 6 wei, not 6 FLOW.");
-  console.log("    2. PrivateTip.claimTip(): checks contract account address, not tx signer.");
+  console.log("  Verifications:");
+  console.log(`    SCALE = 1e18:              PASS (v0.2.1 vuln 014 fix active)`);
+  console.log(`    Encrypt proofs (3x):       PASS`);
+  console.log(`    BSGS decrypt total:        ${total} units`);
+  console.log(`    Decrypt proof:             PASS`);
+  console.log(`    Off-chain snarkjs verify:  PASS`);
+  console.log(`    Slot reset post-unwrap:    ${slotReset ? "PASS" : "FAIL"}`);
+  console.log(`    FLOW recovery:             delta ${cadDeltaFlow.toFixed(8)} FLOW`);
   console.log();
 
   if (failures === 0) {
     console.log("  RESULT: ALL ASSERTIONS PASSED");
-    console.log("  Core cycle (wrap × 3 → BSGS decrypt → ZK prove → verify) works correctly.");
-    console.log("  FLOW recovery blocked by on-chain bug #1 — documented above.");
+    console.log("  Full cycle (wrap × 3 → BSGS → ZK prove → unwrap → FLOW recover) works.");
   } else {
     console.error(`  RESULT: ${failures} ASSERTION(S) FAILED`);
   }
