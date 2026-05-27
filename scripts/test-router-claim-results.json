@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-05-27T00:09:02.336Z",
+  "router": "0xb9ac529c14a4c5a1",
+  "tipID": "3",
+  "txHashes": {
+    "sendTip": "47b5e86b5589e7278f37ffc9cbec9f36dcc011e31a6e15f885a7f62810919927",
+    "bobAttempt": "993abc445efcb3b0c1532ddcf7ed686baa6b09217fd654d2a0b3a52ac453a1a3",
+    "aliceClaim": "51f72a1aa889c401315260f186383f30beceec0e2563048fa0c44e46393a743e"
+  },
+  "failures": 0,
+  "verdict": "PASS"
+}
