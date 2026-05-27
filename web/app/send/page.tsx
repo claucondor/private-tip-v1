@@ -47,6 +47,7 @@ import {
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   SDK_VERSION,
+  getRecipientMemoPubkey,
   type Point,
 } from "@/lib/tip-actions";
 
@@ -264,6 +265,23 @@ export default function SendTipPage() {
       return;
     }
 
+    // v0.4.1: if the user typed a memo, the recipient MUST have a published
+    // MemoKey at /public/openjanusMemoKey — otherwise we can't encrypt to them.
+    let recipientMemoPubkey: Point | null = null;
+    if (memo && memo.length > 0) {
+      recipientMemoPubkey = await getRecipientMemoPubkey(recipient);
+      if (!recipientMemoPubkey) {
+        setSendState({
+          status: "error",
+          error:
+            "Recipient has no MemoKey published. They must run setup_account first to receive encrypted memos. Send without a memo, or ask them to set up their account.",
+          txId: null,
+          newCommit: null,
+        });
+        return;
+      }
+    }
+
     setSendState({
       status: "building_proof",
       error: null,
@@ -285,6 +303,7 @@ export default function SendTipPage() {
         oldBalanceWei,
         oldBlinding: BigInt(shielded.blinding),
         memo: memo || undefined,
+        recipientMemoPubkey: recipientMemoPubkey ?? undefined,
       });
 
       // PERSIST new (balance, blinding) so next tip works.
@@ -552,7 +571,7 @@ export default function SendTipPage() {
             disabled={isSubmitting || sendState.status === "success"}
           />
           <p className="text-[10px] text-muted-foreground mt-1">
-            Hidden on-chain. Visible only to you (sender) and your recipient (after decrypt).
+            Amount HIDDEN on-chain. You know what you sent. Recipient sees only their AGGREGATED balance (sum of all tips received) — never per-sender amounts. This is the feature for tips.
           </p>
         </div>
         <div>

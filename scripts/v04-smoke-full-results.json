@@ -1,0 +1,54 @@
+{
+  "test": "v04-smoke-full",
+  "startedAt": "2026-05-27T20:55:33.475Z",
+  "privateTip": "0xb9ac529c14a4c5a1",
+  "janusFlowEVM": "0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078",
+  "janusFlowCadence": "0x5dcbeb41055ec57e",
+  "alice": {
+    "flow": "0x7599043aea001283",
+    "coa": "0x000000000000000000000002b7557ee5d4a32d06",
+    "memoPubkeyX": "21527720066646706365106453101426033061895327353249917708375122176010375146340",
+    "memoPubkeyY": "16759998269392263327967455667538860925864128438575011905913234761979482297713"
+  },
+  "bob": {
+    "flow": "0xd807a3992d7be612",
+    "coa": "0x00000000000000000000000250d93efba617e0bf",
+    "memoPubkeyX": "13976256321573141789875700911686523010274047119926419599101189269673895591117",
+    "memoPubkeyY": "4704850732462692493443366898294639747802045329054437624393917570702432659177",
+    "vaultBefore": "82.85890000",
+    "vaultAfter": "84.85600000"
+  },
+  "txHashes": {
+    "resetAlice": "ed42f1771cbb77464e64f70f86667965c1d190a52a6c54c2e8a88d2f9b777d52",
+    "resetBob": "69ea68586ecd7fb033a9328c413f3db7306ec55253d4ffc23f84789c998fe7a4",
+    "setupAlice": "2093977a62c10fee75968c6db30c1df8dab411ea81745401b85a35d5c3ad99be",
+    "setupBob": "6c061f0cdbc423ffa643e752d8a275b2907ad3293b103625bd6f46658832bf8a",
+    "wrap": "9422d233f536c42125cea7509e8c5fa67a9329ca57c7ad7d360b656b86c8f46d",
+    "tip": "efe2c623ff8e746679ea53d550bc1f13bd55c5b6f79221ee457c9fc838d28982",
+    "unwrap": "9f2690fac9131dbc682850e7894107a28092dae66058520bb14dbc0c35dd51ea"
+  },
+  "privacyChecks": {
+    "tip_event_fields": [
+      "tipID",
+      "sender",
+      "recipient",
+      "timestamp",
+      "ciphertextRef",
+      "memoCiphertext",
+      "memoEphPubkeyX",
+      "memoEphPubkeyY"
+    ],
+    "plaintextNotInPayload": true
+  },
+  "memoChecks": {
+    "plaintextOriginal": "private hello bob",
+    "ciphertextLen": 45,
+    "ephPubkeyX": "11108986210282819159849672913408985851989454789130173714822156486419104436694",
+    "ephPubkeyY": "987246971496602979734045688338045005702031435714636541712895210091687095101",
+    "bobDecrypted": true,
+    "bobDecryptedText": "private hello bob",
+    "attackerRejected": true
+  },
+  "completedAt": "2026-05-27T21:00:15.517Z",
+  "failures": 0
+}

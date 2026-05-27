@@ -65,6 +65,7 @@ import {
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   SDK_VERSION,
+  TX_SETUP_COA,
   type Point,
   type WrapSource,
 } from "@/lib/tip-actions";
@@ -208,29 +209,15 @@ export default function WrapPage() {
   }, [userAddress]);
 
   // -- COA setup handler -----------------------------------------------------
-
-  const SETUP_COA_CDC = `
-import "EVM"
-
-transaction {
-    prepare(signer: auth(SaveValue, IssueStorageCapabilityController, PublishCapability) &Account) {
-        if signer.storage.borrow<&EVM.CadenceOwnedAccount>(from: /storage/evm) != nil {
-            return
-        }
-        let coa <- EVM.createCadenceOwnedAccount()
-        signer.storage.save(<-coa, to: /storage/evm)
-        let cap = signer.capabilities.storage.issue<&EVM.CadenceOwnedAccount>(/storage/evm)
-        signer.capabilities.publish(cap, at: /public/evm)
-    }
-}
-`;
+  //
+  // Uses SDK's canonical TX_SETUP_COA (idempotent — early-returns if COA exists).
 
   const handleSetupCoa = useCallback(async () => {
     setSettingUpCoa(true);
     try {
       const fcl = await import("@onflow/fcl");
       const txId = await fcl.mutate({
-        cadence: SETUP_COA_CDC,
+        cadence: TX_SETUP_COA,
         proposer: fcl.authz,
         payer: fcl.authz,
         authorizations: [fcl.authz],
@@ -239,9 +226,7 @@ transaction {
       toast.info(`COA setup tx submitted: ${txId.slice(0, 10)}...`);
       await fcl.tx(txId).onceSealed();
       toast.success("COA created! Reloading...");
-      // Trigger reload of the useEffect by toggling needsCoaSetup
       setNeedsCoaSetup(false);
-      // Refetch COA
       if (userAddress) {
         const coa = await getCoaEvmAddress(userAddress);
         setCoaHex(coa);
@@ -255,7 +240,7 @@ transaction {
     } finally {
       setSettingUpCoa(false);
     }
-  }, [userAddress, SETUP_COA_CDC]);
+  }, [userAddress]);
 
   // -- Wrap handler ----------------------------------------------------------
 

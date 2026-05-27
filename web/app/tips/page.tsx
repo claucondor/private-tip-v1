@@ -45,12 +45,13 @@ import {
 
 type TipFilter = "all" | "received" | "sent";
 
+// v0.4.1 clean break: TipMetadata no longer carries `memo` — encrypted memos
+// live in TipSentShielded event logs only.
 interface RawTipMetadata {
   tipID: string | number;
   sender: string;
   recipient: string;
   timestamp: string;
-  memo: string | null;
 }
 
 interface TipMetadata {
@@ -58,7 +59,6 @@ interface TipMetadata {
   sender: string;
   recipient: string;
   timestamp: number;     // Unix epoch seconds
-  memo: string | null;
 }
 
 function normalizeTip(raw: RawTipMetadata): TipMetadata {
@@ -67,7 +67,6 @@ function normalizeTip(raw: RawTipMetadata): TipMetadata {
     sender: raw.sender,
     recipient: raw.recipient,
     timestamp: Number(raw.timestamp),
-    memo: raw.memo,
   };
 }
 
@@ -203,10 +202,11 @@ export default function TipsPage() {
         <div className="flex items-start gap-2">
           <Shield className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
           <p className="text-xs text-emerald-700 dark:text-emerald-300">
-            <strong>Amount info comes from cipher decryption (offline).</strong>{" "}
-            On-chain you see only TipSentShielded events with sender, recipient,
-            memo, and ciphertextRef. Reconstruct amounts using your locally-
-            stored blinding factors.
+            <strong>Amounts hidden; memos encrypted (v0.4.1).</strong>{" "}
+            On-chain TipSentShielded events carry sender, recipient,
+            ciphertextRef, and an AES-GCM-encrypted memo blob. Only the
+            recipient (via their MemoKey privkey) can decrypt the memo.
+            Reconstruct amounts using your locally-stored blinding factors.
           </p>
         </div>
       </div>
@@ -349,12 +349,16 @@ function TipCard({
             </span>
           </div>
 
-          {tip.memo && (
-            <div className="flex items-start gap-1.5 text-sm">
-              <MessageSquare className="w-3.5 h-3.5 text-muted-foreground shrink-0 mt-0.5" />
-              <p className="text-xs text-muted-foreground italic">
-                &ldquo;{tip.memo}&rdquo;
-              </p>
+          {/*
+            v0.4.1: encrypted memos live in TipSentShielded event logs only.
+            Decryption requires retrieving the log + the recipient's MemoKey
+            privkey + decryptText(). Out of scope for this list view; see the
+            future memo-modal flow.
+          */}
+          {isReceived && (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+              <span className="italic">Memo encrypted in event log</span>
             </div>
           )}
         </div>

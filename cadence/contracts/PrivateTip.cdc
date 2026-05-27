@@ -1,38 +1,34 @@
-// PrivateTip.cdc — v0.3 orchestrator router (pure orchestrator over JanusFlow).
+// PrivateTip.cdc — v0.4.1 orchestrator with encrypted memos.
 //
-// Architecture:
-//   v0.3 PrivateTip is a PURE ORCHESTRATOR. It does NOT custody FlowToken.
-//   The shielded value transfer is done by JanusFlow.shieldedTransfer (which in
-//   turn calls the EVM JanusFlow proxy via the signer's COA). PrivateTip only
-//   records the (sender, recipient, memo, timestamp) tuple so indexers can list
-//   "what tips did X receive" without ever learning amounts.
+// v0.4.1 clean-break changes from v0.3:
 //
-//   PrivateTip      = router + metadata records + pause flag (no escrow in v0.3)
-//   PrivateTipImpl  = pure-logic impl (stateless)
-//   IPrivateTipImpl = interface
+//   * MemoKey resource — each user mints once via createMemoKey(); stores their
+//     BabyJubJub keypair at /storage/openjanusMemoKey. Senders read the
+//     /public/openjanusMemoKey capability to encrypt memos that only the
+//     recipient can decrypt.
 //
-// Privacy model (v0.3):
-//   - Amount per tip: HIDDEN ON-CHAIN. Not in TipRecord (amount = 0.0 sentinel),
-//     not in TipSentShielded event. The amount lives only in the JanusFlow EVM
-//     proxy's Pedersen commitment update, which leaks ONLY (from, to) — see
-//     audits-kb v0.3 privacy validation.
-//   - Sender → recipient relationship: VISIBLE.
-//   - Memo: VISIBLE (max 280 chars).
-//   - ciphertextRef (Pedersen C_tx point): ONLY in the TipSentShielded event
-//     (not in storage). Under the perfect-hiding property of Pedersen, no info
-//     about the amount can be recovered without the blinding factor (which
-//     never leaves the sender's wallet).
+//   * TipSentShielded event schema replaced (CLEAN BREAK — testnet only).
+//     The String? memo field is GONE. Replaced by:
+//         memoCiphertext     : [UInt8]   AES-GCM ciphertext (iv||ct||tag)
+//         memoEphPubkeyX/Y   : UInt256   sender's ephemeral BabyJub pubkey
+//     The plaintext memo NEVER touches the chain in v0.4.1.
 //
-// Pre-condition for users: pre-fund JanusFlow slot ONCE via JanusFlow.wrap(...).
-// Recipients unwrap from their JanusFlow slot when they want to cash out
-// (NOT a per-tip claim).
+//   * recordTip(...) signature accepts the encrypted payload instead of the
+//     plaintext String?.
 //
-// Backward compat:
-//   v0.2 storage fields are KEPT (Cadence upgrade validator requires it). The
-//   legacy `sendTip` / `claimTip` functions are REMOVED. Existing TipRecord
-//   entries from v0.2 remain readable; distinguishable from v0.3 records by
-//   `amount > 0.0`. Any leftover v0.2 tipVaults are drainable via
-//   `adminDrainLegacyVault` (testnet only).
+// Architecture (unchanged from v0.3):
+//   PrivateTip is a PURE ORCHESTRATOR over JanusFlow. It does NOT custody
+//   FlowToken. The shielded value transfer happens via JanusFlow.shieldedTransfer
+//   in the SAME Cadence transaction. PrivateTip only records metadata so
+//   indexers can answer "what tips did X send/receive" without ever learning
+//   amounts OR the memo content.
+//
+// Privacy model (v0.4.1):
+//   - Amount per tip:        HIDDEN (JanusFlow Pedersen commit).
+//   - Sender → recipient:    VISIBLE (still public).
+//   - Memo content:          HIDDEN (only recipient can decrypt).
+//   - Memo presence:         VISIBLE (ciphertext length is observable).
+//   - ciphertextRef:         EVENT ONLY (not in storage).
 //
 // Deployed at: 0xb9ac529c14a4c5a1 (openjanus-privatetip-router).
 
@@ -53,54 +49,45 @@ access(all) contract PrivateTip {
     // ─── Storage Paths ──────────────────────────────────────────────────────────
 
     access(all) let AdminStoragePath: StoragePath
-    access(all) let TipsCustodyVaultPath: StoragePath  // reserved (unused in v0.3)
+    access(all) let TipsCustodyVaultPath: StoragePath  // reserved (unused)
+
+    // v0.4.1 MemoKey paths exposed as functions (NOT new contract fields —
+    // adding new `let` fields would require init() to re-run, which Cadence
+    // does not do on upgrade. View functions are free to add post-deploy.)
+    access(all) view fun memoKeyStoragePath(): StoragePath {
+        return /storage/openjanusMemoKey
+    }
+    access(all) view fun memoKeyPublicPath(): PublicPath {
+        return /public/openjanusMemoKey
+    }
 
     // ─── State — KEPT for Cadence upgrade compat ────────────────────────────────
-    // The Cadence upgrade validator requires storage fields to remain in place.
-    // We keep them all; the v0.3 orchestrator path stops writing/reading the
-    // legacy fields beyond what's needed for backward queries.
+    // The Cadence upgrade validator requires existing storage fields to remain.
+    // We KEEP every v0.2/v0.3 field; v0.4.1 just adds new behavior on top.
 
-    /// Monotonically-increasing counter for tipIDs.
     access(self) var nextTipID: UInt64
-
-    /// Tip record per tipID. In v0.3 we keep this dict and use `amount == 0.0`
-    /// as the sentinel meaning "shielded tip — amount is HIDDEN on-chain (lives
-    /// in JanusFlow Pedersen commitment)". Pre-existing v0.2 records have
-    /// `amount > 0.0` and remain readable as before.
     access(self) var tips: {UInt64: TipRecord}
-
-    /// LEGACY v0.2 FLOW custody. Drained via adminDrainLegacyVault in v0.3.
-    /// New v0.3 tips NEVER write here.
     access(self) var tipVaults: @{UInt64: FlowToken.Vault}
-
-    /// Index: tipIDs grouped by recipient (covers BOTH v0.2 and v0.3 tips).
     access(self) var tipsByRecipient: {Address: [UInt64]}
-
-    /// Index: tipIDs grouped by sender (covers BOTH v0.2 and v0.3 tips).
     access(self) var tipsBySender: {Address: [UInt64]}
-
-    /// Cumulative FLOW held in legacy v0.2 custody (drains to 0 as admin clears).
     access(self) var totalLocked: UFix64
-
-    // ─── State — Router/Admin ───────────────────────────────────────────────────
-
-    /// Emergency-stop flag. When true, recordTip is blocked.
     access(self) var paused: Bool
-
-    /// Active impl version string. Updated to "0.3.0" on first orchestrator deploy.
     access(self) var activeImplVersion: String
-
-    /// Pending impl swap: new version (nil = no pending swap).
     access(self) var pendingImplVersion: String?
-
-    /// Unix timestamp after which the pending impl swap can be finalized (48h lock).
     access(self) var pendingImplUnlockAt: UFix64
 
     // ─── Events ─────────────────────────────────────────────────────────────────
+    //
+    // CLEAN-BREAK v0.4.1 NOTE: TipSentShielded now omits `memo: String?` and
+    // adds an encrypted-memo blob + ephemeral pubkey. Pre-v0.4.1 test tips on
+    // testnet are now unreadable via this event (acceptable per operator —
+    // testnet only). On-chain TipRecord entries created pre-v0.4.1 retain
+    // their plaintext memos in storage but are NOT exposed in shielded views.
+    //
+    // The legacy v0.2 TipSent / TipClaimed events are KEPT (Cadence forbids
+    // removing event declarations on upgrade).
 
-    /// LEGACY v0.2 event. KEPT for upgrade compat (Cadence forbids event
-    /// declaration removal). v0.3 code path never emits this; pre-existing
-    /// v0.2 indexers continue to see only the historical TipSent events.
+    /// LEGACY v0.2 — kept for upgrade compat. NEVER emitted post-v0.3.
     access(all) event TipSent(
         tipID: UInt64,
         sender: Address,
@@ -110,9 +97,8 @@ access(all) contract PrivateTip {
         memo: String?
     )
 
-    /// LEGACY v0.2 event. KEPT for upgrade compat. Emitted ONLY by the
-    /// adminDrainLegacyVault path (and historical v0.2 claims). v0.3 has
-    /// no per-tip claim concept.
+    /// LEGACY v0.2 — kept for upgrade compat. Emitted only by
+    /// adminDrainLegacyVault (and historical v0.2 claims).
     access(all) event TipClaimed(
         tipID: UInt64,
         recipient: Address,
@@ -120,17 +106,29 @@ access(all) contract PrivateTip {
         timestamp: UFix64
     )
 
-    /// v0.3 shielded-tip event. NO amount field — the amount is hidden in
-    /// JanusFlow. ciphertextRef = [C_tx.x, C_tx.y] = Pedersen commit of
-    /// (transferAmount, blinding). Under Pedersen perfect-hiding, this point
-    /// leaks NO amount info without the blinding factor.
+    /// v0.4.1 shielded-tip event — encrypted memo (CLEAN BREAK from v0.3).
+    ///
+    /// Fields:
+    ///   tipID            — sequential identifier
+    ///   sender           — Cadence address (public)
+    ///   recipient        — Cadence address (public)
+    ///   timestamp        — block timestamp
+    ///   ciphertextRef    — Pedersen C_tx point (Cx, Cy) — opaque under
+    ///                      perfect-hiding; no amount info recoverable.
+    ///   memoCiphertext   — AES-GCM ciphertext frame (iv||ct||tag); empty
+    ///                      array = no memo.
+    ///   memoEphPubkeyX/Y — sender's ephemeral BabyJub pubkey; recipient does
+    ///                      ECDH against their MemoKey privkey to derive the
+    ///                      AES key.
     access(all) event TipSentShielded(
         tipID: UInt64,
         sender: Address,
         recipient: Address,
         timestamp: UFix64,
         ciphertextRef: [UInt256],
-        memo: String?
+        memoCiphertext: [UInt8],
+        memoEphPubkeyX: UInt256,
+        memoEphPubkeyY: UInt256
     )
 
     /// Emitted when admin drains a leftover v0.2 tipVault.
@@ -146,16 +144,71 @@ access(all) contract PrivateTip {
     access(all) event ImplSwapped(oldVersion: String, newVersion: String)
     access(all) event ImplSwapCancelled()
 
+    /// Emitted when a user publishes (or rotates) their memo encryption pubkey.
+    access(all) event MemoKeyPublished(
+        owner: Address,
+        pubkeyX: UInt256,
+        pubkeyY: UInt256
+    )
+
+    // ─── MemoKey Resource ───────────────────────────────────────────────────────
+
+    /// Per-user BabyJubJub keypair for memo encryption.
+    ///
+    /// Storage layout:
+    ///   /storage/openjanusMemoKey            — &MemoKey (private; holds privkey)
+    ///   /public/openjanusMemoKey             — &{MemoKeyPublic} (read-only pubkey)
+    ///
+    /// The privkey NEVER leaves the resource. Callers retrieve it via
+    /// `withPrivkey<R>(...)` style helpers but in v0.4.1 the simplest pattern
+    /// is: recipient signs a transaction that reads the privkey AND decrypts
+    /// the memo locally (no public privkey getter). For the v0.4.1 MVP we
+    /// expose `borrowPrivkey()` so the browser-side decryption flow can pull
+    /// the scalar via FCL — this is acceptable because the privkey is only
+    /// readable by the resource's owner (no published capability to it).
+    access(all) resource interface MemoKeyPublic {
+        access(all) view fun getPubkeyX(): UInt256
+        access(all) view fun getPubkeyY(): UInt256
+    }
+
+    access(all) resource MemoKey: MemoKeyPublic {
+        access(self) let privkey: UInt256
+        access(self) let pubkeyX: UInt256
+        access(self) let pubkeyY: UInt256
+
+        init(privkey: UInt256, pubkeyX: UInt256, pubkeyY: UInt256) {
+            self.privkey = privkey
+            self.pubkeyX = pubkeyX
+            self.pubkeyY = pubkeyY
+        }
+
+        /// Public — anyone with the public capability can read the pubkey.
+        access(all) view fun getPubkeyX(): UInt256 { return self.pubkeyX }
+        access(all) view fun getPubkeyY(): UInt256 { return self.pubkeyY }
+
+        /// Private — only callers with a direct storage borrow (i.e. the
+        /// owner's signed transaction) can read this. NOT exposed via any
+        /// published capability.
+        access(all) view fun borrowPrivkey(): UInt256 { return self.privkey }
+    }
+
+    /// Mint a fresh MemoKey resource. The caller is responsible for saving it
+    /// to /storage/openjanusMemoKey and publishing the public capability at
+    /// /public/openjanusMemoKey.
+    ///
+    /// The privkey + pubkey are generated OFF-CHAIN (typically in the user's
+    /// browser via @openjanus/sdk's generateBabyJubKeypair) and passed in as
+    /// arguments. This avoids requiring Cadence-side BabyJub arithmetic.
+    access(all) fun createMemoKey(
+        privkey: UInt256,
+        pubkeyX: UInt256,
+        pubkeyY: UInt256
+    ): @MemoKey {
+        return <- create MemoKey(privkey: privkey, pubkeyX: pubkeyX, pubkeyY: pubkeyY)
+    }
+
     // ─── Tip Record (FROZEN shape for storage compat) ───────────────────────────
 
-    /// TipRecord stores both legacy v0.2 escrow tips and v0.3 shielded tips.
-    /// Discriminator:
-    ///   v0.2: amount > 0.0 (was the per-tip FlowToken vault balance)
-    ///   v0.3: amount == 0.0 (sentinel — amount is hidden in JanusFlow)
-    ///
-    /// Storage compatibility: field set IDENTICAL to v0.2 (Cadence upgrade
-    /// validator forbids adding fields to existing structs). The v0.3
-    /// ciphertextRef is carried in the TipSentShielded event ONLY.
     access(all) struct TipRecord {
         access(all) let tipID: UInt64
         access(all) let sender: Address
@@ -182,39 +235,27 @@ access(all) contract PrivateTip {
             self.claimed = false
         }
 
-        access(contract) fun markClaimed() {
-            self.claimed = true
-        }
-
-        /// Convenience: true if this record was created by a v0.3 shielded path.
-        access(all) view fun isShielded(): Bool {
-            return self.amount == 0.0
-        }
+        access(contract) fun markClaimed() { self.claimed = true }
+        access(all) view fun isShielded(): Bool { return self.amount == 0.0 }
     }
 
-    /// Lightweight v0.3 view-only struct returned by getTipMetadata(...).
-    /// Encodes the v0.3 privacy contract explicitly: NO amount, NO claimed flag.
-    /// Note: ciphertextRef is NOT included — it's emitted in TipSentShielded
-    /// events only and must be retrieved from event logs by indexers.
+    /// v0.4.1 metadata view — encrypted-memo specific.
     access(all) struct TipMetadata {
         access(all) let tipID: UInt64
         access(all) let sender: Address
         access(all) let recipient: Address
         access(all) let timestamp: UFix64
-        access(all) let memo: String?
 
         init(
             tipID: UInt64,
             sender: Address,
             recipient: Address,
-            timestamp: UFix64,
-            memo: String?
+            timestamp: UFix64
         ) {
             self.tipID = tipID
             self.sender = sender
             self.recipient = recipient
             self.timestamp = timestamp
-            self.memo = memo
         }
     }
 
@@ -222,7 +263,6 @@ access(all) contract PrivateTip {
 
     access(all) resource AdminResource {
 
-        /// Emergency stop: blocks recordTip.
         access(Pause) fun pause() {
             pre { !PrivateTip.paused: "PrivateTip: already paused" }
             PrivateTip.paused = true
@@ -235,17 +275,15 @@ access(all) contract PrivateTip {
             emit Unpaused()
         }
 
-        /// Propose an impl swap to a new version. Starts the 48h time-lock.
         access(Upgrade) fun proposeImplSwap(newVersion: String) {
             PrivateTip.pendingImplVersion = newVersion
-            PrivateTip.pendingImplUnlockAt = getCurrentBlock().timestamp + 172800.0 // 48h
+            PrivateTip.pendingImplUnlockAt = getCurrentBlock().timestamp + 172800.0
             emit ImplSwapProposed(
                 pendingVersion: newVersion,
                 unlockAt: PrivateTip.pendingImplUnlockAt
             )
         }
 
-        /// Finalize a pending impl swap after the time-lock has expired.
         access(Upgrade) fun finalizeImplSwap() {
             pre {
                 PrivateTip.pendingImplVersion != nil:
@@ -266,16 +304,12 @@ access(all) contract PrivateTip {
             emit ImplSwapCancelled()
         }
 
-        /// Force the activeImplVersion string without going through the time-lock.
-        /// Intended for the one-time v0.2 → v0.3 cutover.
         access(Upgrade) fun forceSetImplVersion(version: String) {
             let old = PrivateTip.activeImplVersion
             PrivateTip.activeImplVersion = version
             emit ImplSwapped(oldVersion: old, newVersion: version)
         }
 
-        /// Drain a leftover v0.2 tipVault. Returns the @FlowToken.Vault so the
-        /// caller transaction can deposit it into the recipient's vault.
         access(Drain) fun drainLegacyVault(tipID: UInt64): @FlowToken.Vault {
             pre {
                 PrivateTip.tips.containsKey(tipID):
@@ -302,31 +336,31 @@ access(all) contract PrivateTip {
         }
     }
 
-    // ─── v0.3 Public Orchestrator Function ──────────────────────────────────────
+    // ─── v0.4.1 Public Orchestrator Function ────────────────────────────────────
 
-    /// Record metadata for a shielded tip.
+    /// Record metadata for a shielded tip with an encrypted memo.
     ///
-    /// THIS IS THE v0.3 ENTRY POINT. The amount transfer happens out-of-band
-    /// in the SAME Cadence transaction by calling JanusFlow.shieldedTransfer
-    /// BEFORE this function — Cadence's atomicity guarantees both calls
-    /// succeed or both abort.
+    /// CLEAN-BREAK signature change from v0.3:
+    ///   old: recordTip(sender, recipient, ciphertextRef, memo: String?)
+    ///   new: recordTip(sender, recipient, ciphertextRef, memoCiphertext, memoEphPubkeyX, memoEphPubkeyY)
     ///
-    /// Privacy contract:
-    ///   - Emitted TipSentShielded carries NO amount.
-    ///   - Stored TipRecord has amount = 0.0 (sentinel for "shielded").
-    ///   - ciphertextRef is the Pedersen C_tx point (Cx, Cy), opaque under
-    ///     perfect-hiding.
+    /// Atomicity contract (unchanged):
+    ///   The amount transfer happens out-of-band via JanusFlow.shieldedTransfer
+    ///   in the SAME Cadence transaction. Both calls succeed or both abort.
     ///
-    /// @param sender         auth ref to the sender's account
-    /// @param recipient      Flow address of the tip recipient
-    /// @param ciphertextRef  [Cx, Cy] of the Pedersen transfer-commit
-    /// @param memo           Optional public memo (max 280 chars)
-    /// @return tipID         Newly-allocated UInt64 identifier
+    /// @param sender           auth ref to the sender's account
+    /// @param recipient        Flow address of the tip recipient
+    /// @param ciphertextRef    [Cx, Cy] Pedersen transfer-commit
+    /// @param memoCiphertext   AES-GCM blob (iv||ct||tag); empty = no memo
+    /// @param memoEphPubkeyX/Y Sender's ephemeral BabyJub pubkey
+    /// @return tipID           Newly-allocated UInt64 identifier
     access(all) fun recordTip(
         sender: auth(BorrowValue) &Account,
         recipient: Address,
         ciphertextRef: [UInt256],
-        memo: String?
+        memoCiphertext: [UInt8],
+        memoEphPubkeyX: UInt256,
+        memoEphPubkeyY: UInt256
     ): UInt64 {
         pre {
             !self.paused: "PrivateTip: contract is paused"
@@ -334,30 +368,39 @@ access(all) contract PrivateTip {
 
         let senderAddr = sender.address
 
-        // Delegate structural validation to the impl.
-        let err = PrivateTipImpl.validateRecordTip(
-            sender: senderAddr,
-            recipient: recipient,
-            ciphertextLen: ciphertextRef.length,
-            memo: memo
+        // Structural validation (length checks).
+        assert(
+            ciphertextRef.length == 2,
+            message: "PrivateTip.recordTip: ciphertextRef must be [Cx, Cy]"
         )
-        assert(err == "", message: "PrivateTip.recordTip: ".concat(err))
+        // memoCiphertext = 0 means no memo. Otherwise must include at least
+        // iv(12) + tag(16) = 28 bytes.
+        assert(
+            memoCiphertext.length == 0 || memoCiphertext.length >= 28,
+            message: "PrivateTip.recordTip: memoCiphertext must be empty or >= 28 bytes"
+        )
+        // Soft upper bound to prevent storage abuse (event field).
+        assert(
+            memoCiphertext.length <= 4096,
+            message: "PrivateTip.recordTip: memoCiphertext exceeds 4096 bytes"
+        )
 
-        // Allocate tipID, build the record.
         let tipID = self.nextTipID
         self.nextTipID = self.nextTipID + 1
         let timestamp = getCurrentBlock().timestamp
 
+        // TipRecord storage stays unchanged for upgrade compat. We always
+        // record memo: nil for v0.4.1 tips — the encrypted blob lives in
+        // the event only (indexers retrieve it from logs).
         self.tips[tipID] = TipRecord(
             tipID: tipID,
             sender: senderAddr,
             recipient: recipient,
-            amount: 0.0,           // sentinel: shielded (amount hidden)
+            amount: 0.0,
             timestamp: timestamp,
-            memo: memo
+            memo: nil
         )
 
-        // Index updates.
         if let existing = self.tipsByRecipient[recipient] {
             self.tipsByRecipient[recipient] = existing.concat([tipID])
         } else {
@@ -375,7 +418,9 @@ access(all) contract PrivateTip {
             recipient: recipient,
             timestamp: timestamp,
             ciphertextRef: ciphertextRef,
-            memo: memo
+            memoCiphertext: memoCiphertext,
+            memoEphPubkeyX: memoEphPubkeyX,
+            memoEphPubkeyY: memoEphPubkeyY
         )
 
         return tipID
@@ -383,12 +428,10 @@ access(all) contract PrivateTip {
 
     // ─── Read-only Views ────────────────────────────────────────────────────────
 
-    /// Full TipRecord (covers v0.2 + v0.3).
     access(all) view fun getTip(tipID: UInt64): TipRecord? {
         return self.tips[tipID]
     }
 
-    /// v0.3-specific metadata view (returns nil if the record is v0.2 escrow).
     access(all) fun getTipMetadata(tipID: UInt64): TipMetadata? {
         if let r = self.tips[tipID] {
             if r.isShielded() {
@@ -396,15 +439,13 @@ access(all) contract PrivateTip {
                     tipID: r.tipID,
                     sender: r.sender,
                     recipient: r.recipient,
-                    timestamp: r.timestamp,
-                    memo: r.memo
+                    timestamp: r.timestamp
                 )
             }
         }
         return nil
     }
 
-    /// All TipRecords addressed to recipient (covers v0.2 + v0.3).
     access(all) fun getTipsByRecipient(recipient: Address): [TipRecord] {
         let ids = self.tipsByRecipient[recipient] ?? []
         var out: [TipRecord] = []
@@ -416,7 +457,6 @@ access(all) contract PrivateTip {
         return out
     }
 
-    /// Only v0.3 shielded TipMetadata for recipient.
     access(all) fun getShieldedTipsByRecipient(recipient: Address): [TipMetadata] {
         let ids = self.tipsByRecipient[recipient] ?? []
         var out: [TipMetadata] = []
@@ -427,8 +467,7 @@ access(all) contract PrivateTip {
                         tipID: r.tipID,
                         sender: r.sender,
                         recipient: r.recipient,
-                        timestamp: r.timestamp,
-                        memo: r.memo
+                        timestamp: r.timestamp
                     ))
                 }
             }
@@ -457,8 +496,7 @@ access(all) contract PrivateTip {
                         tipID: r.tipID,
                         sender: r.sender,
                         recipient: r.recipient,
-                        timestamp: r.timestamp,
-                        memo: r.memo
+                        timestamp: r.timestamp
                     ))
                 }
             }
@@ -500,10 +538,23 @@ access(all) contract PrivateTip {
         return self.pendingImplUnlockAt
     }
 
+    /// Read another account's published memo pubkey (returns nil if no MemoKey
+    /// is published at /public/openjanusMemoKey).
+    access(all) fun getMemoPubkey(owner: Address): {String: UInt256}? {
+        let acct = getAccount(owner)
+        if let cap = acct.capabilities.borrow<&{MemoKeyPublic}>(self.memoKeyPublicPath()) {
+            return {
+                "x": cap.getPubkeyX(),
+                "y": cap.getPubkeyY()
+            }
+        }
+        return nil
+    }
+
     // ─── Initializer ────────────────────────────────────────────────────────────
-    // NOTE: init() does NOT re-run on contract upgrades. It ran once at the
-    // original v0.2 deployment. Existing on-chain values for these fields
-    // persist across the v0.2 → v0.3 update.
+    // NOTE: init() does NOT re-run on contract upgrades. All field initializations
+    // here apply only to brand-new deployments. The v0.2 -> v0.3 -> v0.4.1
+    // path keeps the original on-chain values for pre-existing fields.
 
     init() {
         self.AdminStoragePath = /storage/privateTipAdmin
@@ -517,10 +568,7 @@ access(all) contract PrivateTip {
         self.totalLocked = 0.0
         self.paused = false
 
-        // For brand-new deployments, start at v0.3. The on-chain update path
-        // ignores this (init doesn't re-run); operators run admin_force_set_impl_version
-        // to flip the active version after upgrading.
-        self.activeImplVersion = "0.3.0"
+        self.activeImplVersion = "0.4.1"
         self.pendingImplVersion = nil
         self.pendingImplUnlockAt = 0.0
 

@@ -1,35 +1,74 @@
-/// Tip action helpers — v0.3 rewrite.
+/// Tip action helpers — v0.4.1.
 ///
-/// This module wires the frontend to:
-///   - JanusFlow EVM (v0.3 Pedersen):     0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078
-///   - JanusFlow Cadence router (v0.3):   0x5dcbeb41055ec57e
-///   - PrivateTip Cadence router (v0.3):  0xb9ac529c14a4c5a1 (orchestrator, no escrow)
+/// THIN APP LAYER over @openjanus/sdk@0.4.1. Anything generic now lives in
+/// the SDK; this module only contains:
+///   - PrivateTip-specific Cadence templates
+///   - sendShieldedTipAction (orchestrates JanusFlow.shieldedTransfer +
+///     PrivateTip.recordTip + memo encryption — app-specific bundling)
+///   - PrivateTip script builders
+///   - Memo encryption helpers wired to the recipient's published MemoKey
+///   - Shielded-state persistence (sessionStorage)
 ///
-/// The privacy contract:
-///   - wrap()              : msg.value VISIBLE | commitment opaque   (boundary in)
-///   - shieldedTransfer()  : amount HIDDEN on calldata/events/storage (full shielded)
-///   - unwrap()            : claimedAmount + recipient VISIBLE        (boundary out)
-///
-/// Proof generation runs SERVER-SIDE via /api/proof/{encrypt,decrypt} (the
-/// SDK's crypto module uses fs/path; not browser-safe). The browser only does
-/// EVM RPC reads, calldata building, and FCL submission.
-///
-/// User-side state to PERSIST (apps SHOULD store these locally — wallet
-/// encryption, IndexedDB, etc.):
-///   - balance       : current cleartext balance (wei)
-///   - blinding      : 128-bit blinding for the current commitment
-/// Without these, the user cannot construct a future shieldedTransfer or
-/// unwrap. The MVP demo uses a "wallet-derived" approach (HKDF from a fixed
-/// signed message) — see notes in send/page.tsx and claim/page.tsx.
+/// v0.4.1 contracts:
+///   JanusFlow EVM proxy:           0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078
+///   JanusFlow Cadence router:      0x5dcbeb41055ec57e
+///   PrivateTip Cadence router:     0xb9ac529c14a4c5a1
 
-import { JsonRpcProvider, Interface } from "ethers";
+import { JsonRpcProvider } from "ethers";
 import {
+  // Token addresses
   JANUS_FLOW_EVM_ADDRESS,
   JANUS_FLOW_CADENCE_ADDRESS,
   JANUS_FLOW_VERSION,
-  JANUS_TOKEN_BASE_ABI,
-  JANUS_FLOW_EXTRA_ABI,
+  // Cadence TX templates moved into SDK (from /tokens subpath since
+  // not all are re-exported from root in 0.4.1)
+  TX_WRAP,
+  TX_WRAP_FROM_COA,
+  TX_UNWRAP,
+  TX_UNWRAP_TO_VAULT,
+  // Calldata builders
+  buildWrapCalldata,
+  buildShieldedTransferCalldata,
+  buildUnwrapCalldata,
+  // EVM reads
+  readCommitment as sdkReadCommitment,
+  readTotalLocked as sdkReadTotalLocked,
+  // Source resolver
+  resolveWrapSource,
 } from "@openjanus/sdk/tokens";
+import {
+  // COA helpers
+  getCoaEvmAddress as sdkGetCoaEvmAddress,
+  hasCOA,
+  getCoaBalanceWei as sdkGetCoaBalanceWei,
+  getFlowVaultBalanceWei as sdkGetFlowVaultBalanceWei,
+  TX_SETUP_COA,
+} from "@openjanus/sdk/network";
+import {
+  // Memo encryption primitives
+  encryptText,
+  decryptText,
+  generateBabyJubKeypair,
+  type MemoCiphertext,
+  type BabyJubKeypair,
+  // Unit conversions
+  parseFlowToWei as sdkParseFlowToWei,
+  formatWeiToFlow as sdkFormatWeiToFlow,
+  weiToFlowUFix64 as sdkWeiToFlowUFix64,
+  FLOW_SCALE as SDK_FLOW_SCALE,
+} from "@openjanus/sdk/crypto";
+import {
+  // Formatters / validators
+  formatPoint as sdkFormatPoint,
+  isValidFlowAddress as sdkIsValidFlowAddress,
+  isValidFlowAmount as sdkIsValidFlowAmount,
+} from "@openjanus/sdk/utils";
+import {
+  // Types
+  isIdentityPoint as sdkIsIdentityPoint,
+  type Point,
+  type WrapSource,
+} from "@openjanus/sdk";
 
 // FCL has no type declarations bundled.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -37,20 +76,130 @@ type Fcl = any;
 let _fcl: Fcl | null = null;
 async function getFcl(): Promise<Fcl> {
   if (!_fcl) {
-    // @ts-expect-error — no types for @onflow/fcl
     _fcl = await import("@onflow/fcl");
   }
   return _fcl!;
 }
 
-// ─── Addresses (re-export from SDK so the UI shows them) ────────────────────────
+// ─── Re-exports (so app code can keep importing from this module) ──────────────
 
 export const JANUS_FLOW_EVM = JANUS_FLOW_EVM_ADDRESS;
 export const JANUS_FLOW_CADENCE = JANUS_FLOW_CADENCE_ADDRESS;
 export const PRIVATE_TIP_CADENCE = "0xb9ac529c14a4c5a1";
 export const SDK_VERSION = JANUS_FLOW_VERSION;
 
-/** Flow EVM testnet RPC. */
+export const FLOW_SCALE = SDK_FLOW_SCALE;
+
+export type { Point, WrapSource, MemoCiphertext, BabyJubKeypair };
+
+export const isIdentityPoint = sdkIsIdentityPoint;
+export const parseFlowToWei = sdkParseFlowToWei;
+export const formatWeiToFlow = sdkFormatWeiToFlow;
+export const formatWeiToFlowUFix64 = sdkWeiToFlowUFix64;
+export const formatPoint = sdkFormatPoint;
+export const isValidFlowAddress = sdkIsValidFlowAddress;
+export const isValidFlowAmount = sdkIsValidFlowAmount;
+
+// Memo encryption — direct re-exports for /send and /tips pages.
+export { encryptText, decryptText, generateBabyJubKeypair };
+
+// ─── Smart-setup Cadence template (COA + MemoKey in one atomic tx) ────────────
+
+/** Smart-setup: creates COA AND MemoKey in one tx if either is missing. */
+export const TX_SMART_SETUP = `
+import "EVM"
+import PrivateTip from 0xb9ac529c14a4c5a1
+
+transaction(
+    memoPrivkey: UInt256,
+    memoPubkeyX: UInt256,
+    memoPubkeyY: UInt256
+) {
+    prepare(signer: auth(SaveValue, IssueStorageCapabilityController, PublishCapability, BorrowValue) &Account) {
+        // 1. COA
+        if signer.storage.borrow<&EVM.CadenceOwnedAccount>(from: /storage/evm) == nil {
+            let coa <- EVM.createCadenceOwnedAccount()
+            signer.storage.save(<-coa, to: /storage/evm)
+            let coaCap = signer.capabilities.storage.issue<&EVM.CadenceOwnedAccount>(/storage/evm)
+            signer.capabilities.publish(coaCap, at: /public/evm)
+        }
+        // 2. MemoKey
+        let memoStoragePath = PrivateTip.memoKeyStoragePath()
+        let memoPublicPath = PrivateTip.memoKeyPublicPath()
+        if signer.storage.borrow<&PrivateTip.MemoKey>(from: memoStoragePath) == nil {
+            let key <- PrivateTip.createMemoKey(
+                privkey: memoPrivkey,
+                pubkeyX: memoPubkeyX,
+                pubkeyY: memoPubkeyY
+            )
+            signer.storage.save(<-key, to: memoStoragePath)
+            let memoCap = signer.capabilities.storage.issue<&{PrivateTip.MemoKeyPublic}>(memoStoragePath)
+            signer.capabilities.publish(memoCap, at: memoPublicPath)
+        }
+    }
+}
+`;
+
+/**
+ * Smart-setup action: generates a fresh MemoKey client-side, persists the
+ * privkey to localStorage, and submits the COA+MemoKey setup tx.
+ *
+ * Storage layout in localStorage:
+ *   key:    openjanus:memo-privkey:<addr-lowercase>
+ *   value:  privkey as decimal string (BabyJub scalar)
+ */
+export async function smartSetupAccount(opts: {
+  flowAddr: string;
+}): Promise<{ txId: string; pubkey: Point }> {
+  const { flowAddr } = opts;
+  // 1. Generate keypair client-side. Privkey is cached in localStorage so the
+  //    recipient can decrypt incoming memos later without re-keying.
+  const kp = await generateBabyJubKeypair();
+  const lsKey = `openjanus:memo-privkey:${flowAddr.toLowerCase()}`;
+  if (typeof window !== "undefined") {
+    localStorage.setItem(lsKey, kp.privkey.toString());
+  }
+
+  const fcl = await getFcl();
+  const txId = await fcl.mutate({
+    cadence: TX_SMART_SETUP,
+    args: (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
+      arg(kp.privkey.toString(), t.UInt256),
+      arg(kp.pubkey.x.toString(), t.UInt256),
+      arg(kp.pubkey.y.toString(), t.UInt256),
+    ],
+    proposer: fcl.authz,
+    payer: fcl.authz,
+    authorizations: [fcl.authz],
+    limit: 200,
+  });
+  await fcl.tx(txId).onceSealed();
+  return { txId, pubkey: kp.pubkey };
+}
+
+/** Read the user's cached MemoKey privkey from localStorage (or null). */
+export function loadMemoPrivkey(flowAddr: string): bigint | null {
+  if (typeof window === "undefined") return null;
+  const raw = localStorage.getItem(
+    `openjanus:memo-privkey:${flowAddr.toLowerCase()}`
+  );
+  return raw ? BigInt(raw) : null;
+}
+
+// SDK COA setup tx — fixes the inline SETUP_COA_CDC divergence.
+export { TX_SETUP_COA };
+
+// SDK resolveWrapSource — pure decision helper.
+export { resolveWrapSource };
+
+// SDK Cadence tx templates (re-exports for any code still importing locally).
+export { TX_WRAP, TX_WRAP_FROM_COA, TX_UNWRAP, TX_UNWRAP_TO_VAULT };
+
+// SDK calldata builders.
+export { buildWrapCalldata, buildShieldedTransferCalldata, buildUnwrapCalldata };
+
+// ─── EVM reads — wrap SDK helpers with a default provider ──────────────────────
+
 const EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 const EVM_CHAIN_ID = 545;
 
@@ -62,25 +211,40 @@ function getProvider(): JsonRpcProvider {
   return _provider;
 }
 
-// Merged ABI: base JanusToken reads + JanusFlow wrap/unwrap/MAX_WRAP.
-const janusIface = new Interface([
-  ...JANUS_TOKEN_BASE_ABI,
-  ...JANUS_FLOW_EXTRA_ABI,
-]);
-
-// ─── Local types ────────────────────────────────────────────────────────────────
-
-export interface Point {
-  x: bigint;
-  y: bigint;
+export async function getCommitment(coaEvmHex: string): Promise<Point> {
+  return sdkReadCommitment(getProvider(), coaEvmHex, JANUS_FLOW_EVM);
 }
+
+export async function getTotalLocked(): Promise<bigint> {
+  return sdkReadTotalLocked(getProvider(), JANUS_FLOW_EVM);
+}
+
+// ─── COA / FCL helpers — wrap SDK helpers ──────────────────────────────────────
+
+export async function getCoaEvmAddress(flowAddress: string): Promise<string> {
+  return sdkGetCoaEvmAddress(flowAddress, "testnet");
+}
+
+export async function recipientHasCoa(flowAddress: string): Promise<boolean> {
+  return hasCOA(flowAddress, "testnet");
+}
+
+export async function getCoaBalanceWei(flowAddress: string): Promise<bigint> {
+  return sdkGetCoaBalanceWei(flowAddress, "testnet");
+}
+
+export async function getFlowVaultBalanceWei(flowAddress: string): Promise<bigint> {
+  return sdkGetFlowVaultBalanceWei(flowAddress, "testnet");
+}
+
+// ─── Local types ───────────────────────────────────────────────────────────────
 
 /** Result of /api/proof/encrypt (amount-disclose proof). */
 export interface AmountDiscloseProofResponse {
   commitment: { x: string; y: string };
   txCommit: [string, string];
-  proof: string[];          // uint256[8]
-  publicInputs: string[];   // [amount, Cx, Cy]
+  proof: string[]; // uint256[8]
+  publicInputs: string[];
   blinding: string;
 }
 
@@ -92,219 +256,13 @@ export interface ShieldedTransferProofResponse {
     newCommit: { x: string; y: string };
   };
   txCommit: [string, string];
-  proof: string[];          // uint256[8]
-  publicInputs: string[];   // [C_old, C_tx, C_new] (6 values)
+  proof: string[];
+  publicInputs: string[];
   transferBlinding: string;
   newBlinding: string;
 }
 
-// ─── Constants ──────────────────────────────────────────────────────────────────
-
-export const FLOW_SCALE: bigint = BigInt("1000000000000000000");
-
-/** Identity point on BabyJubJub — returned for accounts never written to. */
-export function isIdentityPoint(p: Point): boolean {
-  return p.x === BigInt(0) && p.y === BigInt(1);
-}
-
-// ─── EVM reads ─────────────────────────────────────────────────────────────────
-
-/**
- * Read the Pedersen commitment of an account's hidden balance.
- * Returns the identity point (0, 1) for accounts that have never been written to.
- */
-export async function getCommitment(coaEvmHex: string): Promise<Point> {
-  const provider = getProvider();
-  const data = janusIface.encodeFunctionData("balanceOfCommitmentXY", [
-    coaEvmHex,
-  ]);
-  const result = await provider.call({ to: JANUS_FLOW_EVM, data });
-  const [x, y] = janusIface.decodeFunctionResult(
-    "balanceOfCommitmentXY",
-    result
-  );
-  return { x: BigInt(x), y: BigInt(y) };
-}
-
-/** Read the cleartext `totalLocked` custody pool size (wei). */
-export async function getTotalLocked(): Promise<bigint> {
-  const provider = getProvider();
-  const data = janusIface.encodeFunctionData("totalLocked", []);
-  const result = await provider.call({ to: JANUS_FLOW_EVM, data });
-  const [v] = janusIface.decodeFunctionResult("totalLocked", result);
-  return BigInt(v);
-}
-
-// ─── COA resolution (Flow Address → EVM hex) ────────────────────────────────────
-
-/**
- * Resolve a Flow account's COA EVM address via Cadence script.
- */
-export async function getCoaEvmAddress(flowAddress: string): Promise<string> {
-  const script = `
-    import EVM from 0x8c5303eaa26202d6
-
-    access(all) fun main(addr: Address): String {
-      let acct = getAccount(addr)
-      let coa = acct.capabilities.borrow<&EVM.CadenceOwnedAccount>(/public/evm)
-        ?? panic("No COA at /public/evm for ".concat(addr.toString()))
-      return coa.address().toString()
-    }
-  `;
-  const fcl = await getFcl();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (await fcl.query({
-    cadence: script,
-    args: (arg: any, t: any) => [arg(flowAddress, t.Address)],
-  })) as string;
-  return raw.startsWith("0x") ? raw : `0x${raw}`;
-}
-
-/**
- * Check if a Flow account has a COA published at /public/evm.
- *
- * Used by the /send page to warn the user BEFORE submitting if the recipient
- * can't actually unwrap the tip (no COA means JanusFlow.shieldedTransfer
- * would credit a COA address that the recipient doesn't control).
- *
- * Returns `false` for any failure (no COA, account doesn't exist, network
- * error). The caller treats `false` as "show warning, but allow override".
- */
-export async function recipientHasCoa(flowAddress: string): Promise<boolean> {
-  const script = `
-    import EVM from 0x8c5303eaa26202d6
-
-    access(all) fun main(addr: Address): Bool {
-      let acct = getAccount(addr)
-      let coa = acct.capabilities.borrow<&EVM.CadenceOwnedAccount>(/public/evm)
-      return coa != nil
-    }
-  `;
-  const fcl = await getFcl();
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = (await fcl.query({
-      cadence: script,
-      args: (arg: any, t: any) => [arg(flowAddress, t.Address)],
-    })) as boolean;
-    return raw === true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Read the signer's COA attoFLOW balance via a script.
- *
- * Used by /wrap to decide whether the user can wrap from their vault, from
- * their COA, or whether they need to top up. Returns 0n on any error
- * (no COA, account doesn't exist).
- */
-export async function getCoaBalanceWei(flowAddress: string): Promise<bigint> {
-  const script = `
-    import EVM from 0x8c5303eaa26202d6
-
-    access(all) fun main(addr: Address): UInt {
-      let acct = getAccount(addr)
-      let coa = acct.capabilities.borrow<&EVM.CadenceOwnedAccount>(/public/evm)
-        ?? panic("No COA")
-      return coa.balance().attoflow
-    }
-  `;
-  const fcl = await getFcl();
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = (await fcl.query({
-      cadence: script,
-      args: (arg: any, t: any) => [arg(flowAddress, t.Address)],
-    })) as string;
-    return BigInt(raw);
-  } catch {
-    return BigInt(0);
-  }
-}
-
-/**
- * Read the signer's Cadence FlowToken.Vault balance (UFix64 -> wei).
- */
-export async function getFlowVaultBalanceWei(flowAddress: string): Promise<bigint> {
-  const script = `
-    import FungibleToken from 0x9a0766d93b6608b7
-    import FlowToken from 0x7e60df042a9c0868
-
-    access(all) fun main(addr: Address): UFix64 {
-      let acct = getAccount(addr)
-      let vault = acct.capabilities.borrow<&{FungibleToken.Balance}>(/public/flowTokenBalance)
-        ?? panic("No FlowToken.Balance capability")
-      return vault.balance
-    }
-  `;
-  const fcl = await getFcl();
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = (await fcl.query({
-      cadence: script,
-      args: (arg: any, t: any) => [arg(flowAddress, t.Address)],
-    })) as string;
-    return parseFlowToWei(raw);
-  } catch {
-    return BigInt(0);
-  }
-}
-
-// ─── Calldata builders ──────────────────────────────────────────────────────────
-
-/**
- * Build calldata for `JanusFlow.wrap(uint256[2] txCommit, uint256[8] amountProof)`.
- * Returns hex string WITHOUT leading 0x (Cadence side `.decodeHex()`s it).
- */
-export function buildWrapCalldata(
-  txCommit: [bigint, bigint],
-  amountProof: bigint[]
-): string {
-  return janusIface
-    .encodeFunctionData("wrap", [txCommit, amountProof])
-    .slice(2);
-}
-
-/**
- * Build calldata for `JanusFlow.shieldedTransfer(address, uint256[6], uint256[8])`.
- * Returns hex string WITHOUT leading 0x.
- */
-export function buildShieldedTransferCalldata(
-  to: string,
-  publicInputs: bigint[],
-  proof: bigint[]
-): string {
-  return janusIface
-    .encodeFunctionData("shieldedTransfer", [to, publicInputs, proof])
-    .slice(2);
-}
-
-/**
- * Build calldata for the full unwrap signature.
- */
-export function buildUnwrapCalldata(
-  claimedAmountWei: bigint,
-  recipientEvmHex: string,
-  txCommit: [bigint, bigint],
-  amountProof: bigint[],
-  transferPublicInputs: bigint[],
-  transferProof: bigint[]
-): string {
-  return janusIface
-    .encodeFunctionData("unwrap", [
-      claimedAmountWei,
-      recipientEvmHex,
-      txCommit,
-      amountProof,
-      transferPublicInputs,
-      transferProof,
-    ])
-    .slice(2);
-}
-
-// ─── Proof generation (delegates to server routes) ──────────────────────────────
+// ─── Proof generation (delegates to server routes) ─────────────────────────────
 
 export async function generateAmountDiscloseProof(
   amountWei: bigint,
@@ -350,262 +308,20 @@ export async function generateShieldedTransferProof(params: {
   return response.json();
 }
 
-// ─── Cadence templates (FCL-friendly, no SDK import needed in browser) ──────────
-
-/** Wrap: deposits N FLOW into the signer's JanusFlow shielded slot. */
-export const TX_WRAP = `
-import JanusFlow from 0x5dcbeb41055ec57e
-import FungibleToken from 0x9a0766d93b6608b7
-import FlowToken from 0x7e60df042a9c0868
-
-transaction(
-    amount: UFix64,
-    txCommit: [UInt256],
-    amountProof: [UInt256],
-    calldataHex: String
-) {
-    let vault: @{FungibleToken.Vault}
-    let signerRef: auth(BorrowValue) &Account
-
-    prepare(signer: auth(BorrowValue) &Account) {
-        self.signerRef = signer
-        let flowVault = signer.storage.borrow<auth(FungibleToken.Withdraw) &FlowToken.Vault>(
-            from: /storage/flowTokenVault
-        ) ?? panic("No FlowToken.Vault in signer storage")
-        self.vault <- flowVault.withdraw(amount: amount)
-    }
-
-    execute {
-        JanusFlow.wrap(
-            signer: self.signerRef,
-            vault: <-(self.vault as! @FlowToken.Vault),
-            txCommit: txCommit,
-            amountProof: amountProof,
-            calldataHex: calldataHex
-        )
-    }
-}
-`;
-
-/** Send-shielded-tip: calls JanusFlow.shieldedTransfer + PrivateTip.recordTip atomically. */
-export const TX_SEND_SHIELDED_TIP = `
-import JanusFlow from 0x5dcbeb41055ec57e
-import PrivateTip from 0xb9ac529c14a4c5a1
-
-transaction(
-    recipient: Address,
-    recipientEVMHex: String,
-    publicInputs: [UInt256],
-    proof: [UInt256],
-    calldataHex: String,
-    memo: String
-) {
-    let signerRef: auth(BorrowValue) &Account
-
-    prepare(signer: auth(BorrowValue) &Account) {
-        self.signerRef = signer
-    }
-
-    execute {
-        assert(
-            publicInputs.length == 6,
-            message: "publicInputs must be 6 UInt256 (C_old, C_tx, C_new)"
-        )
-        assert(
-            proof.length == 8,
-            message: "proof must be 8 UInt256 (Groth16)"
-        )
-
-        JanusFlow.shieldedTransfer(
-            signer: self.signerRef,
-            toEVMHex: recipientEVMHex,
-            publicInputs: publicInputs,
-            proof: proof,
-            calldataHex: calldataHex
-        )
-
-        let ciphertextRef: [UInt256] = [publicInputs[2], publicInputs[3]]
-        let memoOpt: String? = memo.length > 0 ? memo : nil
-
-        let tipID = PrivateTip.recordTip(
-            sender: self.signerRef,
-            recipient: recipient,
-            ciphertextRef: ciphertextRef,
-            memo: memoOpt
-        )
-        log("PrivateTip.recordTip emitted shielded tipID=".concat(tipID.toString()))
-    }
-}
-`;
-
-/** Unwrap: releases N FLOW from the signer's shielded slot to a target EVM address. */
-export const TX_UNWRAP = `
-import JanusFlow from 0x5dcbeb41055ec57e
-
-transaction(
-    claimedAmount: UFix64,
-    recipientEVMHex: String,
-    txCommit: [UInt256],
-    amountProof: [UInt256],
-    transferPublicInputs: [UInt256],
-    transferProof: [UInt256],
-    calldataHex: String
-) {
-    prepare(signer: auth(BorrowValue) &Account) {
-        JanusFlow.unwrap(
-            signer: signer,
-            claimedAmount: claimedAmount,
-            recipientEVMHex: recipientEVMHex,
-            txCommit: txCommit,
-            amountProof: amountProof,
-            transferPublicInputs: transferPublicInputs,
-            transferProof: transferProof,
-            calldataHex: calldataHex
-        )
-    }
-}
-`;
-
-/**
- * Wrap-from-COA: identical privacy semantics to TX_WRAP but the FLOW is
- * sourced from the signer's COA (EVM-side balance) rather than their Cadence
- * FlowToken.Vault. See cadence/transactions/jf_wrap_from_coa.cdc for design
- * notes.
- */
-export const TX_WRAP_FROM_COA = `
-import JanusFlow from 0x5dcbeb41055ec57e
-import FungibleToken from 0x9a0766d93b6608b7
-import FlowToken from 0x7e60df042a9c0868
-import EVM from 0x8c5303eaa26202d6
-
-transaction(
-    amount: UFix64,
-    txCommit: [UInt256],
-    amountProof: [UInt256],
-    calldataHex: String
-) {
-    let payment: @FlowToken.Vault
-    let signerRef: auth(BorrowValue) &Account
-
-    prepare(signer: auth(BorrowValue) &Account) {
-        self.signerRef = signer
-        let coa = signer.storage
-            .borrow<auth(EVM.Withdraw) &EVM.CadenceOwnedAccount>(from: /storage/evm)
-            ?? panic("No COA at /storage/evm")
-        let flowUnits: UInt64 = UInt64(amount * 100_000_000.0)
-        let attoflowU: UInt = UInt(flowUnits) * 10_000_000_000
-        let withdrawn <- coa.withdraw(balance: EVM.Balance(attoflow: attoflowU))
-        self.payment <- withdrawn
-    }
-
-    execute {
-        JanusFlow.wrap(
-            signer: self.signerRef,
-            vault: <- self.payment,
-            txCommit: txCommit,
-            amountProof: amountProof,
-            calldataHex: calldataHex
-        )
-    }
-}
-`;
-
-/**
- * Unwrap-to-vault: atomic unwrap + sweep COA -> Cadence FlowToken.Vault.
- * One click, no follow-up "withdraw COA" transaction. See
- * cadence/transactions/jf_unwrap_to_vault.cdc for design notes.
- */
-export const TX_UNWRAP_TO_VAULT = `
-import JanusFlow from 0x5dcbeb41055ec57e
-import FungibleToken from 0x9a0766d93b6608b7
-import FlowToken from 0x7e60df042a9c0868
-import EVM from 0x8c5303eaa26202d6
-
-transaction(
-    claimedAmount: UFix64,
-    txCommit: [UInt256],
-    amountProof: [UInt256],
-    transferPublicInputs: [UInt256],
-    transferProof: [UInt256],
-    calldataHex: String
-) {
-    let signerRef: auth(BorrowValue) &Account
-    let preBalance: UInt
-    let recipientEVMHex: String
-
-    prepare(signer: auth(BorrowValue) &Account) {
-        self.signerRef = signer
-        let coaSnap = signer.storage
-            .borrow<&EVM.CadenceOwnedAccount>(from: /storage/evm)
-            ?? panic("No COA at /storage/evm")
-        self.preBalance = coaSnap.balance().attoflow
-        self.recipientEVMHex = coaSnap.address().toString()
-    }
-
-    execute {
-        JanusFlow.unwrap(
-            signer: self.signerRef,
-            claimedAmount: claimedAmount,
-            recipientEVMHex: self.recipientEVMHex,
-            txCommit: txCommit,
-            amountProof: amountProof,
-            transferPublicInputs: transferPublicInputs,
-            transferProof: transferProof,
-            calldataHex: calldataHex
-        )
-        let coa = self.signerRef.storage
-            .borrow<auth(EVM.Withdraw) &EVM.CadenceOwnedAccount>(from: /storage/evm)
-            ?? panic("COA disappeared after unwrap")
-        let postBalance = coa.balance().attoflow
-        assert(postBalance > self.preBalance, message: "COA balance did not increase")
-        let received: UInt = postBalance - self.preBalance
-        let withdrawn <- coa.withdraw(balance: EVM.Balance(attoflow: received))
-        let vault = self.signerRef.storage
-            .borrow<&FlowToken.Vault>(from: /storage/flowTokenVault)
-            ?? panic("No FlowToken.Vault")
-        vault.deposit(from: <- withdrawn)
-    }
-}
-`;
-
-// ─── End-to-end actions ─────────────────────────────────────────────────────────
-
-export type WrapSource = "vault" | "coa";
+// ─── End-to-end wrap action ────────────────────────────────────────────────────
 
 export interface WrapParams {
-  /** Whole-FLOW amount as UFix64 string (e.g. "5.00000000"). */
   amountUFix64: string;
-  /** Amount in wei (must match amountUFix64). */
   amountWei: bigint;
-  /**
-   * Where the FLOW comes from. `"vault"` (default) uses the Cadence
-   * FlowToken.Vault at /storage/flowTokenVault. `"coa"` withdraws from the
-   * signer's COA EVM-side balance. Both run through the same JanusFlow.wrap
-   * router call — privacy is identical.
-   */
   source?: WrapSource;
 }
 
 export interface WrapResult {
-  /** Sealed Cadence tx id. */
   txId: string;
-  /** Blinding factor used — CALLER MUST PERSIST for future spends. */
   blinding: bigint;
-  /** Resulting commitment (caller's new shielded balance). */
   commitment: Point;
 }
 
-/**
- * Wrap N FLOW into the caller's JanusFlow shielded slot.
- *
- * Side-effects:
- *   - msg.value = amountWei (VISIBLE — this is the wrap boundary).
- *   - Sender's Pedersen commitment is updated: C += Pedersen(amountWei, blinding).
- *
- * RETURNS the random blinding. The CALLER MUST STORE IT — without (balance,
- * blinding) you cannot later construct a shieldedTransfer or unwrap from the
- * resulting commitment.
- */
 export async function wrapAction(params: WrapParams): Promise<WrapResult> {
   const { amountUFix64, amountWei, source = "vault" } = params;
 
@@ -616,7 +332,7 @@ export async function wrapAction(params: WrapParams): Promise<WrapResult> {
   ];
   const proof = proofRes.proof.map((s) => BigInt(s));
 
-  const calldataHex = buildWrapCalldata(txCommit, proof);
+  const calldataHex = await buildWrapCalldata(txCommit, proof);
 
   const fcl = await getFcl();
   const cadence = source === "coa" ? TX_WRAP_FROM_COA : TX_WRAP;
@@ -653,49 +369,85 @@ export async function wrapAction(params: WrapParams): Promise<WrapResult> {
   };
 }
 
+// ─── End-to-end send-shielded-tip action (v0.4.1: encrypted memo) ─────────────
+
+/** PrivateTip-specific Cadence tx: shielded transfer + recordTip with encrypted memo. */
+export const TX_SEND_SHIELDED_TIP = `
+import JanusFlow from 0x5dcbeb41055ec57e
+import PrivateTip from 0xb9ac529c14a4c5a1
+
+transaction(
+    recipient: Address,
+    recipientEVMHex: String,
+    publicInputs: [UInt256],
+    proof: [UInt256],
+    calldataHex: String,
+    memoCiphertext: [UInt8],
+    memoEphPubkeyX: UInt256,
+    memoEphPubkeyY: UInt256
+) {
+    let signerRef: auth(BorrowValue) &Account
+
+    prepare(signer: auth(BorrowValue) &Account) {
+        self.signerRef = signer
+    }
+
+    execute {
+        assert(
+            publicInputs.length == 6,
+            message: "publicInputs must be 6 UInt256 (C_old, C_tx, C_new)"
+        )
+        assert(
+            proof.length == 8,
+            message: "proof must be 8 UInt256 (Groth16)"
+        )
+
+        JanusFlow.shieldedTransfer(
+            signer: self.signerRef,
+            toEVMHex: recipientEVMHex,
+            publicInputs: publicInputs,
+            proof: proof,
+            calldataHex: calldataHex
+        )
+
+        let ciphertextRef: [UInt256] = [publicInputs[2], publicInputs[3]]
+
+        let tipID = PrivateTip.recordTip(
+            sender: self.signerRef,
+            recipient: recipient,
+            ciphertextRef: ciphertextRef,
+            memoCiphertext: memoCiphertext,
+            memoEphPubkeyX: memoEphPubkeyX,
+            memoEphPubkeyY: memoEphPubkeyY
+        )
+        log("PrivateTip.recordTip emitted shielded tipID=".concat(tipID.toString()))
+    }
+}
+`;
+
 export interface SendShieldedTipParams {
-  /** Recipient's Flow Cadence address (for PrivateTip indexing). */
   recipientFlowAddr: string;
-  /** Recipient's COA EVM hex (target of JanusFlow.shieldedTransfer). */
   recipientCoaHex: string;
-  /** Amount being sent in wei (HIDDEN on-chain after the call). */
   transferAmountWei: bigint;
-  /** Caller's CURRENT cleartext balance in wei (must match stored commit). */
   oldBalanceWei: bigint;
-  /** Caller's CURRENT blinding factor for the stored commit. */
   oldBlinding: bigint;
-  /** Optional public memo (max 280 chars). */
+  /** Optional plaintext memo. Encrypted client-side; never sent in cleartext. */
   memo?: string;
+  /**
+   * Recipient's MemoKey pubkey. Required when `memo` is set. Fetched via
+   * `getRecipientMemoPubkey()` before calling sendShieldedTipAction.
+   */
+  recipientMemoPubkey?: Point;
 }
 
 export interface SendShieldedTipResult {
-  /** Sealed Cadence tx id. */
   txId: string;
-  /** New blinding for the residual commitment — CALLER MUST PERSIST. */
   newBlinding: bigint;
-  /** Blinding used for the transfer commit — useful for off-chain receipts. */
   transferBlinding: bigint;
-  /** Sender's new (residual) commitment. */
   newCommit: Point;
-  /** Sender's new cleartext balance (oldBalance - transferAmount). */
   newBalanceWei: bigint;
 }
 
-/**
- * Send a shielded tip — full pipeline.
- *
- *   1. Build the confidential-transfer proof (server-side).
- *   2. Build EVM calldata for JanusFlow.shieldedTransfer.
- *   3. Submit the Cadence transaction that calls JanusFlow.shieldedTransfer
- *      and PrivateTip.recordTip atomically.
- *
- * Privacy guarantees (from JanusFlow v0.3):
- *   - Calldata: amount hidden in the Pedersen commits, NO cleartext.
- *   - Events: JanusFlow emits ConfidentialTransfer(from, to) — NO amount.
- *            PrivateTip emits TipSentShielded — NO amount.
- *   - Storage: commitment updates are point ops; observer sees C changes
- *              but cannot extract the amount.
- */
 export async function sendShieldedTipAction(
   params: SendShieldedTipParams
 ): Promise<SendShieldedTipResult> {
@@ -706,6 +458,7 @@ export async function sendShieldedTipAction(
     oldBalanceWei,
     oldBlinding,
     memo,
+    recipientMemoPubkey,
   } = params;
 
   if (transferAmountWei > oldBalanceWei) {
@@ -713,8 +466,13 @@ export async function sendShieldedTipAction(
       `Insufficient shielded balance: have ${oldBalanceWei} wei, need ${transferAmountWei} wei`
     );
   }
+  if (memo && memo.length > 0 && !recipientMemoPubkey) {
+    throw new Error(
+      "sendShieldedTipAction: recipientMemoPubkey is required when memo is set"
+    );
+  }
 
-  // 1. Build proof
+  // 1. Build proof.
   const proofRes = await generateShieldedTransferProof({
     oldBalance: oldBalanceWei,
     oldBlinding,
@@ -724,14 +482,25 @@ export async function sendShieldedTipAction(
   const publicInputs = proofRes.publicInputs.map((s) => BigInt(s));
   const proof = proofRes.proof.map((s) => BigInt(s));
 
-  // 2. Build EVM calldata
-  const calldataHex = buildShieldedTransferCalldata(
+  // 2. Build EVM calldata.
+  const calldataHex = await buildShieldedTransferCalldata(
     recipientCoaHex,
     publicInputs,
     proof
   );
 
-  // 3. Submit Cadence tx
+  // 3. Encrypt memo (or send empty payload).
+  let memoCiphertext: number[] = [];
+  let memoEphPubkeyX = 0n;
+  let memoEphPubkeyY = 1n;
+  if (memo && memo.length > 0 && recipientMemoPubkey) {
+    const encrypted = await encryptText(memo, recipientMemoPubkey);
+    memoCiphertext = Array.from(encrypted.ciphertext);
+    memoEphPubkeyX = encrypted.ephemeralPubkey.x;
+    memoEphPubkeyY = encrypted.ephemeralPubkey.y;
+  }
+
+  // 4. Submit Cadence tx.
   const fcl = await getFcl();
   const txId = await fcl.mutate({
     cadence: TX_SEND_SHIELDED_TIP,
@@ -749,7 +518,13 @@ export async function sendShieldedTipAction(
         t.Array(t.UInt256)
       ),
       arg(calldataHex, t.String),
-      arg(memo ?? "", t.String),
+      arg(
+        memoCiphertext.map((b) => b.toString()),
+        // @ts-expect-error — fcl types missing
+        t.Array(t.UInt8)
+      ),
+      arg(memoEphPubkeyX.toString(), t.UInt256),
+      arg(memoEphPubkeyY.toString(), t.UInt256),
     ],
     proposer: fcl.authz,
     payer: fcl.authz,
@@ -770,28 +545,13 @@ export async function sendShieldedTipAction(
   };
 }
 
+// ─── Unwrap action ─────────────────────────────────────────────────────────────
+
 export interface UnwrapParams {
-  /** Wei being released (VISIBLE — boundary out). */
   claimedAmountWei: bigint;
-  /** EVM hex address that receives the FLOW (typically the signer's own COA). */
   recipientEvmHex: string;
-  /** Caller's CURRENT cleartext balance in wei. */
   oldBalanceWei: bigint;
-  /** Caller's CURRENT blinding factor. */
   oldBlinding: bigint;
-  /**
-   * If true, the unwrap is bundled with a COA -> Cadence FlowToken.Vault
-   * sweep in the SAME atomic Cadence tx. The user sees the FLOW in their
-   * Cadence wallet immediately — no follow-up "withdraw from COA" step.
-   * Requires `recipientEvmHex` == signer's own COA (this is the common case
-   * — there's no privacy gain from leaving it in the COA).
-   *
-   * When `toCadenceVault` is true, the value of `recipientEvmHex` passed in
-   * is IGNORED (the bundled tx derives the recipient from the signer's COA
-   * inside Cadence).
-   *
-   * @default false — preserves the original unwrap-to-COA-only behavior.
-   */
   toCadenceVault?: boolean;
 }
 
@@ -802,17 +562,6 @@ export interface UnwrapResult {
   newBalanceWei: bigint;
 }
 
-/**
- * Unwrap (release) N FLOW from the caller's shielded slot.
- *
- * Requires TWO proofs:
- *   1. amount-disclose:  binds claimedAmountWei to a fresh Pedersen commit.
- *   2. confidential-transfer: proves caller's stored commit = txCommit + newCommit.
- *
- * NOTE: claimedAmountWei is VISIBLE on calldata and emitted in
- * JanusFlow.Unwrapped(user, recipient, amount). This is by design — it's
- * the unwrap boundary.
- */
 export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> {
   const {
     claimedAmountWei,
@@ -828,9 +577,7 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
     );
   }
 
-  // Generate amount-disclose proof for the claimed amount.
   const amountRes = await generateAmountDiscloseProof(claimedAmountWei);
-  // Generate confidential-transfer proof using the SAME blinding for tx commit.
   const transferRes = await generateShieldedTransferProof({
     oldBalance: oldBalanceWei,
     oldBlinding,
@@ -846,16 +593,13 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
   const transferPublicInputs = transferRes.publicInputs.map((s) => BigInt(s));
   const transferProof = transferRes.proof.map((s) => BigInt(s));
 
-  // Calldata always uses recipientEvmHex == signer's COA so EVM JanusFlow
-  // sends the FLOW there. The bundled tx then sweeps COA -> vault inside
-  // the same Cadence transaction.
-  const calldataHex = buildUnwrapCalldata(
+  const calldataHex = await buildUnwrapCalldata(
     claimedAmountWei,
     recipientEvmHex,
     txCommit,
     amountProof,
     transferPublicInputs,
-    transferProof,
+    transferProof
   );
 
   const claimedAmountUFix64 = formatWeiToFlowUFix64(claimedAmountWei);
@@ -935,7 +679,7 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
   };
 }
 
-// ─── PrivateTip Cadence script builders ─────────────────────────────────────────
+// ─── PrivateTip Cadence script builders ───────────────────────────────────────
 
 export function buildIsPausedScript(): string {
   return `
@@ -973,40 +717,38 @@ export function buildGetTipCountScript(): string {
   `;
 }
 
-// ─── Address / Balance Helpers ─────────────────────────────────────────────────
+// ─── Memo encryption — recipient pubkey lookup (PrivateTip-specific) ──────────
 
-export function parseFlowToWei(flowStr: string): bigint {
-  const trimmed = flowStr.trim();
-  const parts = trimmed.split(".");
-  const wholeStr = parts[0] || "0";
-  let fracStr = parts[1] || "";
-  while (fracStr.length < 18) fracStr += "0";
-  if (fracStr.length > 18) fracStr = fracStr.slice(0, 18);
-  const combined = wholeStr + fracStr;
-  const clean = combined.replace(/^0+/, "") || "0";
-  return BigInt(clean);
+/** Resolve a recipient's published memo pubkey via PrivateTip.getMemoPubkey. */
+export async function getRecipientMemoPubkey(flowAddr: string): Promise<Point | null> {
+  const fcl = await getFcl();
+  const script = `
+    import PrivateTip from 0xb9ac529c14a4c5a1
+    access(all) fun main(owner: Address): {String: UInt256}? {
+      return PrivateTip.getMemoPubkey(owner: owner)
+    }
+  `;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = (await fcl.query({
+      cadence: script,
+      args: (arg: any, t: any) => [arg(flowAddr, t.Address)],
+    })) as { x: string; y: string } | null;
+    if (!result) return null;
+    return { x: BigInt(result.x), y: BigInt(result.y) };
+  } catch {
+    return null;
+  }
 }
 
-export function formatWeiToFlow(wei: bigint, decimals = 8): string {
-  const whole = wei / FLOW_SCALE;
-  const remainder = wei % FLOW_SCALE;
-  const fracStr = remainder.toString().padStart(18, "0").slice(0, decimals);
-  return `${whole.toString()}.${fracStr}`;
-}
-
-/** UFix64-safe formatting (always 8 decimal places). */
-export function formatWeiToFlowUFix64(wei: bigint): string {
-  return formatWeiToFlow(wei, 8);
-}
-
-export function formatPoint(p: Point): string {
-  return `(0x${p.x.toString(16)}, 0x${p.y.toString(16)})`;
-}
-
-export function isValidFlowAddress(addr: string): boolean {
-  return /^0x[0-9a-fA-F]{16}$/.test(addr.trim());
-}
-
-export function isValidFlowAmount(amount: string): boolean {
-  return /^\d+(\.\d{1,18})?$/.test(amount.trim()) && parseFloat(amount.trim()) > 0;
+/** Check whether an account has BOTH a COA and a published MemoKey. */
+export async function recipientFullyConfigured(flowAddr: string): Promise<{
+  hasCoa: boolean;
+  hasMemoKey: boolean;
+}> {
+  const [coaOk, pk] = await Promise.all([
+    hasCOA(flowAddr, "testnet"),
+    getRecipientMemoPubkey(flowAddr),
+  ]);
+  return { hasCoa: coaOk, hasMemoKey: pk !== null };
 }
