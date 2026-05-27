@@ -53,6 +53,8 @@ import { toast } from "sonner";
 import {
   getCoaEvmAddress,
   getCommitment,
+  getCoaBalanceWei,
+  getFlowVaultBalanceWei,
   wrapAction,
   isValidFlowAmount,
   parseFlowToWei,
@@ -64,6 +66,7 @@ import {
   JANUS_FLOW_EVM,
   SDK_VERSION,
   type Point,
+  type WrapSource,
 } from "@/lib/tip-actions";
 
 // --- Local-storage helpers (mirrors /send and /claim) -------------------------
@@ -117,6 +120,11 @@ export default function WrapPage() {
   const [shielded, setShielded] = useState<ShieldedState | null>(null);
   const [coaHex, setCoaHex] = useState<string | null>(null);
   const [chainCommit, setChainCommit] = useState<Point | null>(null);
+  const [vaultBalanceWei, setVaultBalanceWei] = useState<bigint>(BigInt(0));
+  const [coaBalanceWei, setCoaBalanceWei] = useState<bigint>(BigInt(0));
+  // "auto" = pick whichever has enough balance (vault preferred). Users can
+  // override if they specifically want one side or the other.
+  const [source, setSource] = useState<"auto" | WrapSource>("auto");
   const [amount, setAmount] = useState("1");
   const [wrapState, setWrapState] = useState<WrapState>({
     status: "loading",
@@ -125,6 +133,9 @@ export default function WrapPage() {
     wrappedFlow: null,
     newCommit: null,
   });
+
+  const [needsCoaSetup, setNeedsCoaSetup] = useState(false);
+  const [settingUpCoa, setSettingUpCoa] = useState(false);
 
   // -- Initial load: COA + on-chain commit + local shielded state --------------
 
@@ -138,10 +149,20 @@ export default function WrapPage() {
         const coa = await getCoaEvmAddress(userAddress);
         if (cancelled) return;
         setCoaHex(coa);
+        setNeedsCoaSetup(false);
 
         const c = await getCommitment(coa);
         if (cancelled) return;
         setChainCommit(c);
+
+        // Fetch both source balances so the UI can hint which side has enough.
+        const [vaultWei, coaWei] = await Promise.all([
+          getFlowVaultBalanceWei(userAddress),
+          getCoaBalanceWei(userAddress),
+        ]);
+        if (cancelled) return;
+        setVaultBalanceWei(vaultWei);
+        setCoaBalanceWei(coaWei);
 
         const s = loadShieldedState(userAddress);
         if (s) setShielded(s);
@@ -154,10 +175,25 @@ export default function WrapPage() {
           newCommit: null,
         });
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Detect missing COA → show setup CTA instead of error
+        if (msg.includes("No COA at /public/evm") || msg.includes("No COA")) {
+          if (!cancelled) {
+            setNeedsCoaSetup(true);
+            setWrapState({
+              status: "idle",
+              error: null,
+              txId: null,
+              wrappedFlow: null,
+              newCommit: null,
+            });
+          }
+          return;
+        }
         if (!cancelled) {
           setWrapState({
             status: "error",
-            error: err instanceof Error ? err.message : "Load failed",
+            error: msg,
             txId: null,
             wrappedFlow: null,
             newCommit: null,
@@ -170,6 +206,56 @@ export default function WrapPage() {
       cancelled = true;
     };
   }, [userAddress]);
+
+  // -- COA setup handler -----------------------------------------------------
+
+  const SETUP_COA_CDC = `
+import "EVM"
+
+transaction {
+    prepare(signer: auth(SaveValue, IssueStorageCapabilityController, PublishCapability) &Account) {
+        if signer.storage.borrow<&EVM.CadenceOwnedAccount>(from: /storage/evm) != nil {
+            return
+        }
+        let coa <- EVM.createCadenceOwnedAccount()
+        signer.storage.save(<-coa, to: /storage/evm)
+        let cap = signer.capabilities.storage.issue<&EVM.CadenceOwnedAccount>(/storage/evm)
+        signer.capabilities.publish(cap, at: /public/evm)
+    }
+}
+`;
+
+  const handleSetupCoa = useCallback(async () => {
+    setSettingUpCoa(true);
+    try {
+      const fcl = await import("@onflow/fcl");
+      const txId = await fcl.mutate({
+        cadence: SETUP_COA_CDC,
+        proposer: fcl.authz,
+        payer: fcl.authz,
+        authorizations: [fcl.authz],
+        limit: 100,
+      });
+      toast.info(`COA setup tx submitted: ${txId.slice(0, 10)}...`);
+      await fcl.tx(txId).onceSealed();
+      toast.success("COA created! Reloading...");
+      // Trigger reload of the useEffect by toggling needsCoaSetup
+      setNeedsCoaSetup(false);
+      // Refetch COA
+      if (userAddress) {
+        const coa = await getCoaEvmAddress(userAddress);
+        setCoaHex(coa);
+        const c = await getCommitment(coa);
+        setChainCommit(c);
+      }
+    } catch (err) {
+      toast.error(
+        `COA setup failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      setSettingUpCoa(false);
+    }
+  }, [userAddress, SETUP_COA_CDC]);
 
   // -- Wrap handler ----------------------------------------------------------
 
@@ -215,6 +301,41 @@ export default function WrapPage() {
 
     const amountUFix64 = formatWeiToFlowUFix64(amountWei);
 
+    // Resolve auto source: prefer vault (cheaper — no COA withdrawal), fall
+    // back to COA if vault doesn't have enough. Reject early if neither side
+    // can cover the amount.
+    let resolvedSource: WrapSource;
+    if (source === "auto") {
+      if (vaultBalanceWei >= amountWei) {
+        resolvedSource = "vault";
+      } else if (coaBalanceWei >= amountWei) {
+        resolvedSource = "coa";
+      } else {
+        setWrapState({
+          status: "error",
+          error: `Insufficient FLOW: vault has ${formatWeiToFlow(vaultBalanceWei, 4)}, COA has ${formatWeiToFlow(coaBalanceWei, 4)}, need ${amount}.`,
+          txId: null,
+          wrappedFlow: null,
+          newCommit: null,
+        });
+        return;
+      }
+    } else {
+      resolvedSource = source;
+      const available =
+        resolvedSource === "vault" ? vaultBalanceWei : coaBalanceWei;
+      if (available < amountWei) {
+        setWrapState({
+          status: "error",
+          error: `Selected source (${resolvedSource}) has only ${formatWeiToFlow(available, 4)} FLOW, need ${amount}.`,
+          txId: null,
+          wrappedFlow: null,
+          newCommit: null,
+        });
+        return;
+      }
+    }
+
     setWrapState({
       status: "building_proof",
       error: null,
@@ -232,7 +353,11 @@ export default function WrapPage() {
         newCommit: null,
       });
 
-      const result = await wrapAction({ amountUFix64, amountWei });
+      const result = await wrapAction({
+        amountUFix64,
+        amountWei,
+        source: resolvedSource,
+      });
 
       // Sum into the local-known balance (additive across wraps in same
       // session). On a fresh slot the existing balance is 0 wei and the
@@ -248,7 +373,7 @@ export default function WrapPage() {
       saveShieldedState(userAddress, newState);
       setShielded(newState);
 
-      // Refresh on-chain commit for the visual confirmation.
+      // Refresh on-chain commit + source balances for the visual confirmation.
       if (coaHex) {
         try {
           const c = await getCommitment(coaHex);
@@ -256,6 +381,16 @@ export default function WrapPage() {
         } catch {
           // Non-fatal — surface no error, the user already has txId.
         }
+      }
+      try {
+        const [vaultWei, coaWei] = await Promise.all([
+          getFlowVaultBalanceWei(userAddress),
+          getCoaBalanceWei(userAddress),
+        ]);
+        setVaultBalanceWei(vaultWei);
+        setCoaBalanceWei(coaWei);
+      } catch {
+        // Non-fatal — UI hints can be slightly stale until next visit.
       }
 
       setWrapState({
@@ -279,7 +414,7 @@ export default function WrapPage() {
       });
       toast.error("Wrap failed", { description: msg });
     }
-  }, [userAddress, amount, coaHex]);
+  }, [userAddress, amount, coaHex, source, vaultBalanceWei, coaBalanceWei]);
 
   const isSubmitting =
     wrapState.status === "validating" ||
@@ -311,6 +446,48 @@ export default function WrapPage() {
           <Button onClick={() => authenticate()} size="lg">
             Connect Wallet
           </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // -- COA setup required ---------------------------------------------------
+
+  if (needsCoaSetup) {
+    return (
+      <div className="max-w-lg mx-auto px-4 py-12">
+        <div className="mb-8">
+          <Link
+            href="/"
+            className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4 mr-1" />
+            Back
+          </Link>
+        </div>
+        <div className="flex flex-col items-center text-center py-16">
+          <div className="w-16 h-16 rounded-2xl bg-amber-100 dark:bg-amber-950 flex items-center justify-center mb-6">
+            <Coins className="w-8 h-8 text-amber-600 dark:text-amber-400" />
+          </div>
+          <h2 className="text-xl font-bold mb-2">One-time wallet setup</h2>
+          <p className="text-sm text-muted-foreground mb-2 max-w-sm">
+            Your Flow account doesn&apos;t have a COA (Cadence Owned Account) yet —
+            this is the bridge required to interact with Flow EVM.
+          </p>
+          <p className="text-sm text-muted-foreground mb-6 max-w-sm">
+            Click below to create one. This is a one-time, free setup (gas only).
+          </p>
+          <Button
+            onClick={handleSetupCoa}
+            size="lg"
+            disabled={settingUpCoa}
+          >
+            {settingUpCoa ? "Setting up..." : "Setup Wallet for Shielded Transfers"}
+          </Button>
+          <p className="text-xs text-muted-foreground mt-4 max-w-sm">
+            After setup, you may need to fund the COA with a small amount of FLOW
+            to pay EVM gas. The wallet popup will guide you.
+          </p>
         </div>
       </div>
     );
@@ -411,6 +588,68 @@ export default function WrapPage() {
       {/* Wrap form (hidden after success) */}
       {wrapState.status !== "success" && (
         <div className="rounded-xl border border-border bg-card p-6 space-y-4 mb-6">
+          {/* Source picker — vault or COA. Both run through JanusFlow.wrap,
+              privacy semantics are identical (msg.value visible at boundary). */}
+          <div>
+            <label className="text-xs font-medium text-muted-foreground mb-1 block">
+              Source of FLOW
+            </label>
+            <div className="grid grid-cols-3 gap-2 mb-1">
+              <button
+                type="button"
+                onClick={() => setSource("auto")}
+                disabled={isSubmitting}
+                className={`px-3 py-2 text-xs rounded border transition-colors ${
+                  source === "auto"
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-background border-border hover:bg-muted"
+                }`}
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                onClick={() => setSource("vault")}
+                disabled={isSubmitting}
+                className={`px-3 py-2 text-xs rounded border transition-colors ${
+                  source === "vault"
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-background border-border hover:bg-muted"
+                }`}
+              >
+                Vault
+              </button>
+              <button
+                type="button"
+                onClick={() => setSource("coa")}
+                disabled={isSubmitting}
+                className={`px-3 py-2 text-xs rounded border transition-colors ${
+                  source === "coa"
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-background border-border hover:bg-muted"
+                }`}
+              >
+                COA
+              </button>
+            </div>
+            <div className="text-[10px] text-muted-foreground space-y-0.5">
+              <p>
+                Vault: <span className="font-mono">{formatWeiToFlow(vaultBalanceWei, 4)}</span> FLOW
+                {" · "}
+                COA: <span className="font-mono">{formatWeiToFlow(coaBalanceWei, 4)}</span> FLOW
+              </p>
+              <p>
+                {source === "auto" &&
+                  "Auto picks vault first (cheaper); falls back to COA if vault is low."}
+                {source === "vault" &&
+                  "Withdraws from your Cadence FlowToken vault."}
+                {source === "coa" &&
+                  "Withdraws from your COA (Flow EVM balance) in the same atomic tx."}
+                {" "}Privacy is identical either way.
+              </p>
+            </div>
+          </div>
+
           <div>
             <label className="text-xs font-medium text-muted-foreground mb-1 block">
               Amount to wrap (FLOW)

@@ -160,6 +160,98 @@ export async function getCoaEvmAddress(flowAddress: string): Promise<string> {
   return raw.startsWith("0x") ? raw : `0x${raw}`;
 }
 
+/**
+ * Check if a Flow account has a COA published at /public/evm.
+ *
+ * Used by the /send page to warn the user BEFORE submitting if the recipient
+ * can't actually unwrap the tip (no COA means JanusFlow.shieldedTransfer
+ * would credit a COA address that the recipient doesn't control).
+ *
+ * Returns `false` for any failure (no COA, account doesn't exist, network
+ * error). The caller treats `false` as "show warning, but allow override".
+ */
+export async function recipientHasCoa(flowAddress: string): Promise<boolean> {
+  const script = `
+    import EVM from 0x8c5303eaa26202d6
+
+    access(all) fun main(addr: Address): Bool {
+      let acct = getAccount(addr)
+      let coa = acct.capabilities.borrow<&EVM.CadenceOwnedAccount>(/public/evm)
+      return coa != nil
+    }
+  `;
+  const fcl = await getFcl();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = (await fcl.query({
+      cadence: script,
+      args: (arg: any, t: any) => [arg(flowAddress, t.Address)],
+    })) as boolean;
+    return raw === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the signer's COA attoFLOW balance via a script.
+ *
+ * Used by /wrap to decide whether the user can wrap from their vault, from
+ * their COA, or whether they need to top up. Returns 0n on any error
+ * (no COA, account doesn't exist).
+ */
+export async function getCoaBalanceWei(flowAddress: string): Promise<bigint> {
+  const script = `
+    import EVM from 0x8c5303eaa26202d6
+
+    access(all) fun main(addr: Address): UInt {
+      let acct = getAccount(addr)
+      let coa = acct.capabilities.borrow<&EVM.CadenceOwnedAccount>(/public/evm)
+        ?? panic("No COA")
+      return coa.balance().attoflow
+    }
+  `;
+  const fcl = await getFcl();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = (await fcl.query({
+      cadence: script,
+      args: (arg: any, t: any) => [arg(flowAddress, t.Address)],
+    })) as string;
+    return BigInt(raw);
+  } catch {
+    return BigInt(0);
+  }
+}
+
+/**
+ * Read the signer's Cadence FlowToken.Vault balance (UFix64 -> wei).
+ */
+export async function getFlowVaultBalanceWei(flowAddress: string): Promise<bigint> {
+  const script = `
+    import FungibleToken from 0x9a0766d93b6608b7
+    import FlowToken from 0x7e60df042a9c0868
+
+    access(all) fun main(addr: Address): UFix64 {
+      let acct = getAccount(addr)
+      let vault = acct.capabilities.borrow<&{FungibleToken.Balance}>(/public/flowTokenBalance)
+        ?? panic("No FlowToken.Balance capability")
+      return vault.balance
+    }
+  `;
+  const fcl = await getFcl();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = (await fcl.query({
+      cadence: script,
+      args: (arg: any, t: any) => [arg(flowAddress, t.Address)],
+    })) as string;
+    return parseFlowToWei(raw);
+  } catch {
+    return BigInt(0);
+  }
+}
+
 // ─── Calldata builders ──────────────────────────────────────────────────────────
 
 /**
@@ -374,13 +466,124 @@ transaction(
 }
 `;
 
+/**
+ * Wrap-from-COA: identical privacy semantics to TX_WRAP but the FLOW is
+ * sourced from the signer's COA (EVM-side balance) rather than their Cadence
+ * FlowToken.Vault. See cadence/transactions/jf_wrap_from_coa.cdc for design
+ * notes.
+ */
+export const TX_WRAP_FROM_COA = `
+import JanusFlow from 0x5dcbeb41055ec57e
+import FungibleToken from 0x9a0766d93b6608b7
+import FlowToken from 0x7e60df042a9c0868
+import EVM from 0x8c5303eaa26202d6
+
+transaction(
+    amount: UFix64,
+    txCommit: [UInt256],
+    amountProof: [UInt256],
+    calldataHex: String
+) {
+    let payment: @FlowToken.Vault
+    let signerRef: auth(BorrowValue) &Account
+
+    prepare(signer: auth(BorrowValue) &Account) {
+        self.signerRef = signer
+        let coa = signer.storage
+            .borrow<auth(EVM.Withdraw) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+            ?? panic("No COA at /storage/evm")
+        let flowUnits: UInt64 = UInt64(amount * 100_000_000.0)
+        let attoflowU: UInt = UInt(flowUnits) * 10_000_000_000
+        let withdrawn <- coa.withdraw(balance: EVM.Balance(attoflow: attoflowU))
+        self.payment <- withdrawn
+    }
+
+    execute {
+        JanusFlow.wrap(
+            signer: self.signerRef,
+            vault: <- self.payment,
+            txCommit: txCommit,
+            amountProof: amountProof,
+            calldataHex: calldataHex
+        )
+    }
+}
+`;
+
+/**
+ * Unwrap-to-vault: atomic unwrap + sweep COA -> Cadence FlowToken.Vault.
+ * One click, no follow-up "withdraw COA" transaction. See
+ * cadence/transactions/jf_unwrap_to_vault.cdc for design notes.
+ */
+export const TX_UNWRAP_TO_VAULT = `
+import JanusFlow from 0x5dcbeb41055ec57e
+import FungibleToken from 0x9a0766d93b6608b7
+import FlowToken from 0x7e60df042a9c0868
+import EVM from 0x8c5303eaa26202d6
+
+transaction(
+    claimedAmount: UFix64,
+    txCommit: [UInt256],
+    amountProof: [UInt256],
+    transferPublicInputs: [UInt256],
+    transferProof: [UInt256],
+    calldataHex: String
+) {
+    let signerRef: auth(BorrowValue) &Account
+    let preBalance: UInt
+    let recipientEVMHex: String
+
+    prepare(signer: auth(BorrowValue) &Account) {
+        self.signerRef = signer
+        let coaSnap = signer.storage
+            .borrow<&EVM.CadenceOwnedAccount>(from: /storage/evm)
+            ?? panic("No COA at /storage/evm")
+        self.preBalance = coaSnap.balance().attoflow
+        self.recipientEVMHex = coaSnap.address().toString()
+    }
+
+    execute {
+        JanusFlow.unwrap(
+            signer: self.signerRef,
+            claimedAmount: claimedAmount,
+            recipientEVMHex: self.recipientEVMHex,
+            txCommit: txCommit,
+            amountProof: amountProof,
+            transferPublicInputs: transferPublicInputs,
+            transferProof: transferProof,
+            calldataHex: calldataHex
+        )
+        let coa = self.signerRef.storage
+            .borrow<auth(EVM.Withdraw) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+            ?? panic("COA disappeared after unwrap")
+        let postBalance = coa.balance().attoflow
+        assert(postBalance > self.preBalance, message: "COA balance did not increase")
+        let received: UInt = postBalance - self.preBalance
+        let withdrawn <- coa.withdraw(balance: EVM.Balance(attoflow: received))
+        let vault = self.signerRef.storage
+            .borrow<&FlowToken.Vault>(from: /storage/flowTokenVault)
+            ?? panic("No FlowToken.Vault")
+        vault.deposit(from: <- withdrawn)
+    }
+}
+`;
+
 // ─── End-to-end actions ─────────────────────────────────────────────────────────
+
+export type WrapSource = "vault" | "coa";
 
 export interface WrapParams {
   /** Whole-FLOW amount as UFix64 string (e.g. "5.00000000"). */
   amountUFix64: string;
   /** Amount in wei (must match amountUFix64). */
   amountWei: bigint;
+  /**
+   * Where the FLOW comes from. `"vault"` (default) uses the Cadence
+   * FlowToken.Vault at /storage/flowTokenVault. `"coa"` withdraws from the
+   * signer's COA EVM-side balance. Both run through the same JanusFlow.wrap
+   * router call — privacy is identical.
+   */
+  source?: WrapSource;
 }
 
 export interface WrapResult {
@@ -404,7 +607,7 @@ export interface WrapResult {
  * resulting commitment.
  */
 export async function wrapAction(params: WrapParams): Promise<WrapResult> {
-  const { amountUFix64, amountWei } = params;
+  const { amountUFix64, amountWei, source = "vault" } = params;
 
   const proofRes = await generateAmountDiscloseProof(amountWei);
   const txCommit: [bigint, bigint] = [
@@ -416,8 +619,9 @@ export async function wrapAction(params: WrapParams): Promise<WrapResult> {
   const calldataHex = buildWrapCalldata(txCommit, proof);
 
   const fcl = await getFcl();
+  const cadence = source === "coa" ? TX_WRAP_FROM_COA : TX_WRAP;
   const txId = await fcl.mutate({
-    cadence: TX_WRAP,
+    cadence,
     args: (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
       arg(amountUFix64, t.UFix64),
       arg(
@@ -575,6 +779,20 @@ export interface UnwrapParams {
   oldBalanceWei: bigint;
   /** Caller's CURRENT blinding factor. */
   oldBlinding: bigint;
+  /**
+   * If true, the unwrap is bundled with a COA -> Cadence FlowToken.Vault
+   * sweep in the SAME atomic Cadence tx. The user sees the FLOW in their
+   * Cadence wallet immediately — no follow-up "withdraw from COA" step.
+   * Requires `recipientEvmHex` == signer's own COA (this is the common case
+   * — there's no privacy gain from leaving it in the COA).
+   *
+   * When `toCadenceVault` is true, the value of `recipientEvmHex` passed in
+   * is IGNORED (the bundled tx derives the recipient from the signer's COA
+   * inside Cadence).
+   *
+   * @default false — preserves the original unwrap-to-COA-only behavior.
+   */
+  toCadenceVault?: boolean;
 }
 
 export interface UnwrapResult {
@@ -601,6 +819,7 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
     recipientEvmHex,
     oldBalanceWei,
     oldBlinding,
+    toCadenceVault = false,
   } = params;
 
   if (claimedAmountWei > oldBalanceWei) {
@@ -627,6 +846,9 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
   const transferPublicInputs = transferRes.publicInputs.map((s) => BigInt(s));
   const transferProof = transferRes.proof.map((s) => BigInt(s));
 
+  // Calldata always uses recipientEvmHex == signer's COA so EVM JanusFlow
+  // sends the FLOW there. The bundled tx then sweeps COA -> vault inside
+  // the same Cadence transaction.
   const calldataHex = buildUnwrapCalldata(
     claimedAmountWei,
     recipientEvmHex,
@@ -639,33 +861,62 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
   const claimedAmountUFix64 = formatWeiToFlowUFix64(claimedAmountWei);
 
   const fcl = await getFcl();
+
+  const cadence = toCadenceVault ? TX_UNWRAP_TO_VAULT : TX_UNWRAP;
+  const args = toCadenceVault
+    ? (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
+        arg(claimedAmountUFix64, t.UFix64),
+        arg(
+          txCommit.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(
+          amountProof.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(
+          transferPublicInputs.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(
+          transferProof.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(calldataHex, t.String),
+      ]
+    : (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
+        arg(claimedAmountUFix64, t.UFix64),
+        arg(recipientEvmHex, t.String),
+        arg(
+          txCommit.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(
+          amountProof.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(
+          transferPublicInputs.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(
+          transferProof.map((v) => v.toString()),
+          // @ts-expect-error — fcl types missing
+          t.Array(t.UInt256)
+        ),
+        arg(calldataHex, t.String),
+      ];
+
   const txId = await fcl.mutate({
-    cadence: TX_UNWRAP,
-    args: (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
-      arg(claimedAmountUFix64, t.UFix64),
-      arg(recipientEvmHex, t.String),
-      arg(
-        txCommit.map((v) => v.toString()),
-        // @ts-expect-error — fcl types missing
-        t.Array(t.UInt256)
-      ),
-      arg(
-        amountProof.map((v) => v.toString()),
-        // @ts-expect-error — fcl types missing
-        t.Array(t.UInt256)
-      ),
-      arg(
-        transferPublicInputs.map((v) => v.toString()),
-        // @ts-expect-error — fcl types missing
-        t.Array(t.UInt256)
-      ),
-      arg(
-        transferProof.map((v) => v.toString()),
-        // @ts-expect-error — fcl types missing
-        t.Array(t.UInt256)
-      ),
-      arg(calldataHex, t.String),
-    ],
+    cadence,
+    args,
     proposer: fcl.authz,
     payer: fcl.authz,
     authorizations: [fcl.authz],
