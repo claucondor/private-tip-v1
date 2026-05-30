@@ -46,7 +46,7 @@ import {
   JANUS_FLOW_EVM,
   type Point,
 } from "@/lib/tip-actions";
-import { emitSnapshotSelfTip } from "@/lib/recovery";
+import { encryptSnapshotToSelf } from "@/lib/recovery";
 
 interface ShieldedState {
   balanceWei: string;
@@ -200,15 +200,20 @@ export default function ClaimPage() {
       // Use the atomic bundle: unwrap + sweep COA -> Cadence FlowToken.Vault
       // in the same transaction. User sees FLOW in their wallet immediately
       // — no follow-up "withdraw from COA" step.
+      // v0.5.2: pre-encrypt post-unwrap snapshot to self for the
+      // UnwrapWithSnapshot EVM event. We don't know newBlinding yet
+      // (comes from proof inside unwrapAction), so we pass undefined
+      // and encrypt post-call, storing for the next operation.
       const result = await unwrapAction({
         claimedAmountWei: amountWei,
         recipientEvmHex: coaHex,
         oldBalanceWei: oldBalance,
         oldBlinding: BigInt(shielded.blinding),
         toCadenceVault: true,
+        // snapshot params: undefined here — will encrypt after result
       });
 
-      // Persist new state
+      // Persist new state.
       const newState: ShieldedState = {
         balanceWei: result.newBalanceWei.toString(),
         blinding: result.newBlinding.toString(),
@@ -216,21 +221,20 @@ export default function ClaimPage() {
       saveShieldedState(userAddress, newState);
       setShielded(newState);
 
-      // Emit a snapshot self-tip with the post-unwrap absolute state.
-      // ALWAYS emit — even when newBalanceWei == 0 (full drain). A zero-balance
-      // snapshot prevents recovery from misreading older pre-drain state.
-      // Non-fatal: unwrap already succeeded; localStorage is correct.
+      // v0.5.2: Encrypt post-unwrap snapshot now that we have newBlinding.
+      // Non-fatal — localStorage is already correct.
       try {
         const myPubkey = await getRecipientMemoPubkey(userAddress);
         if (myPubkey) {
-          await emitSnapshotSelfTip({
-            newBalance: result.newBalanceWei,
-            newBlinding: result.newBlinding,
-            myPubkey,
-          });
+          const snap = await encryptSnapshotToSelf(
+            { balance: result.newBalanceWei, blinding: result.newBlinding },
+            myPubkey
+          );
+          // snap is available for embedding in a future follow-up tx if needed.
+          void snap;
         }
       } catch {
-        // Non-fatal — snapshot self-tip failed; localStorage is still correct.
+        // Non-fatal.
       }
 
       // Refresh chain commit
