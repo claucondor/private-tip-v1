@@ -33,6 +33,7 @@ import {
 import Link from "next/link";
 import { toast } from "sonner";
 import { useAppStore } from "@/lib/store";
+import { saveSentMemo } from "@/lib/memo-mirror";
 import { useRouter } from "next/navigation";
 
 import {
@@ -46,7 +47,6 @@ import {
   formatWeiToFlow,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
-  SDK_VERSION,
   getRecipientMemoPubkey,
   type Point,
 } from "@/lib/tip-actions";
@@ -64,13 +64,13 @@ function shieldedKey(addr: string): string {
 
 function loadShieldedState(addr: string): ShieldedState | null {
   if (typeof window === "undefined") return null;
-  const raw = sessionStorage.getItem(shieldedKey(addr));
+  const raw = localStorage.getItem(shieldedKey(addr));
   return raw ? (JSON.parse(raw) as ShieldedState) : null;
 }
 
 function saveShieldedState(addr: string, state: ShieldedState): void {
   if (typeof window === "undefined") return;
-  sessionStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+  localStorage.setItem(shieldedKey(addr), JSON.stringify(state));
 }
 
 // --- Types ---------------------------------------------------------------------
@@ -112,6 +112,9 @@ export default function SendTipPage() {
   //   false     — no COA; warn user (override possible)
   const [recipientCoaOk, setRecipientCoaOk] = useState<boolean | null>(null);
   const [recipientCoaChecking, setRecipientCoaChecking] = useState(false);
+  // Same three-state for MemoKey published at /public/openjanusMemoKey.
+  // Drives whether the memo input is enabled and what helper text shows.
+  const [recipientMemoOk, setRecipientMemoOk] = useState<boolean | null>(null);
   // Set to true once the user has acknowledged the "no COA" warning,
   // letting them proceed with the send.
   const [coaWarningAcknowledged, setCoaWarningAcknowledged] = useState(false);
@@ -124,23 +127,34 @@ export default function SendTipPage() {
     newCommit: null,
   });
 
-  // Debounced recipient-COA check. Runs whenever the recipient field becomes
-  // a syntactically valid Flow address, so we can surface the warning BEFORE
-  // the user clicks Send (preventing accidental "stuck" tips).
+  // Debounced recipient-COA + MemoKey check. Runs whenever the recipient field
+  // becomes a syntactically valid Flow address, so we can surface BOTH the
+  // "no COA" warning AND the "no MemoKey → memo disabled" hint BEFORE the
+  // user clicks Send.
   useEffect(() => {
     setCoaWarningAcknowledged(false);
     if (!isValidFlowAddress(recipient)) {
       setRecipientCoaOk(null);
+      setRecipientMemoOk(null);
       return;
     }
     let cancelled = false;
     setRecipientCoaChecking(true);
     const t = setTimeout(async () => {
       try {
-        const ok = await recipientHasCoa(recipient);
-        if (!cancelled) setRecipientCoaOk(ok);
+        const [coaOk, memoPub] = await Promise.all([
+          recipientHasCoa(recipient),
+          getRecipientMemoPubkey(recipient),
+        ]);
+        if (!cancelled) {
+          setRecipientCoaOk(coaOk);
+          setRecipientMemoOk(memoPub !== null);
+        }
       } catch {
-        if (!cancelled) setRecipientCoaOk(false);
+        if (!cancelled) {
+          setRecipientCoaOk(false);
+          setRecipientMemoOk(false);
+        }
       } finally {
         if (!cancelled) setRecipientCoaChecking(false);
       }
@@ -150,6 +164,15 @@ export default function SendTipPage() {
       clearTimeout(t);
     };
   }, [recipient]);
+
+  // If the resolved recipient has no MemoKey, drop any stale memo the user
+  // typed before changing the recipient — prevents the SDK from throwing
+  // "recipientMemoPubkey is required" on submit.
+  useEffect(() => {
+    if (recipientMemoOk === false && memo.length > 0) {
+      setMemo("");
+    }
+  }, [recipientMemoOk, memo]);
 
   // Load shielded state on user-change.
   useEffect(() => {
@@ -265,21 +288,22 @@ export default function SendTipPage() {
       return;
     }
 
-    // v0.4.1: if the user typed a memo, the recipient MUST have a published
-    // MemoKey at /public/openjanusMemoKey — otherwise we can't encrypt to them.
-    let recipientMemoPubkey: Point | null = null;
-    if (memo && memo.length > 0) {
-      recipientMemoPubkey = await getRecipientMemoPubkey(recipient);
-      if (!recipientMemoPubkey) {
-        setSendState({
-          status: "error",
-          error:
-            "Recipient has no MemoKey published. They must run setup_account first to receive encrypted memos. Send without a memo, or ask them to set up their account.",
-          txId: null,
-          newCommit: null,
-        });
-        return;
-      }
+    // v0.4.4: a recipient MemoKey is REQUIRED for every shielded transfer —
+    // not just when the user types a memo. The encrypted ShieldedNote that
+    // accompanies each tip carries (amount, transferBlinding) plus the
+    // optional memo text; without a MemoKey the recipient could never decrypt
+    // those values and the tip would brick (commitment lands on-chain but
+    // never unwrappable). Refuse to send if MemoKey isn't published.
+    const recipientMemoPubkey = await getRecipientMemoPubkey(recipient);
+    if (!recipientMemoPubkey) {
+      setSendState({
+        status: "error",
+        error:
+          "Recipient has no MemoKey published. Without it they cannot unwrap. Ask them to run setup (Wrap page) first.",
+        txId: null,
+        newCommit: null,
+      });
+      return;
     }
 
     setSendState({
@@ -303,7 +327,7 @@ export default function SendTipPage() {
         oldBalanceWei,
         oldBlinding: BigInt(shielded.blinding),
         memo: memo || undefined,
-        recipientMemoPubkey: recipientMemoPubkey ?? undefined,
+        recipientMemoPubkey,
       });
 
       // PERSIST new (balance, blinding) so next tip works.
@@ -322,6 +346,12 @@ export default function SendTipPage() {
         memo: memo || null,
         claimed: false,
       });
+
+      // Persist plaintext memo locally so the sender can read it back from
+      // /tips. The on-chain ciphertext is encrypted to the recipient only.
+      if (memo && memo.length > 0) {
+        saveSentMemo({ sender: userAddress, recipient, memo });
+      }
 
       setSendState({
         status: "success",
@@ -372,10 +402,10 @@ export default function SendTipPage() {
           </Link>
         </div>
         <div className="flex flex-col items-center text-center py-16">
-          <div className="w-16 h-16 rounded-2xl bg-blue-100 dark:bg-blue-950 flex items-center justify-center mb-6">
-            <Gift className="w-8 h-8 text-blue-600 dark:text-blue-400" />
+          <div className="w-16 h-16 rounded-2xl bg-[#00EF8B]/15 border border-[#00EF8B]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#00EF8B_15%,transparent)]">
+            <Gift className="w-8 h-8 text-[#00EF8B]" />
           </div>
-          <h2 className="text-xl font-bold mb-2">Connect Your Wallet</h2>
+          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Connect Your Wallet</h2>
           <p className="text-sm text-muted-foreground mb-6 max-w-sm">
             Connect your wallet to send shielded tips.
           </p>
@@ -401,11 +431,11 @@ export default function SendTipPage() {
           </Link>
         </div>
         <div className="flex items-center gap-3 mb-8">
-          <div className="w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-950 flex items-center justify-center">
-            <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+          <div className="w-10 h-10 rounded-lg bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center">
+            <AlertTriangle className="w-5 h-5 text-[#B45309]" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold">Wrap First</h1>
+            <h1 className="text-2xl font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Wrap First</h1>
             <p className="text-sm text-muted-foreground">
               v0.3 orchestrator requires a pre-funded shielded slot
             </p>
@@ -468,27 +498,27 @@ export default function SendTipPage() {
       </div>
 
       <div className="flex items-center gap-3 mb-8">
-        <div className="w-10 h-10 rounded-lg bg-blue-100 dark:bg-blue-950 flex items-center justify-center">
-          <Gift className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+        <div className="w-10 h-10 rounded-lg bg-[#00EF8B]/15 border border-[#00EF8B]/30 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#00EF8B_12%,transparent)]">
+          <Gift className="w-5 h-5 text-[#00EF8B]" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold">Send a Shielded Tip</h1>
+          <h1 className="text-2xl font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Send a private tip</h1>
           <p className="text-sm text-muted-foreground">
-            Amount hidden — only sender, recipient, memo, and timestamp visible.
+            The amount is hidden. People can see who sent it and when, but not how much.
           </p>
         </div>
       </div>
 
       {/* Shielded balance summary */}
       {shielded && (
-        <div className="mb-6 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-4">
+        <div className="mb-6 rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/5 p-4">
           <div className="flex items-start gap-3">
-            <Shield className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+            <Shield className="w-5 h-5 text-[#00EF8B] shrink-0 mt-0.5" />
             <div className="text-xs flex-1">
               <p className="font-medium text-foreground mb-1">
                 Your shielded balance (local-known)
               </p>
-              <p className="text-sm text-emerald-700 dark:text-emerald-300 font-mono">
+              <p className="text-sm text-[#00EF8B] font-mono">
                 {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
               </p>
               <p className="text-[10px] text-muted-foreground mt-1">
@@ -523,8 +553,8 @@ export default function SendTipPage() {
                 </p>
               )}
               {!recipientCoaChecking && recipientCoaOk === true && (
-                <p className="text-[10px] text-emerald-700 dark:text-emerald-400">
-                  ✓ Recipient has a COA — they can unwrap this tip.
+                <p className="text-[10px] text-[#00EF8B]">
+                  ✓ Recipient is ready to claim tips.
                 </p>
               )}
               {!recipientCoaChecking && recipientCoaOk === false && (
@@ -533,12 +563,12 @@ export default function SendTipPage() {
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
                     <div className="text-[10px] text-amber-800 dark:text-amber-200 space-y-1">
                       <p className="font-medium">
-                        Recipient has no COA at /public/evm.
+                        Recipient hasn&apos;t opened the app yet.
                       </p>
                       <p>
-                        They can&apos;t unwrap this tip until they set one up
-                        (e.g. via this app&apos;s /wrap page). The FLOW
-                        will sit in their shielded slot until then.
+                        They&apos;ll need to connect, click &quot;Enable&quot;
+                        and set up before they can claim. The FLOW waits
+                        privately for them in the meantime.
                       </p>
                       <label className="flex items-center gap-1.5 mt-1 cursor-pointer">
                         <input
@@ -582,20 +612,45 @@ export default function SendTipPage() {
             type="text"
             value={memo}
             onChange={(e) => setMemo(e.target.value)}
-            placeholder="Thanks for the tip!"
+            placeholder={
+              recipientMemoOk === false
+                ? "Disabled — recipient has no MemoKey"
+                : "Thanks for the tip!"
+            }
             maxLength={280}
-            className="w-full px-3 py-2 text-sm border rounded bg-background"
-            disabled={isSubmitting || sendState.status === "success"}
+            className="w-full px-3 py-2 text-sm border rounded bg-background disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={
+              isSubmitting ||
+              sendState.status === "success" ||
+              recipientMemoOk === false
+            }
           />
-          <p className="text-[10px] text-muted-foreground mt-1">
-            Memo IS visible on-chain (in the TipSentShielded event).
-          </p>
+          {recipientMemoOk === true && (
+            <p className="text-[10px] text-[#00EF8B] mt-1">
+              ✓ Your memo + amount get encrypted just for the recipient. Only they can read them, and they need them to claim the tip.
+            </p>
+          )}
+          {recipientMemoOk === false && (
+            <p className="text-[10px] text-amber-700 dark:text-amber-400 mt-1">
+              Recipient hasn&apos;t enabled their private inbox yet. Send is blocked — they wouldn&apos;t be able to claim the tip. Ask them to open the app and click &quot;Enable&quot;.
+            </p>
+          )}
+          {recipientMemoOk === null && (
+            <p className="text-[10px] text-muted-foreground mt-1">
+              Every tip carries an encrypted note — recipient needs it to read the memo and claim the funds.
+            </p>
+          )}
         </div>
         <Button
           onClick={handleSendTip}
           className="w-full"
           size="lg"
-          disabled={isSubmitting || sendState.status === "success" || !shielded}
+          disabled={
+            isSubmitting ||
+            sendState.status === "success" ||
+            !shielded ||
+            recipientMemoOk === false
+          }
         >
           {isSubmitting ? (
             <>
@@ -616,9 +671,9 @@ export default function SendTipPage() {
 
       {/* Success: show ciphertext (visual proof of hiding) */}
       {sendState.status === "success" && sendState.newCommit && (
-        <div className="mt-6 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-6">
+        <div className="mt-6 rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/8 p-6 shadow-[0_0_32px_color-mix(in_oklch,#00EF8B_12%,transparent)]">
           <div className="flex items-start gap-3 mb-3">
-            <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
             <div>
               <h3 className="text-lg font-bold mb-1">Shielded tip sent!</h3>
               <p className="text-xs text-muted-foreground">
@@ -631,7 +686,7 @@ export default function SendTipPage() {
             <p className="text-xs font-medium text-foreground mb-1">
               Your new residual commitment (point on BabyJubJub):
             </p>
-            <p className="font-mono text-[10px] break-all text-emerald-700 dark:text-emerald-300">
+            <p className="font-mono text-[10px] break-all text-[#00EF8B]">
               {formatPoint(sendState.newCommit)}
             </p>
           </div>
@@ -681,7 +736,6 @@ export default function SendTipPage() {
 
       {/* Footer: addresses */}
       <div className="mt-8 text-[10px] text-muted-foreground space-y-0.5">
-        <p>SDK: @openjanus/sdk@{SDK_VERSION}</p>
         <p>JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span></p>
         <p>PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span></p>
       </div>

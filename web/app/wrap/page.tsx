@@ -64,7 +64,6 @@ import {
   isIdentityPoint,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
-  SDK_VERSION,
   TX_SETUP_COA,
   type Point,
   type WrapSource,
@@ -83,13 +82,13 @@ function shieldedKey(addr: string): string {
 
 function loadShieldedState(addr: string): ShieldedState | null {
   if (typeof window === "undefined") return null;
-  const raw = sessionStorage.getItem(shieldedKey(addr));
+  const raw = localStorage.getItem(shieldedKey(addr));
   return raw ? (JSON.parse(raw) as ShieldedState) : null;
 }
 
 function saveShieldedState(addr: string, state: ShieldedState): void {
   if (typeof window === "undefined") return;
-  sessionStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+  localStorage.setItem(shieldedKey(addr), JSON.stringify(state));
 }
 
 // --- Status types -------------------------------------------------------------
@@ -136,6 +135,7 @@ export default function WrapPage() {
   });
 
   const [needsCoaSetup, setNeedsCoaSetup] = useState(false);
+  const [needsMemoKey, setNeedsMemoKey] = useState(false);
   const [settingUpCoa, setSettingUpCoa] = useState(false);
 
   // -- Initial load: COA + on-chain commit + local shielded state --------------
@@ -164,6 +164,20 @@ export default function WrapPage() {
         if (cancelled) return;
         setVaultBalanceWei(vaultWei);
         setCoaBalanceWei(coaWei);
+
+        // MemoKey status — sign-derive needs the on-chain pubkey to match the
+        // wallet-derived pubkey AND the privkey to be cached in session.
+        //   - missing on-chain: brand-new account, needs first-time setup.
+        //   - on-chain but no local session: privkey wasn't derived in this
+        //     browser yet (fresh session, or pre-v0.4.5 setup with random key
+        //     that we can't reconstruct). Either way, smartSetupAccount will
+        //     rotate it to a derived key the user can recover from any device.
+        const { getRecipientMemoPubkey } = await import("@/lib/tip-actions");
+        const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+        const memoPub = await getRecipientMemoPubkey(userAddress);
+        const hasSessionPrivkey = getCachedMemoPrivkey(userAddress) !== null;
+        if (cancelled) return;
+        setNeedsMemoKey(memoPub === null || !hasSessionPrivkey);
 
         const s = loadShieldedState(userAddress);
         if (s) setShielded(s);
@@ -208,34 +222,35 @@ export default function WrapPage() {
     };
   }, [userAddress]);
 
-  // -- COA setup handler -----------------------------------------------------
+  // -- Smart setup handler -------------------------------------------------
   //
-  // Uses SDK's canonical TX_SETUP_COA (idempotent — early-returns if COA exists).
+  // Single-button setup: creates COA AND MemoKey in one atomic tx (only what's missing).
+  // MemoKey is required for the recipient to receive encrypted memos.
+  // Privkey is generated server-side and cached in localStorage for browser decrypt.
 
   const handleSetupCoa = useCallback(async () => {
+    if (!userAddress) return;
     setSettingUpCoa(true);
     try {
-      const fcl = await import("@onflow/fcl");
-      const txId = await fcl.mutate({
-        cadence: TX_SETUP_COA,
-        proposer: fcl.authz,
-        payer: fcl.authz,
-        authorizations: [fcl.authz],
-        limit: 100,
-      });
-      toast.info(`COA setup tx submitted: ${txId.slice(0, 10)}...`);
-      await fcl.tx(txId).onceSealed();
-      toast.success("COA created! Reloading...");
+      const { smartSetupAccount, getRecipientMemoPubkey } = await import(
+        "@/lib/tip-actions"
+      );
+      toast.info("Creating COA + MemoKey (one-time setup)...");
+      const { txId } = await smartSetupAccount({ flowAddr: userAddress });
+      toast.success(`Setup complete! Tx: ${txId.slice(0, 10)}...`);
       setNeedsCoaSetup(false);
-      if (userAddress) {
-        const coa = await getCoaEvmAddress(userAddress);
-        setCoaHex(coa);
-        const c = await getCommitment(coa);
-        setChainCommit(c);
-      }
+      // Re-fetch all state so UI reflects post-setup reality
+      const coa = await getCoaEvmAddress(userAddress);
+      setCoaHex(coa);
+      const c = await getCommitment(coa);
+      setChainCommit(c);
+      const memoPub = await getRecipientMemoPubkey(userAddress);
+      const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+      const hasSessionPrivkey = getCachedMemoPrivkey(userAddress) !== null;
+      setNeedsMemoKey(memoPub === null || !hasSessionPrivkey);
     } catch (err) {
       toast.error(
-        `COA setup failed: ${err instanceof Error ? err.message : String(err)}`
+        `Setup failed: ${err instanceof Error ? err.message : String(err)}`
       );
     } finally {
       setSettingUpCoa(false);
@@ -344,16 +359,30 @@ export default function WrapPage() {
         source: resolvedSource,
       });
 
-      // Sum into the local-known balance (additive across wraps in same
-      // session). On a fresh slot the existing balance is 0 wei and the
-      // returned blinding matches the aggregate commitment trivially.
+      // Additive accumulation — both balance AND blinding sum across wraps.
+      //
+      // The JanusFlow EVM contract performs homomorphic addition on the
+      // Pedersen commitment: C_chain_new = C_chain_old + C_wrap. To stay in
+      // sync the client MUST track `balance_total = sum(amounts)` AND
+      // `blinding_total = sum(blindings)` — using only the latest wrap's
+      // blinding would desync the local state from the on-chain aggregate
+      // and brick future unwraps (proof would generate against the wrong
+      // commitment opening).
+      //
+      // Modular reduction over the BabyJub subgroup order is implicit: the
+      // proof builder reduces internally when constructing the witness, and
+      // the on-chain math is `b*H + b'*H = (b+b')*H` regardless of mod, so
+      // straight BigInt addition produces a value cryptographically
+      // equivalent to the on-chain blinding.
       const existing = loadShieldedState(userAddress);
       const oldBalanceWei = existing ? BigInt(existing.balanceWei) : BigInt(0);
+      const oldBlinding = existing ? BigInt(existing.blinding) : BigInt(0);
       const newBalanceWei = oldBalanceWei + amountWei;
+      const newBlinding = oldBlinding + result.blinding;
 
       const newState: ShieldedState = {
         balanceWei: newBalanceWei.toString(),
-        blinding: result.blinding.toString(),
+        blinding: newBlinding.toString(),
       };
       saveShieldedState(userAddress, newState);
       setShielded(newState);
@@ -421,10 +450,10 @@ export default function WrapPage() {
           </Link>
         </div>
         <div className="flex flex-col items-center text-center py-16">
-          <div className="w-16 h-16 rounded-2xl bg-blue-100 dark:bg-blue-950 flex items-center justify-center mb-6">
-            <Coins className="w-8 h-8 text-blue-600 dark:text-blue-400" />
+          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
+            <Coins className="w-8 h-8 text-[#B45309]" />
           </div>
-          <h2 className="text-xl font-bold mb-2">Connect Your Wallet</h2>
+          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Connect Your Wallet</h2>
           <p className="text-sm text-muted-foreground mb-6 max-w-sm">
             Connect your wallet to wrap FLOW into your shielded slot.
           </p>
@@ -451,16 +480,23 @@ export default function WrapPage() {
           </Link>
         </div>
         <div className="flex flex-col items-center text-center py-16">
-          <div className="w-16 h-16 rounded-2xl bg-amber-100 dark:bg-amber-950 flex items-center justify-center mb-6">
-            <Coins className="w-8 h-8 text-amber-600 dark:text-amber-400" />
+          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
+            <Coins className="w-8 h-8 text-[#B45309]" />
           </div>
-          <h2 className="text-xl font-bold mb-2">One-time wallet setup</h2>
+          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>One-time wallet setup</h2>
           <p className="text-sm text-muted-foreground mb-2 max-w-sm">
-            Your Flow account doesn&apos;t have a COA (Cadence Owned Account) yet —
-            this is the bridge required to interact with Flow EVM.
+            Your Flow account doesn&apos;t have a COA (Cadence Owned Account) or
+            a published MemoKey yet — both are required for shielded transfers.
+          </p>
+          <p className="text-sm text-muted-foreground mb-2 max-w-sm">
+            <strong>Setting up: COA + sign-derived MemoKey.</strong> The wallet
+            will prompt for <strong>one signature</strong> to derive your memo
+            key, then a second popup to submit the on-chain setup transaction.
+            Your memo key is reconstructable from any browser using the same
+            Flow Wallet — no seed phrase needed.
           </p>
           <p className="text-sm text-muted-foreground mb-6 max-w-sm">
-            Click below to create one. This is a one-time, free setup (gas only).
+            This is a one-time, gas-only setup.
           </p>
           <Button
             onClick={handleSetupCoa}
@@ -504,39 +540,61 @@ export default function WrapPage() {
       </div>
 
       <div className="flex items-center gap-3 mb-8">
-        <div className="w-10 h-10 rounded-lg bg-blue-100 dark:bg-blue-950 flex items-center justify-center">
-          <Coins className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+        <div className="w-10 h-10 rounded-lg bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#B45309_12%,transparent)]">
+          <Coins className="w-5 h-5 text-[#B45309]" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold">Wrap FLOW</h1>
+          <h1 className="text-2xl font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Add private FLOW</h1>
           <p className="text-sm text-muted-foreground">
-            Pre-fund your shielded slot — the boundary IN to private tips.
+            Cross the entry boundary — your FLOW moves into the private zone.
           </p>
         </div>
       </div>
 
+      {/* Setup status — only shows if something missing (compact banner) */}
+      {needsMemoKey && (
+        <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50/50 dark:bg-amber-950/20 px-3 py-2 mb-4 flex items-center justify-between gap-3 text-xs">
+          <span className="text-amber-900 dark:text-amber-100">
+            Your private inbox isn&apos;t active yet. Click Enable — your wallet
+            will sign one message + confirm one transaction. After that you can
+            send tips, receive private messages, and withdraw.
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={handleSetupCoa}
+            disabled={settingUpCoa}
+          >
+            {settingUpCoa ? "Signing + setting up…" : "Enable"}
+          </Button>
+        </div>
+      )}
+
       {/* Current balance card */}
-      <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/30 dark:bg-emerald-950/20 p-6 mb-6">
+      <div className="rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/5 dark:bg-[#00EF8B]/5 p-6 mb-6 shadow-[0_0_24px_color-mix(in_oklch,#00EF8B_8%,transparent)]">
         <div className="flex items-start gap-3">
-          <Shield className="w-6 h-6 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+          <Shield className="w-6 h-6 text-[#00EF8B] shrink-0 mt-0.5" />
           <div className="flex-1">
             <p className="text-xs font-medium text-foreground mb-1">
-              Your shielded balance (local-known)
+              Your private balance
             </p>
             {shielded ? (
-              <p className="text-2xl font-bold text-emerald-700 dark:text-emerald-300">
-                {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
-              </p>
+              <>
+                <p className="text-2xl font-bold text-[#00EF8B]" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+                  {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
+                </p>
+              </>
             ) : (
               <p className="text-sm text-muted-foreground">
-                No local shielded state yet — your first wrap creates it.
+                Nothing here yet — your first wrap starts it.
               </p>
             )}
             {chainCommit && (
               <div className="mt-2 text-[10px] text-muted-foreground">
                 <p>
-                  On-chain Pedersen commitment{" "}
-                  {onChainEmpty ? "(empty slot)" : "(non-empty)"}:
+                  On-chain proof of balance{" "}
+                  {onChainEmpty ? "(empty)" : "(active)"}:
                 </p>
                 <p className="font-mono break-all">
                   {formatPoint(chainCommit).slice(0, 80)}…
@@ -544,8 +602,8 @@ export default function WrapPage() {
               </div>
             )}
             <p className="text-[10px] text-muted-foreground mt-2">
-              Balance is decrypted locally with your stored blinding factor.
-              On-chain observers see only the commitment point.
+              Only you see the actual amount — others see an opaque crypto
+              point. Math (Pedersen commitments) handles the privacy.
             </p>
           </div>
         </div>
@@ -557,22 +615,25 @@ export default function WrapPage() {
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
             <div className="text-xs text-amber-800 dark:text-amber-200">
-              <p className="font-medium mb-1">Chain has an existing commitment</p>
+              <p className="font-medium mb-1">Chain has a residual commitment</p>
               <p>
-                The on-chain commitment is non-empty but no local blinding is
-                stored. Wrapping here will overwrite the blinding and you may
-                lose the ability to spend the aggregate. Restore via
-                /send (paste shielded state) before continuing, or unwrap the
-                existing slot first.
+                On-chain commitment is non-empty but your local state is empty
+                (likely a stale residual from a previous unwrap, or the session
+                state was lost). Wrap is now ADDITIVE: it sums your local
+                balance + blinding with the new wrap. But because the chain
+                blinding is unknown to this browser, your local state would
+                stay desynced after wrapping, and future unwraps would revert.
+                Restore via /send (paste shielded state) before continuing, or
+                ask an admin to reset your slot.
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Wrap form (hidden after success) */}
+      {/* Wrap form — copper accent (boundary-in) */}
       {wrapState.status !== "success" && (
-        <div className="rounded-xl border border-border bg-card p-6 space-y-4 mb-6">
+        <div className="rounded-xl border border-[#B45309]/30 janus-copper-glow bg-card p-6 space-y-4 mb-6">
           {/* Source picker — vault or COA. Both run through JanusFlow.wrap,
               privacy semantics are identical (msg.value visible at boundary). */}
           <div>
@@ -625,12 +686,12 @@ export default function WrapPage() {
               </p>
               <p>
                 {source === "auto" &&
-                  "Auto picks vault first (cheaper); falls back to COA if vault is low."}
+                  "Auto picks your main FLOW balance first (cheaper); uses your EVM-side balance if main is low."}
                 {source === "vault" &&
-                  "Withdraws from your Cadence FlowToken vault."}
+                  "Pulls from your main Flow wallet balance."}
                 {source === "coa" &&
-                  "Withdraws from your COA (Flow EVM balance) in the same atomic tx."}
-                {" "}Privacy is identical either way.
+                  "Pulls from your Flow-EVM balance in one transaction."}
+                {" "}Privacy is the same either way.
               </p>
             </div>
           </div>
@@ -648,8 +709,8 @@ export default function WrapPage() {
               disabled={isSubmitting}
             />
             <p className="text-[10px] text-muted-foreground mt-1">
-              VISIBLE on-chain (this is the wrap boundary — msg.value is
-              public). Subsequent shielded transfers HIDE the amount.
+              This amount is visible (it&apos;s the entry point). Once inside,
+              every tip you send hides the amount.
             </p>
           </div>
 
@@ -678,9 +739,9 @@ export default function WrapPage() {
 
       {/* Success */}
       {wrapState.status === "success" && (
-        <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-6 mb-6">
+        <div className="rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/8 p-6 mb-6 shadow-[0_0_32px_color-mix(in_oklch,#00EF8B_12%,transparent)]">
           <div className="flex items-start gap-3 mb-3">
-            <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
             <div>
               <h3 className="text-lg font-bold mb-1">Wrap successful!</h3>
               <p className="text-xs text-muted-foreground">
@@ -693,7 +754,7 @@ export default function WrapPage() {
               <p className="text-xs font-medium text-foreground mb-1">
                 Your new commitment (point on BabyJubJub):
               </p>
-              <p className="font-mono text-[10px] break-all text-emerald-700 dark:text-emerald-300">
+              <p className="font-mono text-[10px] break-all text-[#00EF8B]">
                 {formatPoint(wrapState.newCommit)}
               </p>
             </div>
@@ -706,7 +767,7 @@ export default function WrapPage() {
           </div>
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-4">
             <EyeOff className="w-3 h-3" />
-            Your blinding factor is stored locally (sessionStorage); future
+            Your blinding factor is stored in your browser (localStorage); future
             tips will spend from this slot.
           </div>
           <div className="flex gap-3 justify-center">
@@ -749,7 +810,6 @@ export default function WrapPage() {
 
       {/* Footer: addresses */}
       <div className="mt-8 text-[10px] text-muted-foreground space-y-0.5">
-        <p>SDK: @openjanus/sdk@{SDK_VERSION}</p>
         <p>
           JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span>
         </p>
@@ -760,3 +820,8 @@ export default function WrapPage() {
     </div>
   );
 }
+
+// BalanceMeter removed in v0.5: with the 2^128 wei cap, any realistic balance
+// is an astronomically small fraction of the limit, so the meter conveys no
+// useful information. The circuit cap is documented in /learn and in SDK
+// JANUS_FLOW_MAX_WRAP_ATTOFLOW.
