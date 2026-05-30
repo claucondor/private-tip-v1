@@ -50,21 +50,21 @@ function HeroCoinFlow() {
 
       {/* Boundary in */}
       <div className="absolute left-[30%] top-0 h-full flex flex-col items-center justify-center gap-px">
-        <div className="w-px h-5 bg-[#B45309]/50" />
-        <span className="text-[7px] text-[#B45309]/60 uppercase tracking-wider whitespace-nowrap">entry</span>
-        <div className="w-px h-5 bg-[#B45309]/50" />
+        <div className="w-px h-5 bg-[#FBBF24]/80" />
+        <span className="text-[8px] text-[#FBBF24] uppercase tracking-wider whitespace-nowrap font-semibold">entry</span>
+        <div className="w-px h-5 bg-[#FBBF24]/80" />
       </div>
 
       {/* Boundary out */}
       <div className="absolute left-[70%] top-0 h-full flex flex-col items-center justify-center gap-px">
-        <div className="w-px h-5 bg-[#B45309]/50" />
-        <span className="text-[7px] text-[#B45309]/60 uppercase tracking-wider whitespace-nowrap">exit</span>
-        <div className="w-px h-5 bg-[#B45309]/50" />
+        <div className="w-px h-5 bg-[#FBBF24]/80" />
+        <span className="text-[8px] text-[#FBBF24] uppercase tracking-wider whitespace-nowrap font-semibold">exit</span>
+        <div className="w-px h-5 bg-[#FBBF24]/80" />
       </div>
 
       {/* Shielded zone label */}
       <div className="absolute left-[32%] right-[32%] top-0 flex items-center justify-center h-full">
-        <span className="text-[7px] text-[#6B46C1]/50 uppercase tracking-widest">hidden zone</span>
+        <span className="text-[8px] text-[#A78BFA] uppercase tracking-widest font-semibold">hidden zone</span>
       </div>
 
       {/* Animated coins */}
@@ -207,13 +207,13 @@ export default function Home() {
 
         {/* Hero coin animation */}
         <motion.div {...fadeUp(reduced, 0.26)} className="w-full max-w-sm mb-12">
-          <div className="mb-2 flex justify-between text-[9px] text-foreground/30 uppercase tracking-wider px-1">
-            <span>Public</span>
-            <span>Shielded zone</span>
-            <span>Public</span>
+          <div className="mb-2 flex justify-between text-[10px] uppercase tracking-wider px-1 font-semibold">
+            <span className="text-[#FBBF24]">Public</span>
+            <span className="text-[#A78BFA]">Shielded zone</span>
+            <span className="text-[#FBBF24]">Public</span>
           </div>
           <HeroCoinFlow />
-          <p className="text-[10px] text-foreground/30 mt-3 text-center">
+          <p className="text-xs text-foreground/70 mt-3 text-center">
             Amounts become opaque at the entry boundary and re-appear only when withdrawn.
           </p>
         </motion.div>
