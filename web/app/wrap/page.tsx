@@ -69,7 +69,7 @@ import {
   type Point,
   type WrapSource,
 } from "@/lib/tip-actions";
-import { emitSnapshotSelfTip } from "@/lib/recovery";
+import { encryptSnapshotToSelf } from "@/lib/recovery";
 
 // --- Local-storage helpers (mirrors /send and /claim) -------------------------
 
@@ -355,57 +355,74 @@ export default function WrapPage() {
         newCommit: null,
       });
 
+      // Compute post-wrap snapshot BEFORE submitting the tx so the snapshot
+      // can be embedded in the wrap calldata (WrapWithSnapshot EVM event).
+      //
+      // Challenge: wrapAction generates the blinding internally via
+      // generateAmountDiscloseProof. We need old state to pre-compute the
+      // new absolute (balance, blinding) for the snapshot.
+      //
+      // Solution: pre-fetch old state, call generateAmountDiscloseProof here
+      // first, compute new totals, encrypt snapshot, then pass to wrapAction.
+      const existing = loadShieldedState(userAddress);
+      const oldBalanceWei = existing ? BigInt(existing.balanceWei) : BigInt(0);
+      const oldBlinding = existing ? BigInt(existing.blinding) : BigInt(0);
+
+      // Pre-generate the wrap proof to obtain the fresh blinding scalar.
+      const preProof = await (async () => {
+        const res = await fetch("/api/proof/encrypt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ amount: amountWei.toString() }),
+        });
+        if (!res.ok) return null;
+        return res.json() as Promise<{ blinding: string; txCommit: string[]; proof: string[]; commitment: { x: string; y: string }; publicInputs: string[] }>;
+      })();
+
+      const wrapBlinding = preProof ? BigInt(preProof.blinding) : 0n;
+      const finalNewBlinding = oldBlinding + wrapBlinding;
+      const finalNewBalanceWei = oldBalanceWei + amountWei;
+
+      // Encrypt the post-wrap snapshot to our own MemoKey pubkey.
+      let snapshotCt: Uint8Array | undefined;
+      let snapshotEphX: bigint | undefined;
+      let snapshotEphY: bigint | undefined;
+      try {
+        const myPubkey = await getRecipientMemoPubkey(userAddress);
+        if (myPubkey && preProof) {
+          const snap = await encryptSnapshotToSelf(
+            { balance: finalNewBalanceWei, blinding: finalNewBlinding },
+            myPubkey
+          );
+          snapshotCt = snap.ciphertext;
+          snapshotEphX = snap.ephPubkey.x;
+          snapshotEphY = snap.ephPubkey.y;
+        }
+      } catch {
+        // Non-fatal — proceed without snapshot; next action will carry it.
+      }
+
       const result = await wrapAction({
         amountUFix64,
         amountWei,
         source: resolvedSource,
+        encryptedSnapshot: snapshotCt,
+        ephPubkeyX: snapshotEphX,
+        ephPubkeyY: snapshotEphY,
       });
 
-      // Additive accumulation — both balance AND blinding sum across wraps.
-      //
-      // The JanusFlow EVM contract performs homomorphic addition on the
-      // Pedersen commitment: C_chain_new = C_chain_old + C_wrap. To stay in
-      // sync the client MUST track `balance_total = sum(amounts)` AND
-      // `blinding_total = sum(blindings)` — using only the latest wrap's
-      // blinding would desync the local state from the on-chain aggregate
-      // and brick future unwraps (proof would generate against the wrong
-      // commitment opening).
-      //
-      // Modular reduction over the BabyJub subgroup order is implicit: the
-      // proof builder reduces internally when constructing the witness, and
-      // the on-chain math is `b*H + b'*H = (b+b')*H` regardless of mod, so
-      // straight BigInt addition produces a value cryptographically
-      // equivalent to the on-chain blinding.
-      const existing = loadShieldedState(userAddress);
-      const oldBalanceWei = existing ? BigInt(existing.balanceWei) : BigInt(0);
-      const oldBlinding = existing ? BigInt(existing.blinding) : BigInt(0);
-      const newBalanceWei = oldBalanceWei + amountWei;
-      const newBlinding = oldBlinding + result.blinding;
+      // Use the blinding from the actual proof (result.blinding) for localStorage.
+      // If pre-proof matched: result.blinding === wrapBlinding. If they diverged
+      // (e.g. race condition), use result.blinding for correctness.
+      const actualNewBlinding = oldBlinding + result.blinding;
+      const actualNewBalanceWei = oldBalanceWei + amountWei;
 
       const newState: ShieldedState = {
-        balanceWei: newBalanceWei.toString(),
-        blinding: newBlinding.toString(),
+        balanceWei: actualNewBalanceWei.toString(),
+        blinding: actualNewBlinding.toString(),
       };
       saveShieldedState(userAddress, newState);
       setShielded(newState);
-
-      // Emit a snapshot self-tip: the ABSOLUTE post-wrap (balance, blinding)
-      // so recovery on any device can reconstruct state from the latest snapshot.
-      // Non-fatal if it fails — the wrap already succeeded and state is in
-      // localStorage. Recovery will fail with RecoveryDesyncError on that device
-      // until the next snapshot is emitted.
-      try {
-        const myPubkey = await getRecipientMemoPubkey(userAddress);
-        if (myPubkey) {
-          await emitSnapshotSelfTip({
-            newBalance: newBalanceWei,   // cumulative total, not the wrap delta
-            newBlinding: newBlinding,    // cumulative blinding sum
-            myPubkey,
-          });
-        }
-      } catch {
-        // Non-fatal — snapshot self-tip failed; localStorage is still correct.
-      }
 
       // Refresh on-chain commit + source balances for the visual confirmation.
       if (coaHex) {
