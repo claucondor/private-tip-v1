@@ -11,14 +11,19 @@ import { usePathname } from "next/navigation";
 import { FlowProvider, useFlowCurrentUser } from "@onflow/react-sdk";
 import { Toaster } from "sonner";
 import { toast } from "sonner";
-import { Key, RefreshCw } from "lucide-react";
+import { Key, RefreshCw, AlertTriangle } from "lucide-react";
 import { flowConfig } from "@/lib/fcl-config";
 import ConnectWallet from "@/components/ConnectWallet";
 import flowJSON from "../../flow.json";
 
 // ---------------------------------------------------------------------------
 // Recovery banner — shown when localStorage is empty but chain has state.
+// Two modes:
+//   "recover"  — normal: shows a blue "Recover" button
+//   "desync"   — RecoveryDesyncError: shows a red error with manual escape hatches
 // ---------------------------------------------------------------------------
+
+type RecoveryBannerMode = "recover" | "desync";
 
 function RecoveryBanner() {
   const { user } = useFlowCurrentUser();
@@ -26,7 +31,13 @@ function RecoveryBanner() {
   const userAddress = user?.addr ?? null;
 
   const [show, setShow] = useState(false);
+  const [mode, setMode] = useState<RecoveryBannerMode>("recover");
   const [recovering, setRecovering] = useState(false);
+
+  // Restore-from-backup state (manual escape hatch for desync).
+  const [showRestoreForm, setShowRestoreForm] = useState(false);
+  const [restoreJson, setRestoreJson] = useState("");
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   // On wallet connect, check: localStorage empty AND on-chain commit non-identity.
   useEffect(() => {
@@ -57,6 +68,7 @@ function RecoveryBanner() {
         const commit = await getCommitment(coaHex);
         if (!cancelled) {
           setShow(!isIdentityPoint(commit));
+          setMode("recover"); // default; updated to "desync" on RecoveryDesyncError
         }
       } catch {
         // Non-fatal — hide banner on errors.
@@ -68,13 +80,26 @@ function RecoveryBanner() {
   const handleRecover = useCallback(async () => {
     if (!userAddress) return;
     setRecovering(true);
+    // Import both modules upfront — dynamic import results are cached.
+    const [tipActions, recoveryMod] = await Promise.all([
+      import("@/lib/tip-actions"),
+      import("@/lib/recovery"),
+    ]);
+    const { getOrDeriveMemoPrivkey, getCoaEvmAddress } = tipActions;
+    const { recoverShieldedStateFromChain, RecoveryDesyncError } = recoveryMod;
     try {
-      const { getOrDeriveMemoPrivkey } = await import("@/lib/tip-actions");
-      const { recoverShieldedStateFromChain } = await import("@/lib/recovery");
-
       toast.info("Recovering your shielded state from chain…");
       const privkey = await getOrDeriveMemoPrivkey(userAddress);
-      const recovered = await recoverShieldedStateFromChain(userAddress, privkey);
+
+      // Resolve COA so recovery can validate against the on-chain commitment.
+      let coaHex: string | undefined;
+      try {
+        coaHex = await getCoaEvmAddress(userAddress);
+      } catch {
+        // No COA — recovery will attempt it internally.
+      }
+
+      const recovered = await recoverShieldedStateFromChain(userAddress, privkey, coaHex);
 
       if (recovered) {
         const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
@@ -91,16 +116,114 @@ function RecoveryBanner() {
         setShow(false);
       }
     } catch (err) {
-      toast.error("Recovery failed", {
-        description: err instanceof Error ? err.message : String(err),
-      });
+      if (err instanceof RecoveryDesyncError) {
+        // Switch banner to the red desync error mode — do NOT write localStorage.
+        setMode("desync");
+      } else {
+        toast.error("Recovery failed", {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      }
     } finally {
       setRecovering(false);
     }
   }, [userAddress]);
 
+  const handleRestoreFromBackup = useCallback(() => {
+    if (!userAddress) return;
+    setRestoreError(null);
+    try {
+      const parsed = JSON.parse(restoreJson.trim()) as { balance?: string; balanceWei?: string; blinding?: string };
+      const balanceWei = parsed.balanceWei ?? parsed.balance;
+      const blinding = parsed.blinding;
+      if (!balanceWei || !blinding) {
+        setRestoreError("JSON must have balanceWei (or balance) and blinding fields.");
+        return;
+      }
+      // Validate they're parseable bigints.
+      BigInt(balanceWei);
+      BigInt(blinding);
+      const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
+      localStorage.setItem(localKey, JSON.stringify({ balanceWei, blinding }));
+      toast.success("Shielded state restored from backup.");
+      setShow(false);
+      window.location.reload();
+    } catch (err) {
+      setRestoreError(err instanceof Error ? err.message : "Invalid JSON");
+    }
+  }, [userAddress, restoreJson]);
+
   if (!isLoggedIn || !show) return null;
 
+  // --- Red desync error banner ---
+  if (mode === "desync") {
+    return (
+      <div className="sticky top-[calc(theme(spacing.7)+theme(spacing.14)+1px)] z-40 w-full border-b border-red-500/50 bg-red-50/95 dark:bg-red-950/80 px-4 py-3 text-xs backdrop-blur">
+        <div className="max-w-5xl mx-auto">
+          <div className="flex items-start gap-2 mb-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-600 dark:text-red-400 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="font-semibold text-red-900 dark:text-red-100">
+                Recovery failed: chain state cannot be reconstructed.
+              </p>
+              <p className="text-red-800 dark:text-red-200 mt-0.5">
+                This wallet has activity from before recovery was enabled, or there&apos;s a deeper desync.
+              </p>
+            </div>
+          </div>
+
+          {!showRestoreForm ? (
+            <div className="flex flex-wrap gap-2 mt-2">
+              <button
+                onClick={() => setShowRestoreForm(true)}
+                className="inline-flex items-center px-3 py-1 rounded border border-red-500/60 bg-red-50 dark:bg-red-950 text-red-900 dark:text-red-100 font-medium hover:bg-red-100 dark:hover:bg-red-900 transition-colors"
+              >
+                Restore from backup
+              </button>
+              <button
+                onClick={() => setShow(false)}
+                className="inline-flex items-center px-3 py-1 rounded border border-red-300/60 bg-transparent text-red-700 dark:text-red-300 hover:bg-red-100/50 dark:hover:bg-red-900/30 transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : (
+            <div className="mt-2 space-y-2">
+              <p className="text-red-800 dark:text-red-200">
+                Paste your saved shielded state JSON: <code className="font-mono bg-red-100 dark:bg-red-900 px-1 rounded">{"{\"balanceWei\": \"...\", \"blinding\": \"...\"}"}</code>
+              </p>
+              <textarea
+                value={restoreJson}
+                onChange={(e) => setRestoreJson(e.target.value)}
+                rows={3}
+                className="w-full px-2 py-1.5 text-xs font-mono border border-red-300 dark:border-red-700 rounded bg-white dark:bg-red-950/50 text-foreground"
+                placeholder='{"balanceWei": "5000000000000000000", "blinding": "12345678..."}'
+              />
+              {restoreError && (
+                <p className="text-red-700 dark:text-red-300 font-medium">{restoreError}</p>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={handleRestoreFromBackup}
+                  className="inline-flex items-center px-3 py-1 rounded border border-red-500/60 bg-red-50 dark:bg-red-950 text-red-900 dark:text-red-100 font-medium hover:bg-red-100 dark:hover:bg-red-900 transition-colors"
+                >
+                  Restore
+                </button>
+                <button
+                  onClick={() => { setShowRestoreForm(false); setRestoreError(null); }}
+                  className="inline-flex items-center px-3 py-1 rounded border border-red-300/60 bg-transparent text-red-700 dark:text-red-300 hover:bg-red-100/50 dark:hover:bg-red-900/30 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // --- Blue normal recovery banner ---
   return (
     <div className="sticky top-[calc(theme(spacing.7)+theme(spacing.14)+1px)] z-40 w-full border-b border-blue-400/40 bg-blue-50/95 dark:bg-blue-950/80 px-4 py-2 text-xs backdrop-blur">
       <div className="max-w-5xl mx-auto flex items-center justify-between gap-3">

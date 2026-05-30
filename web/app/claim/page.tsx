@@ -41,10 +41,12 @@ import {
   parseFlowToWei,
   formatWeiToFlow,
   formatPoint,
+  getRecipientMemoPubkey,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   type Point,
 } from "@/lib/tip-actions";
+import { emitSnapshotSelfTip } from "@/lib/recovery";
 
 interface ShieldedState {
   balanceWei: string;
@@ -213,6 +215,23 @@ export default function ClaimPage() {
       };
       saveShieldedState(userAddress, newState);
       setShielded(newState);
+
+      // Emit a snapshot self-tip with the post-unwrap absolute state.
+      // ALWAYS emit — even when newBalanceWei == 0 (full drain). A zero-balance
+      // snapshot prevents recovery from misreading older pre-drain state.
+      // Non-fatal: unwrap already succeeded; localStorage is correct.
+      try {
+        const myPubkey = await getRecipientMemoPubkey(userAddress);
+        if (myPubkey) {
+          await emitSnapshotSelfTip({
+            newBalance: result.newBalanceWei,
+            newBlinding: result.newBlinding,
+            myPubkey,
+          });
+        }
+      } catch {
+        // Non-fatal — snapshot self-tip failed; localStorage is still correct.
+      }
 
       // Refresh chain commit
       const c = await getCommitment(coaHex);

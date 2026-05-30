@@ -1,28 +1,32 @@
-/// Shielded-state recovery via on-chain self-tips.
+/// Shielded-state recovery via on-chain snapshot self-tips.
 ///
-/// Recovery model:
-///   Every state-changing op (wrap, send, partial unwrap) records a
-///   "carbon-copy" ShieldedNote encrypted to the sender's OWN MemoKey pubkey
-///   via a self-tip (PrivateTip.recordTip with sender === recipient === me).
-///   These self-tips are invisible in the UI (filtered out in /tips) but
-///   enable full state reconstruction from any device with just a wallet
-///   signature.
+/// Recovery model (v2 — snapshot semantics):
+///   Every state-changing op (wrap, send, unwrap) records a single "snapshot"
+///   self-tip: a ShieldedNote encrypted to the sender's OWN MemoKey pubkey via
+///   a self-tip (PrivateTip.recordTip with sender === recipient === me).
+///   The payload carries the ABSOLUTE post-action (balance, blinding) — not a
+///   delta. These self-tips are invisible in the /tips UI but enable full state
+///   reconstruction from any device with just a wallet signature.
 ///
 /// Recovery algorithm:
-///   1. Fetch all incoming tips (getShieldedTipsByRecipientWithMemo).
-///   2. Fetch all outgoing tips (getShieldedTipsBySenderWithMemo).
-///   3. Decrypt ALL with own MemoKey privkey.
-///   4. Self-tips (sender === recipient === me) with kind="wrap" or "residual"
-///      are additive (balance += amount, blinding += blinding).
-///   5. Tips from others (sender != me, recipient = me) are incoming — additive.
-///   6. Tips from me to others (sender = me, recipient != me) are NOT deducted
-///      here because the post-transfer residual is recorded as a "residual"
-///      carbon-copy self-tip. Net balance flows entirely through self-tips.
-///   7. Validate reconstructed balance against on-chain Pedersen commitment.
+///   1. Fetch all outgoing tips (getShieldedTipsBySenderWithMemo).
+///   2. Fetch all incoming tips (getShieldedTipsByRecipientWithMemo).
+///   3. Decrypt self-tips (sender === recipient === me) with own privkey.
+///   4. Keep only notes with k="snapshot" — these are ABSOLUTE states.
+///   5. Sort by timestamp, take the LATEST as the base state.
+///   6. Add incoming tips from OTHERS that arrived AFTER the latest snapshot.
+///   7. Compute Pedersen commitment of reconstructed (balance, blinding).
+///   8. Compare against on-chain commitment — throw RecoveryDesyncError if mismatch.
 ///
-/// Backwards compatibility: undecryptable notes (pre-recovery tips, legacy
-/// format) are silently skipped. The result will be a best-effort balance
-/// that the user can correct manually.
+/// Key correctness properties:
+///   - Snapshots are idempotent: taking the latest one and ignoring earlier ones
+///     is equivalent to replaying every delta (but far simpler).
+///   - Incoming tips after the snapshot add to the base (they weren't included
+///     in the snapshot because they arrived after it).
+///   - Unwraps and sends are already baked into the next snapshot — no need to
+///     track them separately.
+///   - Zero-balance snapshots ARE emitted (newBalance=0 after full drain is a
+///     valid state). This closes the bug where residuals at 0 were skipped.
 
 "use client";
 
@@ -43,7 +47,7 @@ export class RecoveryDesyncError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Cadence tx: record a self-tip as a recovery carbon-copy.
+// Cadence tx: record a self-tip as a snapshot recovery note.
 //
 // Unlike a real tip there is NO JanusFlow.shieldedTransfer here — we just
 // call PrivateTip.recordTip with sender === recipient === me, using a
@@ -55,10 +59,11 @@ export class RecoveryDesyncError extends Error {
 export const TX_RECORD_SELF_TIP = `
 import PrivateTip from 0xb9ac529c14a4c5a1
 
-/// Record a recovery carbon-copy self-tip with an encrypted note.
+/// Record a snapshot self-tip with an encrypted note.
 ///
-/// Used by wrap and send flows to store (amount, blinding, kind) encrypted to
-/// the sender's own MemoKey pubkey. No value transfer — pure metadata.
+/// Used by wrap, send, and unwrap flows to store the post-action absolute
+/// (balance, blinding) encrypted to the sender's own MemoKey pubkey.
+/// No value transfer — pure metadata for cross-device recovery.
 ///
 /// ciphertextRef is [0, 0] (a dummy point). The actual shielded values are in
 /// memoCiphertext.
@@ -83,46 +88,51 @@ transaction(
             memoEphPubkeyX: memoEphPubkeyX,
             memoEphPubkeyY: memoEphPubkeyY
         )
-        log("recovery carbon-copy tipID=".concat(tipID.toString()))
+        log("snapshot self-tip tipID=".concat(tipID.toString()))
     }
 }
 `;
 
 // ---------------------------------------------------------------------------
-// emitRecoverySelfTip — submit TX_RECORD_SELF_TIP
+// emitSnapshotSelfTip — submit TX_RECORD_SELF_TIP
 // ---------------------------------------------------------------------------
 
 /**
- * Encrypt a recovery note and submit it as a self-tip on-chain.
+ * Encrypt the post-action absolute (balance, blinding) and submit it as a
+ * snapshot self-tip on-chain.
  *
- * @param amount       Amount in wei to record.
- * @param blinding     Blinding scalar to record.
- * @param kind         "wrap" | "residual" — distinguishes wrap additions from
- *                     post-send residuals when reconstructing balance.
- * @param myPubkey     Caller's own MemoKey pubkey (to encrypt to themselves).
+ * This REPLACES emitRecoverySelfTip. The payload always carries the FULL
+ * post-action state, not a delta. The tag k="snapshot" distinguishes these
+ * from legacy "wrap"/"residual" notes.
+ *
+ * ALWAYS emits — even when newBalance == 0. A zero-balance snapshot is a
+ * valid state that prevents future recovery from misreading old pre-drain tips.
+ *
+ * @param newBalance  Total shielded balance in wei AFTER the action.
+ * @param newBlinding Total blinding scalar AFTER the action.
+ * @param myPubkey    Caller's own MemoKey pubkey (encrypt to themselves).
  */
-export async function emitRecoverySelfTip(opts: {
-  amount: bigint;
-  blinding: bigint;
-  kind: "wrap" | "residual";
+export async function emitSnapshotSelfTip(opts: {
+  newBalance: bigint;
+  newBlinding: bigint;
   myPubkey: { x: bigint; y: bigint };
 }): Promise<string> {
-  const { amount, blinding, kind, myPubkey } = opts;
+  const { newBalance, newBlinding, myPubkey } = opts;
 
   // Encrypt to our own pubkey via the server-side API route.
   const encRes = await fetch("/api/note/encrypt", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      amount: amount.toString(),
-      blinding: blinding.toString(),
-      data: JSON.stringify({ k: kind }),        // tag so recovery knows the type
+      amount: newBalance.toString(),
+      blinding: newBlinding.toString(),
+      data: JSON.stringify({ k: "snapshot" }),
       recipientPubkey: { x: myPubkey.x.toString(), y: myPubkey.y.toString() },
     }),
   });
   if (!encRes.ok) {
     const err = await encRes.json().catch(() => ({ error: encRes.statusText }));
-    throw new Error(`emitRecoverySelfTip: encrypt failed — ${err.error ?? encRes.statusText}`);
+    throw new Error(`emitSnapshotSelfTip: encrypt failed — ${err.error ?? encRes.statusText}`);
   }
   const encData = await encRes.json();
   const memoCiphertext: number[] = encData.ciphertext;
@@ -175,6 +185,53 @@ export function buildGetShieldedTipsByRecipientWithMemoScript(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Pedersen commitment reader — reads user's commitment from JanusFlow EVM proxy
+// ---------------------------------------------------------------------------
+
+const JANUS_FLOW_EVM_PROXY = "0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078";
+const EVM_RPC = "https://testnet.evm.nodes.onflow.org";
+const EVM_CHAIN_ID = 545;
+
+// commitments(address) returns (uint256 x, uint256 y)
+const COMMITMENTS_ABI = [
+  "function commitments(address) view returns (uint256 x, uint256 y)",
+];
+
+async function readOnChainCommitment(
+  coaEvmHex: string
+): Promise<{ x: bigint; y: bigint }> {
+  const { JsonRpcProvider, Contract } = await import("ethers");
+  const provider = new JsonRpcProvider(EVM_RPC, EVM_CHAIN_ID);
+  const contract = new Contract(JANUS_FLOW_EVM_PROXY, COMMITMENTS_ABI, provider);
+  const result = await contract.commitments(coaEvmHex) as { x: bigint; y: bigint };
+  return { x: BigInt(result.x), y: BigInt(result.y) };
+}
+
+// ---------------------------------------------------------------------------
+// computeCommitment — server-side Pedersen via /api/proof/commit
+// ---------------------------------------------------------------------------
+
+async function computeCommitment(
+  balance: bigint,
+  blinding: bigint
+): Promise<{ x: bigint; y: bigint }> {
+  const res = await fetch("/api/proof/commit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      amount: balance.toString(),
+      blinding: blinding.toString(),
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(`computeCommitment: ${err.error ?? res.statusText}`);
+  }
+  const data = await res.json();
+  return { x: BigInt(data.x), y: BigInt(data.y) };
+}
+
+// ---------------------------------------------------------------------------
 // recoverShieldedStateFromChain
 // ---------------------------------------------------------------------------
 
@@ -190,26 +247,35 @@ interface CadenceTipWithMemo {
   } | null;
 }
 
+interface SnapshotEntry {
+  timestamp: bigint;
+  balance: bigint;
+  blinding: bigint;
+}
+
 /**
- * Reconstruct shielded state from chain.
+ * Reconstruct shielded state from chain using snapshot semantics.
  *
- * Scans both sender and recipient tip histories, decrypts all notes with the
- * caller's MemoKey privkey, and sums the balance and blinding from:
- *   - Self-tips (sender === recipient === me) with kind="wrap" or "residual"
- *   - Incoming tips from others (sender != me, recipient = me)
+ * Algorithm:
+ *   1. Fetch all sent and received tips.
+ *   2. Decrypt self-tips (sender === recipient === me) — keep k="snapshot" notes.
+ *      These are ABSOLUTE post-action states, not deltas.
+ *   3. Take the LATEST snapshot as the base state.
+ *   4. Add incoming tips from others that arrived AFTER the latest snapshot
+ *      (they haven't been baked into any snapshot yet).
+ *   5. CRITICAL: compute Pedersen commitment of reconstructed (balance, blinding)
+ *      and compare against on-chain commitment. Throw RecoveryDesyncError if mismatch.
  *
- * Outgoing tips to others are NOT summed directly — the post-send residual is
- * captured as a "residual" self-tip. This keeps the accounting additive-only.
- *
- * Undecryptable notes are silently skipped for backwards compatibility.
- *
- * @param myFlowAddr       Caller's Flow address.
- * @param myMemoPrivkey    Caller's MemoKey privkey (BabyJub scalar).
- * @returns Reconstructed balance and blinding, or null if nothing found.
+ * @param myFlowAddr     Caller's Flow address.
+ * @param myMemoPrivkey  Caller's MemoKey privkey (BabyJub scalar).
+ * @param myCoaEvmHex    Caller's COA EVM hex address (for on-chain commitment read).
+ * @returns Reconstructed balance and blinding, or null if no snapshots + no incoming tips.
+ * @throws RecoveryDesyncError if reconstructed commitment doesn't match on-chain.
  */
 export async function recoverShieldedStateFromChain(
   myFlowAddr: string,
-  myMemoPrivkey: bigint
+  myMemoPrivkey: bigint,
+  myCoaEvmHex?: string
 ): Promise<RecoveredShieldedState | null> {
   const fcl = await import("@onflow/fcl");
   const myAddrLower = myFlowAddr.toLowerCase();
@@ -228,27 +294,32 @@ export async function recoverShieldedStateFromChain(
     }) as Promise<CadenceTipWithMemo[]>,
   ]);
 
-  // De-dup: self-tips appear in BOTH sent and received lists. We track by tipID.
-  const processed = new Set<string>();
-  let balanceWei = 0n;
-  let blinding = 0n;
-  let anySuccess = false;
+  // --- Step 1: decrypt self-tips → find all snapshots ---
 
-  const tryDecrypt = async (tip: CadenceTipWithMemo): Promise<void> => {
+  // De-dup by tipID (self-tips appear in both sent and received lists).
+  const decryptedById = new Map<string, {
+    isSelf: boolean;
+    isIncoming: boolean;
+    timestamp: bigint;
+    amount: bigint;
+    blinding: bigint;
+    tag: string | null;
+  }>();
+
+  const tryDecryptTip = async (tip: CadenceTipWithMemo): Promise<void> => {
     const id = String(tip.tipID);
-    if (processed.has(id)) return;
-    processed.add(id);
+    if (decryptedById.has(id)) return;
 
-    if (!tip.memo) return; // no encrypted note — skip
+    if (!tip.memo) return;
 
-    const isSelf = tip.sender.toLowerCase() === myAddrLower &&
-                   tip.recipient.toLowerCase() === myAddrLower;
-    const isIncoming = tip.recipient.toLowerCase() === myAddrLower &&
-                       tip.sender.toLowerCase() !== myAddrLower;
+    const isSelf =
+      tip.sender.toLowerCase() === myAddrLower &&
+      tip.recipient.toLowerCase() === myAddrLower;
+    const isIncoming =
+      tip.recipient.toLowerCase() === myAddrLower &&
+      tip.sender.toLowerCase() !== myAddrLower;
 
-    // We only accumulate self-tips (recovery carbon copies) and incoming
-    // tips from others. Outgoing tips to others are NOT subtracted because
-    // their residual was stored as a "residual" self-tip instead.
+    // We only care about self-tips (snapshots) and incoming from others.
     if (!isSelf && !isIncoming) return;
 
     try {
@@ -267,40 +338,106 @@ export async function recoverShieldedStateFromChain(
       if (!decRes.ok) return; // auth tag mismatch → not our note → skip
 
       const decData = await decRes.json();
-      const amount = BigInt(decData.amount);
-      const noteBlinding = BigInt(decData.blinding);
 
-      if (isSelf) {
-        // Only accumulate self-tips that have a kind tag ("wrap" or "residual").
-        // Plain self-tips from other flows or pre-recovery tips won't have
-        // the data field and should not be double-counted.
-        if (decData.data) {
-          try {
-            const tag = JSON.parse(decData.data as string) as { k?: string };
-            if (tag.k === "wrap" || tag.k === "residual") {
-              balanceWei += amount;
-              blinding += noteBlinding;
-              anySuccess = true;
-            }
-          } catch {
-            // Not a JSON tag — not a recovery note, skip.
-          }
+      let tag: string | null = null;
+      if (decData.data) {
+        try {
+          const parsed = JSON.parse(decData.data as string) as { k?: string };
+          tag = parsed.k ?? null;
+        } catch {
+          // Not JSON tag — treat as no tag.
         }
-      } else {
-        // Incoming tip from another sender — add unconditionally.
-        balanceWei += amount;
-        blinding += noteBlinding;
-        anySuccess = true;
       }
+
+      decryptedById.set(id, {
+        isSelf,
+        isIncoming,
+        timestamp: BigInt(tip.timestamp),
+        amount: BigInt(decData.amount),
+        blinding: BigInt(decData.blinding),
+        tag,
+      });
     } catch {
       // Decrypt error — skip gracefully.
     }
   };
 
-  // Process all tips (sent first so self-tips are deduplicated correctly).
   const allTips = [...sentRaw, ...receivedRaw];
-  await Promise.allSettled(allTips.map(tryDecrypt));
+  await Promise.allSettled(allTips.map(tryDecryptTip));
 
-  if (!anySuccess) return null;
+  // --- Step 2: collect snapshots and incoming tips ---
+
+  const snapshots: SnapshotEntry[] = [];
+  const incomingTips: Array<{ timestamp: bigint; amount: bigint; blinding: bigint }> = [];
+
+  for (const entry of decryptedById.values()) {
+    if (entry.isSelf && entry.tag === "snapshot") {
+      snapshots.push({
+        timestamp: entry.timestamp,
+        balance: entry.amount,
+        blinding: entry.blinding,
+      });
+    } else if (entry.isIncoming) {
+      incomingTips.push({
+        timestamp: entry.timestamp,
+        amount: entry.amount,
+        blinding: entry.blinding,
+      });
+    }
+  }
+
+  // --- Step 3: take the latest snapshot as base state ---
+
+  snapshots.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+
+  const latestSnapshot: SnapshotEntry | null =
+    snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
+
+  const baseTimestamp = latestSnapshot?.timestamp ?? 0n;
+  let balanceWei = latestSnapshot?.balance ?? 0n;
+  let blinding = latestSnapshot?.blinding ?? 0n;
+
+  // --- Step 4: add incoming tips that arrived AFTER the latest snapshot ---
+
+  for (const tip of incomingTips) {
+    if (tip.timestamp > baseTimestamp) {
+      balanceWei += tip.amount;
+      blinding += tip.blinding;
+    }
+  }
+
+  // If we found nothing at all, return null (no recoverable state).
+  if (latestSnapshot === null && incomingTips.filter(t => t.timestamp > baseTimestamp).length === 0) {
+    return null;
+  }
+
+  // --- Step 5: CRITICAL — validate against on-chain Pedersen commitment ---
+  //
+  // If the reconstructed (balance, blinding) doesn't match the on-chain commitment
+  // the user MUST NOT write this to localStorage — unwrap will revert with a
+  // Groth16 proof failure. Fail loudly with RecoveryDesyncError instead.
+
+  let coaHex = myCoaEvmHex;
+  if (!coaHex) {
+    // Resolve COA on-chain if not provided.
+    const { getCoaEvmAddress } = await import("@/lib/tip-actions");
+    coaHex = await getCoaEvmAddress(myFlowAddr);
+  }
+
+  const [reconstructed, onChain] = await Promise.all([
+    computeCommitment(balanceWei, blinding),
+    readOnChainCommitment(coaHex),
+  ]);
+
+  if (reconstructed.x !== onChain.x || reconstructed.y !== onChain.y) {
+    throw new RecoveryDesyncError(
+      `Cannot reconstruct shielded state. ` +
+      `Chain commitment ${onChain.x.toString(16).slice(0, 12)}... ` +
+      `does not match reconstructed ${reconstructed.x.toString(16).slice(0, 12)}... ` +
+      `Likely cause: wallet has wraps/sends/unwraps from before recovery was enabled, ` +
+      `or the wallet performed operations from another device without emitting snapshots.`
+    );
+  }
+
   return { balanceWei, blinding };
 }
