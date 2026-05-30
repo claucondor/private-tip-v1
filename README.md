@@ -1,99 +1,164 @@
 # PrivateTip
 
-Native-FLOW tipping on Flow Cadence with named tips, optional public memos, and
-custody held by a router contract until claimed.
+Confidential tipping demo on Flow.
 
-> **Sprint status (v0.2.1, Phase 7)**: PrivateTip was rebuilt as a router/impl pair
-> to fix vulnerability 015 (`claimTip` used `self.account.address` instead of the
-> transaction signer; only the deployer could claim, and the deployer could claim
-> anyone's tips). See [`.opencode/plans/PLAN.md`](./.opencode/plans/PLAN.md) and
-> the per-task stories under `.opencode/plans/stories/` (T13–T21 are the Phase 7
-> entries). The earlier T11 blocker is preserved as evidence of how the upstream
-> vuln 014 was discovered during smoke testing.
+A reference app showing how to build privacy-preserving payments on Flow using
+`@openjanus/sdk`. Send FLOW tips with the amount hidden on-chain. The recipient
+sees an encrypted note with the value and memo. Multi-device by design. Browser
+UI included.
 
-## Current testnet deployment
+> **Testnet only.** Admin functions `adminResetSlot` and `adminWipeTipsByRecipient`
+> are present and flagged for removal before any mainnet deployment.
 
-| Contract                | Address                                              |
-|-------------------------|------------------------------------------------------|
-| `PrivateTip.cdc` router | `0xb9ac529c14a4c5a1`                                 |
-| `PrivateTipImpl.cdc`    | `0xb9ac529c14a4c5a1`                                 |
-| `IPrivateTipImpl.cdc`   | `0xb9ac529c14a4c5a1`                                 |
+---
 
-Deprecated, do not use: `0xd807a3992d7be612` (the original monolith — vuln 015).
+## What it is
 
-## What it does
+PrivateTip is a pure **metadata orchestrator** — it records sender, recipient,
+timestamp, and an encrypted payload, but **never custodies FLOW**. The privacy
+work is done by JanusFlow:
 
-A sender calls `PrivateTip.sendTip(signer, recipient, payment, memo)`. The
-router moves the `@FlowToken.Vault` into per-tip custody (`@{UInt64:
-FlowToken.Vault}`) and records the metadata. The recipient later calls
-`claimTip(signer, tipID)` and the router returns the vault — but only if
-`signer.address == tip.recipient`. Cadence enforces that the `auth(BorrowValue)
-&Account` reference can only be constructed for the actual transaction signer.
+- **Amount hiding**: Pedersen commitments on BabyJubJub, gated by Groth16 proofs.
+  Amounts never appear in calldata, events, or storage.
+- **Memo hiding**: ECIES + AES-GCM, encrypted to the recipient's MemoKey pubkey.
+- **Account-model balance**: one accumulated shielded balance per recipient in
+  JanusFlow — not a per-tip escrow. Tips accumulate in the recipient's slot; they
+  unwrap the full balance when they're ready.
+- **Sign-derive MemoKey**: the recipient's decryption key is derived deterministically
+  from a single wallet signature. Any device with the same wallet recovers the
+  same MemoKey automatically.
 
-This separation gives you:
+---
 
-- A tip ledger you can iterate (`getTipsByRecipient`, `getTipsBySender`).
-- Native-FLOW custody until the recipient claims, no escrow service needed.
-- An emergency pause + 48h time-locked impl swap (in case the validation logic
-  itself ever needs a fix).
-- Composition with the rest of OpenJanus: amounts are intentionally on-chain in
-  this layer; use `JanusFlow` + `JanusToken` (Layer 1/2) when you want the
-  amount cryptographically hidden as well.
+## Live deployment
+
+| Contract | Network | Address |
+|---|---|---|
+| PrivateTip.cdc (router + impl) | Flow Cadence testnet | `0xb9ac529c14a4c5a1` |
+| JanusFlow EVM proxy (via PrivateTip) | Flow EVM testnet | `0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078` |
+
+SDK consumed: `@openjanus/sdk@^0.5.1`
+
+No public web URL yet — run it locally (see Quick start below) or deploy your
+own instance.
+
+---
+
+## What's hidden vs. what's visible
+
+| | Hidden | Visible |
+|---|---|---|
+| **Amount** | Yes — Pedersen commitment, never in events or calldata | Only at wrap/unwrap boundaries (msg.value, `Wrapped`/`Unwrapped` events) |
+| **Memo content** | Yes — ECIES encrypted to recipient's MemoKey | Only the encrypted blob's existence |
+| **Shielded balance** | Yes — commitment is an opaque BabyJubJub point | The aggregate `totalLocked` pool (by design) |
+| **Sender** | No | Visible on-chain |
+| **Recipient** | No | Visible on-chain |
+| **Timestamps** | No | Visible on-chain |
+
+---
 
 ## Repo layout
 
-See [`.opencode/plans/PLAN.md`](./.opencode/plans/PLAN.md) for the complete
-phase/story breakdown and [`canonical-addresses.md`](https://github.com/openjanus/openjanus-ai-tools/blob/main/plugins/openjanus/skills/openjanus-deploy/references/canonical-addresses.md)
-in `openjanus-ai-tools` for the cross-repo deprecated-address table.
-
 ```
 cadence/
-├── contracts/         IPrivateTipImpl.cdc, PrivateTipImpl.cdc, PrivateTip.cdc
-├── transactions/      send_tip, claim_tips, admin_pause, admin_upgrade, +helpers
-└── scripts/           read-only queries
-scripts/
-└── test-router-claim.mjs   functional test (vuln 015 verification)
+├── contracts/       PrivateTip.cdc (router), IPrivateTipImpl.cdc, PrivateTipImpl.cdc
+├── transactions/    send_tip, claim_tips, admin_pause, admin_upgrade + helpers
+└── scripts/         read-only queries
+
+web/                 Next.js 16 browser app
+├── app/             pages: /wrap, /send, /tips, /claim, /learn
+├── lib/             tip-actions.ts, memo-key-session.ts, memo-key-derive.ts, store.ts
+└── components/      ConnectWallet, TestnetBanner, BalanceDisplay, ui/
+
+scripts/             e2e smoke tests
 flow.json
 ```
+
+---
 
 ## Quick start
 
 ```bash
-# Charlie sends Alice 1.5 FLOW with a memo
-flow transactions send cadence/transactions/send_tip.cdc \
-  --args-json '[
-    {"type":"Address","value":"0x7599043aea001283"},
-    {"type":"UFix64","value":"1.50000000"},
-    {"type":"String","value":"hello alice"}
-  ]' \
-  --signer testnet-charlie --network testnet --gas-limit 9999
-
-# Alice claims tipID 3
-flow transactions send cadence/transactions/claim_tips.cdc \
-  --args-json '[{"type":"Array","value":[{"type":"UInt64","value":"3"}]}]' \
-  --signer testnet-claucondor --network testnet --gas-limit 9999
-
-# Re-run the functional test (proves vuln 015 fix)
-node scripts/test-router-claim.mjs
+cd web
+npm install
+npm run dev
+# Visit http://localhost:3000 and connect a Flow wallet
 ```
 
-## Off-chain SDK
+Then, in order:
 
-The TypeScript SDK lives at [`@openjanus/sdk`](https://www.npmjs.com/package/@openjanus/sdk).
-Starting from `0.2.1` the SDK ships the new JanusToken proxy address, the new
-JanusFlow router address, and helpers for FLOW unit conversion + BabyJubJub
-random scalars. PrivateTip is currently exposed via raw Cadence transactions;
-a typed wrapper class is a follow-up.
+1. Click **"Set up now"** — signs one deterministic message to derive your MemoKey
+   (no seed phrase, no on-chain transaction).
+2. Click **Wrap** — select an amount, confirm in your wallet. Amount is visible
+   at this boundary; everything after is hidden.
+3. Click **Send tip** — pick a recipient, add a memo. Amount is hidden in the
+   shielded transfer.
+4. Switch to the recipient's wallet — incoming tips appear decrypted automatically
+   (MemoKey recovered from the wallet signature).
+5. Click **Withdraw** when ready — amount is visible again at this boundary.
+
+For the theory behind each step, visit `/learn` in the running app.
+
+---
+
+## Architecture
+
+PrivateTip's Cadence contracts handle metadata routing. JanusFlow does the privacy.
+
+```
+User wallet (FCL)
+       |
+PrivateTip.cdc (router)
+  - records: sender, recipient, timestamp, encryptedNote
+  - does NOT hold FLOW
+       |
+JanusFlow.cdc (cross-VM router, 0x5dcbeb41055ec57e)
+       |
+JanusFlow EVM proxy (0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078)
+  - holds FLOW in custody
+  - commitment[recipient] = Pedersen(balance, blinding)
+  - shieldedTransfer: proof verified by Groth16 verifier
+```
+
+**MemoKey lifecycle**:
+
+1. App prompts `wallet.signMessage("OpenJanus MemoKey v1")` — once, any device.
+2. `deriveBabyJubKeypairFromBytes(sigBytes)` → deterministic BabyJub keypair.
+3. `memoKey.pubkey` is published (on-chain or app-layer) so senders can encrypt to it.
+4. `memoKey.privkey` stays in memory only — never persisted, never on-chain.
+5. Any device with the same wallet recovers the identical keypair at step 2.
+
+**ShieldedNote wire format** (what travels in the encrypted blob):
+
+```json
+{"v": 1, "a": "<amount in wei>", "b": "<blinding>", "d": "<memo text>"}
+```
+
+Encrypted with ECIES + AES-GCM; the recipient decrypts with their MemoKey privkey.
+
+---
 
 ## Security notes
 
-- **Vuln 015 fix (this sprint)**: `claimTip` authorization is now signer-bound
-  via `auth(BorrowValue) &Account`. Non-recipients can no longer claim, and the
-  deployer no longer has implicit claim rights.
-- **Amount privacy is NOT a property of this contract.** Sender, recipient,
-  amount and memo are visible on chain. For confidential amounts, compose with
-  the JanusFlow router. PrivateTip is the "named tips" UX layer.
-- **Admin model**: `AdminResource` with `Pause | Upgrade` entitlements is
-  currently in the router's own storage. Multisig delegation is a follow-up.
-- **Impl swap**: 48h time-lock from `proposeImplSwap` to `finalizeImplSwap`.
-  Cancellation is immediate (no lock).
+- **Amount privacy**: backed by JanusFlow's Groth16 + Pedersen scheme (v0.5.1 /
+  pot18 ceremony). Amounts never appear in calldata, events, or storage during
+  shielded transfers.
+- **Memo privacy**: ECIES + AES-GCM encrypted to the recipient's MemoKey pubkey.
+  The app stores only the ciphertext; the plaintext is never transmitted or logged.
+- **Sender/recipient privacy**: NOT hidden in v0.5 — both addresses are visible
+  on-chain. Stealth addresses are a planned v0.6 feature.
+- **Wrap/withdraw boundaries**: amounts are visible at `wrap` (msg.value,
+  `Wrapped(amount)` event) and at `unwrap` (`Unwrapped(amount, recipient)` event).
+  This is by design — the shielded pool is auditable for total custody. If you
+  need post-withdraw unlinkability, use a fresh wallet to receive.
+- **Admin functions** (testnet-only): `adminResetSlot`, `adminWipeTipsByRecipient`
+  — convenience for testnet development. Both are flagged for removal in the
+  mainnet preparation checklist.
+- **Impl upgrade model**: 48-hour time-lock from `proposeImplSwap` to
+  `finalizeImplSwap`. Cancellation is immediate.
+
+---
+
+## License
+
+MIT
