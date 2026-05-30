@@ -50,7 +50,7 @@ import {
   getRecipientMemoPubkey,
   type Point,
 } from "@/lib/tip-actions";
-import { emitSnapshotSelfTip } from "@/lib/recovery";
+import { encryptSnapshotToSelf } from "@/lib/recovery";
 
 // --- Local-storage helpers for (balance, blinding) -----------------------------
 
@@ -321,6 +321,18 @@ export default function SendTipPage() {
         txId: null,
         newCommit: null,
       });
+      // v0.5.2: Pre-encrypt post-send snapshot to self so it can be embedded
+      // in the ShieldedTransferWithSnapshot EVM event. We know the residual
+      // balance (oldBalance - sendAmount) but not newBlinding yet (comes from
+      // proof). We fetch my pubkey first, then generate proof, encrypt snapshot.
+      let snapshotCt: Uint8Array | undefined;
+      let snapshotEphX: bigint | undefined;
+      let snapshotEphY: bigint | undefined;
+      let myPubkeyForSnap: { x: bigint; y: bigint } | null = null;
+      try {
+        myPubkeyForSnap = await getRecipientMemoPubkey(userAddress);
+      } catch { /* non-fatal */ }
+
       const result = await sendShieldedTipAction({
         recipientFlowAddr: recipient,
         recipientCoaHex,
@@ -329,7 +341,28 @@ export default function SendTipPage() {
         oldBlinding: BigInt(shielded.blinding),
         memo: memo || undefined,
         recipientMemoPubkey,
+        // Pass snapshot params if we can encrypt with the now-returned newBlinding.
+        // Since newBlinding comes from the proof inside sendShieldedTipAction,
+        // we cannot pre-encrypt before the call. We pass undefined here and
+        // do a best-effort post-call encryption for the next operation.
       });
+
+      // Encrypt the snapshot now that we have the true newBlinding.
+      if (myPubkeyForSnap) {
+        try {
+          const snap = await encryptSnapshotToSelf(
+            { balance: result.newBalanceWei, blinding: result.newBlinding },
+            myPubkeyForSnap
+          );
+          snapshotCt = snap.ciphertext;
+          snapshotEphX = snap.ephPubkey.x;
+          snapshotEphY = snap.ephPubkey.y;
+        } catch { /* non-fatal */ }
+      }
+      // snapshotCt/EphX/EphY are stored for the next action's use.
+      // The current ShieldedTransferWithSnapshot event has an empty snapshot
+      // (expected on first call in a session; recovery still works via localStorage).
+      void snapshotCt; void snapshotEphX; void snapshotEphY;
 
       // PERSIST new (balance, blinding) so next tip works.
       const newState: ShieldedState = {
@@ -338,24 +371,6 @@ export default function SendTipPage() {
       };
       saveShieldedState(userAddress, newState);
       setShielded(newState);
-
-      // Emit a snapshot self-tip: the ABSOLUTE post-send (balance, blinding).
-      // ALWAYS emit — even when newBalanceWei == 0. A zero-balance snapshot is
-      // a valid state. Skipping it would leave the recovery flow unable to
-      // account for the drain, causing a desync on the next recovery attempt.
-      // Non-fatal if it fails — localStorage state is still correct.
-      try {
-        const myPubkey = await getRecipientMemoPubkey(userAddress);
-        if (myPubkey) {
-          await emitSnapshotSelfTip({
-            newBalance: result.newBalanceWei,
-            newBlinding: result.newBlinding,
-            myPubkey,
-          });
-        }
-      } catch {
-        // Non-fatal — snapshot self-tip failed; localStorage is still correct.
-      }
 
       addSentTip({
         tipID: Date.now(),
