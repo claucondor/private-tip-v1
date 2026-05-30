@@ -442,7 +442,7 @@ export default function ClientLayout({
       <nav className="sticky top-7 z-40 w-full border-b border-white/8 bg-[#0A1628]/90 backdrop-blur supports-[backdrop-filter]:bg-[#0A1628]/75">
         <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            {/* Logo: stylized Janus "⟨⟩" motif + Fraunces wordmark */}
+            {/* Logo: stylized Janus "⟨⟩" motif + Fraunces wordmark + openjanus tag */}
             <Link href="/" className="flex items-center gap-2 group">
               {/* Janus glyph — breathing animation on hover */}
               <motion.span
@@ -460,6 +460,9 @@ export default function ClientLayout({
                 style={{ fontFamily: "var(--font-fraunces, Georgia, serif)", fontWeight: 600 }}
               >
                 PrivateTip
+              </span>
+              <span className="hidden sm:inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded border border-[#00EF8B]/30 bg-[#00EF8B]/5 text-[9px] uppercase tracking-wider text-[#00EF8B]/80 font-mono">
+                openjanus demo
               </span>
             </Link>
 

@@ -52,7 +52,7 @@ export function ShieldedNoteEncrypt({ trigger = true, success = false, onDismiss
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.3, ease: EASE }}
-          className="relative rounded-xl border border-[#6B46C1]/25 bg-[#0A1628]/80 backdrop-blur overflow-hidden p-4 mb-4"
+          className="relative rounded-xl border border-[#8B5CF6]/60 bg-[#0A1628]/80 backdrop-blur overflow-hidden p-4 mb-4"
         >
           <button
             onClick={handleDismiss}
@@ -62,7 +62,7 @@ export function ShieldedNoteEncrypt({ trigger = true, success = false, onDismiss
             <X className="w-3.5 h-3.5" />
           </button>
 
-          <p className="text-[10px] uppercase tracking-widest text-[#6B46C1]/70 font-semibold mb-3">
+          <p className="text-[10px] uppercase tracking-widest text-[#A78BFA] font-semibold mb-3">
             {success ? "Tip delivered privately" : "What happens when you send"}
           </p>
 
@@ -91,7 +91,7 @@ export function ShieldedNoteEncrypt({ trigger = true, success = false, onDismiss
               {CIPHERTEXT_CHARS.map((char, i) => (
                 <motion.span
                   key={char + i}
-                  className="absolute font-mono text-[9px] text-[#6B46C1]/70"
+                  className="absolute font-mono text-[9px] text-[#A78BFA]"
                   style={{ top: `${(i % 3) * 12}px`, left: `${i * 12}%` }}
                   initial={{ opacity: 0, x: -10 }}
                   animate={

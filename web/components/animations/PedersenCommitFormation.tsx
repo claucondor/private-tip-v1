@@ -51,7 +51,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.3, ease: EASE }}
-          className="relative rounded-xl border border-[#B45309]/25 bg-[#0A1628]/80 backdrop-blur overflow-hidden p-4 mb-4"
+          className="relative rounded-xl border border-[#D97706]/60 bg-[#0A1628]/80 backdrop-blur overflow-hidden p-4 mb-4"
         >
           {/* Dismiss button */}
           <button
@@ -62,7 +62,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
             <X className="w-3.5 h-3.5" />
           </button>
 
-          <p className="text-[10px] uppercase tracking-widest text-[#B45309]/70 font-semibold mb-3">
+          <p className="text-[10px] uppercase tracking-widest text-[#D97706] font-semibold mb-3">
             {isIn ? "What happens when you wrap" : "What happens when you unwrap"}
           </p>
 
@@ -89,7 +89,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
               }
               transition={{ duration: 2.2, ease: EASE, times: [0, 0.45, 1] }}
             >
-              <div className="w-10 h-10 rounded-full bg-[#B45309]/20 border border-[#B45309]/40 flex items-center justify-center shadow-[0_0_12px_color-mix(in_oklch,#B45309_20%,transparent)]">
+              <div className="w-10 h-10 rounded-full bg-[#D97706]/25 border border-[#D97706]/70 flex items-center justify-center shadow-[0_0_12px_color-mix(in_oklch,#B45309_20%,transparent)]">
                 <span className="text-[#B45309] font-bold text-xs font-mono">⬡</span>
               </div>
             </motion.div>
@@ -105,7 +105,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
               transition={{ duration: 1.5, ease: "easeInOut", delay: 0.5 }}
             >
               <div className="h-10 w-px bg-gradient-to-b from-transparent via-[#00EF8B]/50 to-transparent" />
-              <span className="text-[8px] text-[#00EF8B]/60 uppercase tracking-wider">boundary</span>
+              <span className="text-[8px] text-[#00EF8B]/90 uppercase tracking-wider">boundary</span>
               <div className="h-10 w-px bg-gradient-to-b from-transparent via-[#00EF8B]/50 to-transparent" />
             </motion.div>
 
@@ -122,7 +122,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
                 }
                 transition={{ duration: 2.2, ease: EASE, times: [0, 0.45, 0.8, 1] }}
               >
-                <div className="w-10 h-10 rounded-full bg-[#6B46C1]/20 border border-[#6B46C1]/50 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#6B46C1_25%,transparent)]">
+                <div className="w-10 h-10 rounded-full bg-[#8B5CF6]/25 border border-[#8B5CF6]/75 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#6B46C1_25%,transparent)]">
                   <span className="text-[#6B46C1] font-mono text-[10px] font-bold">P</span>
                 </div>
                 {phase === "done" && (
@@ -130,7 +130,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     transition={{ delay: 0.2 }}
-                    className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[8px] text-[#6B46C1]/70"
+                    className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[8px] text-[#A78BFA]"
                   >
                     commit point
                   </motion.div>
@@ -150,7 +150,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
                   }
                   transition={{ duration: 2.2, ease: EASE, times: [0, 0.3, 0.6, 1] }}
                 >
-                  <div className="w-10 h-10 rounded-full bg-[#6B46C1]/20 border border-[#6B46C1]/50 flex items-center justify-center">
+                  <div className="w-10 h-10 rounded-full bg-[#8B5CF6]/25 border border-[#8B5CF6]/75 flex items-center justify-center">
                     <span className="text-[#6B46C1] font-mono text-[10px] font-bold">P</span>
                   </div>
                 </motion.div>
@@ -165,7 +165,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
                   }
                   transition={{ duration: 2.2, ease: EASE, times: [0, 0.55, 1] }}
                 >
-                  <div className="w-10 h-10 rounded-full bg-[#B45309]/20 border border-[#B45309]/40 flex items-center justify-center shadow-[0_0_12px_color-mix(in_oklch,#B45309_20%,transparent)]">
+                  <div className="w-10 h-10 rounded-full bg-[#D97706]/25 border border-[#D97706]/70 flex items-center justify-center shadow-[0_0_12px_color-mix(in_oklch,#B45309_20%,transparent)]">
                     <span className="text-[#B45309] font-bold text-xs font-mono">⬡</span>
                   </div>
                   {phase === "done" && (
@@ -173,7 +173,7 @@ export function PedersenCommitFormation({ direction, trigger = true, onDismiss }
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ delay: 0.2 }}
-                      className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[8px] text-[#B45309]/70"
+                      className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[8px] text-[#D97706]"
                     >
                       public FLOW
                     </motion.div>

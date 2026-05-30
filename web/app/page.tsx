@@ -22,9 +22,12 @@ import {
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
-function useFadeUp(delay = 0) {
-  const reduced = useReducedMotion();
-  if (reduced) return { opacity: 1 };
+// Pure helper (NOT a hook) — accepts `reduced` as input so it can be safely
+// called from inside JSX without violating the Rules of Hooks. The caller
+// invokes `useReducedMotion()` ONCE at the top of the component and passes
+// the value in. Avoids the hook-count mismatch when called inline N times.
+function fadeUp(reduced: boolean, delay = 0) {
+  if (reduced) return { opacity: 1 } as const;
   return {
     initial: { opacity: 0, y: 20 },
     animate: { opacity: 1, y: 0 },
@@ -135,6 +138,7 @@ export default function Home() {
   const router = useRouter();
   const { user } = useFlowCurrentUser();
   const isLoggedIn = !!user?.addr;
+  const reduced = useReducedMotion() ?? false;
 
   return (
     <div className="flex flex-col items-center janus-hex-bg">
@@ -149,14 +153,29 @@ export default function Home() {
           <div className="absolute top-1/3 right-0 w-64 h-64 rounded-full bg-[#B45309]/4 blur-3xl" />
         </div>
 
-        {/* Wordmark */}
+        {/* openjanus brand pill — clarifies this is a demo of the broader stack */}
+        <motion.a
+          {...fadeUp(reduced, 0)}
+          href="https://github.com/openjanus"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 mb-6 px-3 py-1.5 rounded-full border border-[#00EF8B]/40 bg-[#00EF8B]/8 hover:bg-[#00EF8B]/15 hover:border-[#00EF8B]/60 transition-colors group"
+        >
+          <span className="text-[#00EF8B] text-sm font-mono leading-none" style={{ letterSpacing: "-0.1em" }} aria-hidden>⟨⟩</span>
+          <span className="text-[10px] uppercase tracking-[0.2em] text-[#00EF8B]/90 font-medium">
+            an openjanus demo
+          </span>
+          <ExternalLink className="w-3 h-3 text-[#00EF8B]/60 group-hover:text-[#00EF8B] transition-colors" />
+        </motion.a>
+
+        {/* Wordmark — slightly smaller now that the openjanus pill carries brand context */}
         <motion.div
-          {...useFadeUp(0)}
-          className="relative inline-flex items-center gap-3 mb-6"
+          {...fadeUp(reduced, 0.05)}
+          className="relative inline-flex items-center gap-3 mb-2"
         >
           <motion.span
             aria-hidden
-            className="text-[#00EF8B] text-3xl leading-none select-none font-mono"
+            className="text-[#00EF8B] text-2xl leading-none select-none font-mono"
             style={{ letterSpacing: "-0.1em" }}
             animate={{ opacity: [0.6, 1, 0.6] }}
             transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
@@ -164,7 +183,7 @@ export default function Home() {
             ⟨⟩
           </motion.span>
           <h1
-            className="text-5xl sm:text-7xl font-bold tracking-tight text-foreground"
+            className="text-4xl sm:text-5xl font-bold tracking-tight text-foreground"
             style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}
           >
             PrivateTip
@@ -173,13 +192,13 @@ export default function Home() {
 
         {/* Tagline */}
         <motion.p
-          {...useFadeUp(0.1)}
+          {...fadeUp(reduced, 0.1)}
           className="text-xl sm:text-2xl text-foreground/70 max-w-xl mx-auto mb-4"
         >
           Tip on Flow with the amount kept private.
         </motion.p>
         <motion.p
-          {...useFadeUp(0.18)}
+          {...fadeUp(reduced, 0.18)}
           className="text-sm text-foreground/40 max-w-lg mx-auto mb-10"
         >
           People see who tipped whom — but never how much. Powered by Pedersen
@@ -187,7 +206,7 @@ export default function Home() {
         </motion.p>
 
         {/* Hero coin animation */}
-        <motion.div {...useFadeUp(0.26)} className="w-full max-w-sm mb-12">
+        <motion.div {...fadeUp(reduced, 0.26)} className="w-full max-w-sm mb-12">
           <div className="mb-2 flex justify-between text-[9px] text-foreground/30 uppercase tracking-wider px-1">
             <span>Public</span>
             <span>Shielded zone</span>
@@ -200,7 +219,7 @@ export default function Home() {
         </motion.div>
 
         {/* CTAs */}
-        <motion.div {...useFadeUp(0.32)} className="flex flex-col sm:flex-row items-center justify-center gap-3">
+        <motion.div {...fadeUp(reduced, 0.32)} className="flex flex-col sm:flex-row items-center justify-center gap-3">
           {isLoggedIn ? (
             <>
               <motion.button
@@ -242,7 +261,7 @@ export default function Home() {
         </motion.div>
 
         {isLoggedIn && (
-          <motion.p {...useFadeUp(0.4)} className="text-xs text-foreground/30 mt-4">
+          <motion.p {...fadeUp(reduced, 0.4)} className="text-xs text-foreground/30 mt-4">
             New here? Start at{" "}
             <button
               type="button"
