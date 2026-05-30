@@ -343,15 +343,18 @@ transaction(
             signer.capabilities.publish(coaCap, at: /public/evm)
         }
 
-        // 2. MemoKey (JanusFlow.MemoKey) — replace any old PrivateTip.MemoKey
-        //    or stale JanusFlow.MemoKey; always write the derived pubkey.
+        // 2. MemoKey (JanusFlow.MemoKey) — replace any existing resource at the
+        //    canonical path, regardless of type. This handles:
+        //      - old PrivateTip.MemoKey (pre-v0.5.2 accounts)
+        //      - stale JanusFlow.MemoKey (re-setup / key rotation)
+        //    We load as AnyResource to handle the PrivateTip.MemoKey type mismatch.
         let memoStoragePath = JanusFlow.memoKeyStoragePath()
         let memoPublicPath  = JanusFlow.memoKeyPublicPath()
 
-        // Remove any existing resource at that path (handles both old
-        // PrivateTip.MemoKey and older JanusFlow.MemoKey resources).
-        if let oldKey <- signer.storage.load<@JanusFlow.MemoKey>(from: memoStoragePath) {
-            destroy oldKey
+        // Evict any existing resource (ANY type) at that path.
+        // This is the only safe way to handle PrivateTip.MemoKey → JanusFlow.MemoKey migration.
+        if let anyOld <- signer.storage.load<@AnyResource>(from: memoStoragePath) {
+            destroy anyOld
             signer.capabilities.unpublish(memoPublicPath)
         }
 
