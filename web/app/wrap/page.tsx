@@ -62,12 +62,14 @@ import {
   formatWeiToFlowUFix64,
   formatPoint,
   isIdentityPoint,
+  getRecipientMemoPubkey,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   TX_SETUP_COA,
   type Point,
   type WrapSource,
 } from "@/lib/tip-actions";
+import { emitRecoverySelfTip } from "@/lib/recovery";
 
 // --- Local-storage helpers (mirrors /send and /claim) -------------------------
 
@@ -386,6 +388,24 @@ export default function WrapPage() {
       };
       saveShieldedState(userAddress, newState);
       setShielded(newState);
+
+      // Emit a recovery carbon-copy self-tip so the user can reconstruct
+      // this wrap from any device via sign-derive + chain scan.
+      // Non-fatal if it fails — the wrap already succeeded and state is in
+      // localStorage. The user can re-emit later by re-wrapping or manually.
+      try {
+        const myPubkey = await getRecipientMemoPubkey(userAddress);
+        if (myPubkey) {
+          await emitRecoverySelfTip({
+            amount: amountWei,
+            blinding: result.blinding,
+            kind: "wrap",
+            myPubkey,
+          });
+        }
+      } catch {
+        // Non-fatal — recovery self-tip failed; localStorage is still correct.
+      }
 
       // Refresh on-chain commit + source balances for the visual confirmation.
       if (coaHex) {

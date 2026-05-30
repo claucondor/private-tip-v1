@@ -76,6 +76,12 @@ access(all) contract PrivateTip {
     access(self) var pendingImplVersion: String?
     access(self) var pendingImplUnlockAt: UFix64
 
+    // v0.4.2 note: encrypted memo blobs live in a separate MemoStore resource
+    // saved at the contract account's storage. We could NOT add a new
+    // contract-level field — the Cadence upgrade validator hard-blocks new
+    // fields on already-deployed contracts. The resource pattern (new TYPE,
+    // installed post-upgrade) is the only legal path.
+
     // ─── Events ─────────────────────────────────────────────────────────────────
     //
     // CLEAN-BREAK v0.4.1 NOTE: TipSentShielded now omits `memo: String?` and
@@ -137,6 +143,9 @@ access(all) contract PrivateTip {
         recipient: Address,
         amount: UFix64
     )
+
+    /// Emitted when admin wipes all tip records for a recipient (testnet cleanup).
+    access(all) event AdminTipsWiped(recipient: Address, count: UInt64)
 
     access(all) event Paused()
     access(all) event Unpaused()
@@ -259,6 +268,85 @@ access(all) contract PrivateTip {
         }
     }
 
+    /// v0.4.2 — encrypted memo blob stored alongside each tip.
+    /// Mirrors the payload emitted in TipSentShielded so recipients can
+    /// decrypt via a single Cadence script (no event log scanning).
+    access(all) struct MemoCiphertext {
+        access(all) let ciphertext: [UInt8]
+        access(all) let ephPubkeyX: UInt256
+        access(all) let ephPubkeyY: UInt256
+
+        init(ciphertext: [UInt8], ephPubkeyX: UInt256, ephPubkeyY: UInt256) {
+            self.ciphertext = ciphertext
+            self.ephPubkeyX = ephPubkeyX
+            self.ephPubkeyY = ephPubkeyY
+        }
+    }
+
+    /// v0.4.2 — encrypted memo storage. Lives as a separate resource at the
+    /// contract account's storage (path: /storage/privateTipMemoStore) because
+    /// the Cadence upgrade validator forbids adding new contract-level fields.
+    /// Installed post-upgrade via PrivateTip.installMemoStore() — idempotent.
+    access(all) resource MemoStore {
+        access(self) var memos: {UInt64: MemoCiphertext}
+
+        init() {
+            self.memos = {}
+        }
+
+        access(contract) fun setMemo(tipID: UInt64, memo: MemoCiphertext) {
+            self.memos[tipID] = memo
+        }
+
+        access(contract) fun removeMemo(tipID: UInt64) {
+            self.memos.remove(key: tipID)
+        }
+
+        access(all) view fun getMemo(tipID: UInt64): MemoCiphertext? {
+            return self.memos[tipID]
+        }
+    }
+
+    /// Storage path for the MemoStore resource.
+    access(all) view fun memoStoreStoragePath(): StoragePath {
+        return /storage/privateTipMemoStore
+    }
+
+    /// Idempotently install the MemoStore on the contract account. Safe to
+    /// call repeatedly; does nothing if already installed. Must be invoked
+    /// once after upgrading to v0.4.2 to enable on-chain memo persistence.
+    access(all) fun installMemoStore() {
+        let path = self.memoStoreStoragePath()
+        if self.account.storage.borrow<&MemoStore>(from: path) == nil {
+            self.account.storage.save(<-create MemoStore(), to: path)
+        }
+    }
+
+    /// v0.4.2 metadata view bundled with the encrypted memo. `memo` is nil
+    /// for pre-v0.4.2 tips (stored before MemoStore was installed) and for
+    /// tips sent without a memo.
+    access(all) struct TipMetadataWithMemo {
+        access(all) let tipID: UInt64
+        access(all) let sender: Address
+        access(all) let recipient: Address
+        access(all) let timestamp: UFix64
+        access(all) let memo: MemoCiphertext?
+
+        init(
+            tipID: UInt64,
+            sender: Address,
+            recipient: Address,
+            timestamp: UFix64,
+            memo: MemoCiphertext?
+        ) {
+            self.tipID = tipID
+            self.sender = sender
+            self.recipient = recipient
+            self.timestamp = timestamp
+            self.memo = memo
+        }
+    }
+
     // ─── Admin Resource ─────────────────────────────────────────────────────────
 
     access(all) resource AdminResource {
@@ -333,6 +421,29 @@ access(all) contract PrivateTip {
             )
 
             return <- vault
+        }
+
+        // MAINNET-PREPARE-REMOVE
+        // !!! TESTNET-ONLY — REMOVE BEFORE MAINNET !!!
+        /// TESTNET-ONLY admin recovery: clear all tip records + memo blobs for one
+        /// recipient. Removes entries from `tipsByRecipient[addr]`, deletes the
+        /// matching keys from `tips`, and wipes the corresponding MemoStore entries.
+        /// Does NOT touch JanusFlow EVM commitments (use adminResetSlot separately).
+        access(Pause) fun adminWipeTipsByRecipient(recipient: Address) {
+            let ids = PrivateTip.tipsByRecipient[recipient] ?? []
+            // Remove tip records + MemoStore entries
+            let memoStore = PrivateTip.account.storage.borrow<&MemoStore>(
+                from: PrivateTip.memoStoreStoragePath()
+            )
+            for id in ids {
+                PrivateTip.tips.remove(key: id)
+                if memoStore != nil {
+                    memoStore!.removeMemo(tipID: id)
+                }
+            }
+            // Clear the recipient's index entry
+            PrivateTip.tipsByRecipient.remove(key: recipient)
+            emit AdminTipsWiped(recipient: recipient, count: UInt64(ids.length))
         }
     }
 
@@ -412,6 +523,25 @@ access(all) contract PrivateTip {
             self.tipsBySender[senderAddr] = [tipID]
         }
 
+        // v0.4.2: persist the encrypted memo blob into MemoStore so recipients
+        // can fetch + decrypt via a single script call instead of scanning
+        // event logs. Skipped silently when MemoStore is not yet installed —
+        // that's the upgrade-without-admin-tx window.
+        if memoCiphertext.length > 0 {
+            if let memoStore = self.account.storage.borrow<&MemoStore>(
+                from: self.memoStoreStoragePath()
+            ) {
+                memoStore.setMemo(
+                    tipID: tipID,
+                    memo: MemoCiphertext(
+                        ciphertext: memoCiphertext,
+                        ephPubkeyX: memoEphPubkeyX,
+                        ephPubkeyY: memoEphPubkeyY
+                    )
+                )
+            }
+        }
+
         emit TipSentShielded(
             tipID: tipID,
             sender: senderAddr,
@@ -475,6 +605,46 @@ access(all) contract PrivateTip {
         return out
     }
 
+    /// v0.4.2 — fetch a stored encrypted memo blob, or nil if the tip pre-
+    /// dates the MemoStore install or had no memo.
+    access(all) fun getTipMemo(tipID: UInt64): MemoCiphertext? {
+        if let memoStore = self.account.storage.borrow<&MemoStore>(
+            from: self.memoStoreStoragePath()
+        ) {
+            return memoStore.getMemo(tipID: tipID)
+        }
+        return nil
+    }
+
+    /// v0.4.2 — single-call read for `/tips`: returns metadata + the encrypted
+    /// memo blob (when present) for every shielded tip a recipient has.
+    access(all) fun getShieldedTipsByRecipientWithMemo(
+        recipient: Address
+    ): [TipMetadataWithMemo] {
+        let ids = self.tipsByRecipient[recipient] ?? []
+        let memoStore = self.account.storage.borrow<&MemoStore>(
+            from: self.memoStoreStoragePath()
+        )
+        var out: [TipMetadataWithMemo] = []
+        for id in ids {
+            if let r = self.tips[id] {
+                if r.isShielded() {
+                    let memo = memoStore != nil
+                        ? memoStore!.getMemo(tipID: id)
+                        : nil
+                    out.append(TipMetadataWithMemo(
+                        tipID: r.tipID,
+                        sender: r.sender,
+                        recipient: r.recipient,
+                        timestamp: r.timestamp,
+                        memo: memo
+                    ))
+                }
+            }
+        }
+        return out
+    }
+
     access(all) fun getTipsBySender(sender: Address): [TipRecord] {
         let ids = self.tipsBySender[sender] ?? []
         var out: [TipRecord] = []
@@ -497,6 +667,38 @@ access(all) contract PrivateTip {
                         sender: r.sender,
                         recipient: r.recipient,
                         timestamp: r.timestamp
+                    ))
+                }
+            }
+        }
+        return out
+    }
+
+    /// v0.4.3 — single-call read for sender-side recovery: returns metadata +
+    /// the encrypted memo blob for every shielded tip a sender has sent.
+    /// Mirrors getShieldedTipsByRecipientWithMemo but indexes by sender.
+    /// Self-tips (sender == recipient) are recovery carbon-copies — they use
+    /// the same on-chain infrastructure so no new fields are required.
+    access(all) fun getShieldedTipsBySenderWithMemo(
+        sender: Address
+    ): [TipMetadataWithMemo] {
+        let ids = self.tipsBySender[sender] ?? []
+        let memoStore = self.account.storage.borrow<&MemoStore>(
+            from: self.memoStoreStoragePath()
+        )
+        var out: [TipMetadataWithMemo] = []
+        for id in ids {
+            if let r = self.tips[id] {
+                if r.isShielded() {
+                    let memo = memoStore != nil
+                        ? memoStore!.getMemo(tipID: id)
+                        : nil
+                    out.append(TipMetadataWithMemo(
+                        tipID: r.tipID,
+                        sender: r.sender,
+                        recipient: r.recipient,
+                        timestamp: r.timestamp,
+                        memo: memo
                     ))
                 }
             }

@@ -50,6 +50,7 @@ import {
   getRecipientMemoPubkey,
   type Point,
 } from "@/lib/tip-actions";
+import { emitRecoverySelfTip } from "@/lib/recovery";
 
 // --- Local-storage helpers for (balance, blinding) -----------------------------
 
@@ -337,6 +338,24 @@ export default function SendTipPage() {
       };
       saveShieldedState(userAddress, newState);
       setShielded(newState);
+
+      // Emit a recovery carbon-copy: record the POST-SEND RESIDUAL as a
+      // self-tip so it can be recovered from chain on any device. The residual
+      // is (newBalanceWei, newBlinding) — i.e. what's left after this send.
+      // Non-fatal if it fails — localStorage state is still correct.
+      try {
+        const myPubkey = await getRecipientMemoPubkey(userAddress);
+        if (myPubkey && result.newBalanceWei > 0n) {
+          await emitRecoverySelfTip({
+            amount: result.newBalanceWei,
+            blinding: result.newBlinding,
+            kind: "residual",
+            myPubkey,
+          });
+        }
+      } catch {
+        // Non-fatal — recovery self-tip failed; localStorage is still correct.
+      }
 
       addSentTip({
         tipID: Date.now(),

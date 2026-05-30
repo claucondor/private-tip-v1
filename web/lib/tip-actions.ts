@@ -44,31 +44,138 @@ import {
   getFlowVaultBalanceWei as sdkGetFlowVaultBalanceWei,
   TX_SETUP_COA,
 } from "@openjanus/sdk/network";
-import {
-  // Memo encryption primitives
-  encryptText,
-  decryptText,
-  generateBabyJubKeypair,
-  type MemoCiphertext,
-  type BabyJubKeypair,
-  // Unit conversions
-  parseFlowToWei as sdkParseFlowToWei,
-  formatWeiToFlow as sdkFormatWeiToFlow,
-  weiToFlowUFix64 as sdkWeiToFlowUFix64,
-  FLOW_SCALE as SDK_FLOW_SCALE,
-} from "@openjanus/sdk/crypto";
+// NOTE: @openjanus/sdk/crypto transitively pulls circomlibjs (~30MB) into
+// the client bundle, which makes Turbopack compile take 30+ min. We removed
+// the top-level imports and route the heavy crypto through API routes
+// (server-only). Pure unit conversions live in /utils which IS browser-safe.
+//
+// MemoCiphertext shape (was a type export from /crypto):
+type MemoCiphertext = {
+  ciphertext: Uint8Array;
+  ephemeralPubkey: { x: bigint; y: bigint };
+};
+// BabyJubKeypair shape (deferred — only generated server-side):
+type BabyJubKeypair = {
+  privkey: bigint;
+  pubkey: { x: bigint; y: bigint };
+};
+
+/** Encrypt a memo via the server-side /api/memo/encrypt route. */
+async function encryptMemo(
+  plaintext: string,
+  recipientPubkey: { x: bigint; y: bigint }
+): Promise<MemoCiphertext> {
+  const res = await fetch("/api/memo/encrypt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      plaintext,
+      recipientPubkey: {
+        x: recipientPubkey.x.toString(),
+        y: recipientPubkey.y.toString(),
+      },
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(`encryptMemo: ${err.error ?? res.statusText}`);
+  }
+  const data = await res.json();
+  return {
+    ciphertext: new Uint8Array(data.ciphertext),
+    ephemeralPubkey: {
+      x: BigInt(data.ephemeralPubkey.x),
+      y: BigInt(data.ephemeralPubkey.y),
+    },
+  };
+}
+
+/** ShieldedNote payload (mirrors the SDK type, repeated locally to avoid
+ * pulling the crypto barrel into the client bundle). */
+export interface ShieldedNote {
+  amount: bigint;
+  blinding: bigint;
+  data?: string;
+}
+
+/** Encrypt a ShieldedNote via the server-side /api/note/encrypt route. */
+export async function encryptNote(
+  note: ShieldedNote,
+  recipientPubkey: { x: bigint; y: bigint }
+): Promise<MemoCiphertext> {
+  const res = await fetch("/api/note/encrypt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      amount: note.amount.toString(),
+      blinding: note.blinding.toString(),
+      data: note.data,
+      recipientPubkey: {
+        x: recipientPubkey.x.toString(),
+        y: recipientPubkey.y.toString(),
+      },
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(`encryptNote: ${err.error ?? res.statusText}`);
+  }
+  const data = await res.json();
+  return {
+    ciphertext: new Uint8Array(data.ciphertext),
+    ephemeralPubkey: {
+      x: BigInt(data.ephemeralPubkey.x),
+      y: BigInt(data.ephemeralPubkey.y),
+    },
+  };
+}
+
+/** Decrypt a ShieldedNote via /api/note/decrypt. Throws on non-note ciphertext
+ * (i.e. legacy plain-text memo) so caller can fall back to decryptText. */
+export async function decryptNote(
+  ciphertext: Uint8Array,
+  ephemeralPubkey: { x: bigint; y: bigint },
+  privkey: bigint
+): Promise<ShieldedNote> {
+  const res = await fetch("/api/note/decrypt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ciphertext: Array.from(ciphertext),
+      ephemeralPubkey: {
+        x: ephemeralPubkey.x.toString(),
+        y: ephemeralPubkey.y.toString(),
+      },
+      privkey: privkey.toString(),
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(`decryptNote: ${err.error ?? res.statusText}`);
+  }
+  const data = await res.json();
+  return {
+    amount: BigInt(data.amount),
+    blinding: BigInt(data.blinding),
+    data: data.data,
+  };
+}
 import {
   // Formatters / validators
   formatPoint as sdkFormatPoint,
   isValidFlowAddress as sdkIsValidFlowAddress,
   isValidFlowAmount as sdkIsValidFlowAmount,
 } from "@openjanus/sdk/utils";
-import {
-  // Types
-  isIdentityPoint as sdkIsIdentityPoint,
-  type Point,
-  type WrapSource,
-} from "@openjanus/sdk";
+// Type-only imports — fully erased at build time, so they don't pull the SDK
+// barrel into the client bundle. The value `isIdentityPoint` would re-trigger
+// the heavy crypto import chain (amount-disclose -> dynamic url import that
+// Turbopack mis-polyfills to native-url), so we inline it here.
+import type { Point, WrapSource } from "@openjanus/sdk";
+
+/** BabyJub identity check (point at infinity = (0, 1)). */
+function sdkIsIdentityPoint(p: Point): boolean {
+  return p.x === 0n && p.y === 1n;
+}
 
 // FCL has no type declarations bundled.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -88,26 +195,133 @@ export const JANUS_FLOW_CADENCE = JANUS_FLOW_CADENCE_ADDRESS;
 export const PRIVATE_TIP_CADENCE = "0xb9ac529c14a4c5a1";
 export const SDK_VERSION = JANUS_FLOW_VERSION;
 
-export const FLOW_SCALE = SDK_FLOW_SCALE;
+// Pure-math unit conversions inlined (no SDK import to keep bundle light).
+export const FLOW_SCALE: bigint = 10n ** 18n;
 
 export type { Point, WrapSource, MemoCiphertext, BabyJubKeypair };
 
 export const isIdentityPoint = sdkIsIdentityPoint;
-export const parseFlowToWei = sdkParseFlowToWei;
-export const formatWeiToFlow = sdkFormatWeiToFlow;
-export const formatWeiToFlowUFix64 = sdkWeiToFlowUFix64;
 export const formatPoint = sdkFormatPoint;
 export const isValidFlowAddress = sdkIsValidFlowAddress;
 export const isValidFlowAmount = sdkIsValidFlowAmount;
 
-// Memo encryption — direct re-exports for /send and /tips pages.
-export { encryptText, decryptText, generateBabyJubKeypair };
+export function parseFlowToWei(amount: string): bigint {
+  const [whole, frac = ""] = amount.split(".");
+  const fracPadded = (frac + "0".repeat(18)).slice(0, 18);
+  return BigInt(whole) * FLOW_SCALE + BigInt(fracPadded || "0");
+}
+export function formatWeiToFlow(wei: bigint, decimals = 4): string {
+  const whole = wei / FLOW_SCALE;
+  const frac = wei % FLOW_SCALE;
+  const fracStr = frac.toString().padStart(18, "0").slice(0, decimals);
+  return `${whole}.${fracStr}`;
+}
+export function formatWeiToFlowUFix64(wei: bigint): string {
+  const whole = wei / FLOW_SCALE;
+  const frac = wei % FLOW_SCALE;
+  const fracStr = frac.toString().padStart(18, "0").slice(0, 8);
+  return `${whole}.${fracStr}`;
+}
+
+// Memo encryption — server-side via API routes (heavy crypto kept off client bundle).
+export { encryptMemo as encryptText };
+
+/** Decrypt a memo via /api/memo/decrypt. */
+export async function decryptText(
+  ciphertext: Uint8Array,
+  ephemeralPubkey: { x: bigint; y: bigint },
+  privkey: bigint
+): Promise<string> {
+  const res = await fetch("/api/memo/decrypt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ciphertext: Array.from(ciphertext),
+      ephemeralPubkey: {
+        x: ephemeralPubkey.x.toString(),
+        y: ephemeralPubkey.y.toString(),
+      },
+      privkey: privkey.toString(),
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(`decryptText: ${err.error ?? res.statusText}`);
+  }
+  const data = await res.json();
+  return data.plaintext;
+}
+
+/** Generate a fresh BabyJub keypair via /api/keypair/generate. */
+export async function generateBabyJubKeypair(): Promise<BabyJubKeypair> {
+  const res = await fetch("/api/keypair/generate", { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(`generateBabyJubKeypair: ${err.error ?? res.statusText}`);
+  }
+  const data = await res.json();
+  return {
+    privkey: BigInt(data.privkey),
+    pubkey: { x: BigInt(data.pubkey.x), y: BigInt(data.pubkey.y) },
+  };
+}
+
+// ─── MemoKey session cache + sign-derive helpers ──────────────────────────────
+
+export {
+  getCachedMemoPrivkey,
+  cacheMemoPrivkey,
+  clearMemoPrivkeyCache,
+} from "./memo-key-session";
+
+export { deriveMemoKeyFromWallet } from "./memo-key-derive";
+
+import { getCachedMemoPrivkey, cacheMemoPrivkey } from "./memo-key-session";
+import { deriveMemoKeyFromWallet } from "./memo-key-derive";
+
+/**
+ * Get or derive the caller's MemoKey privkey.
+ *
+ * 1. Returns immediately from sessionStorage if already cached this session.
+ * 2. Otherwise, prompts the wallet for a single signature, derives the BabyJub
+ *    scalar via HKDF (server-side), caches it in sessionStorage, and returns it.
+ *    Same wallet + same message → same scalar in any browser.
+ */
+export async function getOrDeriveMemoPrivkey(
+  flowAddr: string
+): Promise<bigint> {
+  const cached = getCachedMemoPrivkey(flowAddr);
+  if (cached !== null) return cached;
+  const kp = await deriveMemoKeyFromWallet();
+  cacheMemoPrivkey(flowAddr, kp.privkey);
+  return kp.privkey;
+}
+
+/** @deprecated Use getCachedMemoPrivkey (sessionStorage) or getOrDeriveMemoPrivkey instead.
+ *  This sync helper now ONLY reads sessionStorage — localStorage is no longer
+ *  used for the MemoKey privkey. Retained to avoid mass-refactor of callers. */
+export function loadMemoPrivkey(flowAddr: string): bigint | null {
+  return getCachedMemoPrivkey(flowAddr);
+}
 
 // ─── Smart-setup Cadence template (COA + MemoKey in one atomic tx) ────────────
 
-/** Smart-setup: creates COA AND MemoKey in one tx if either is missing. */
+/**
+ * Smart-setup:
+ *   - COA   → idempotent (create only if missing)
+ *   - MemoKey → ALWAYS rotated to the supplied (derived) values
+ *
+ * v0.4.5 change: MemoKey is now overwritten on every call. Required because:
+ * pre-v0.4.5 setups created a random privkey; v0.4.5+ uses sign-derive so the
+ * derived pubkey differs from the stored one. Running the new setup on an
+ * account with an old MemoKey must replace it, or the on-chain pubkey stays
+ * stale and the derived privkey can never decrypt incoming notes.
+ *
+ * Idempotent in effect: sign-derive is deterministic, so re-running produces
+ * the same final MemoKey resource.
+ */
 export const TX_SMART_SETUP = `
-import "EVM"
+import EVM from 0x8c5303eaa26202d6
 import PrivateTip from 0xb9ac529c14a4c5a1
 
 transaction(
@@ -115,50 +329,57 @@ transaction(
     memoPubkeyX: UInt256,
     memoPubkeyY: UInt256
 ) {
-    prepare(signer: auth(SaveValue, IssueStorageCapabilityController, PublishCapability, BorrowValue) &Account) {
-        // 1. COA
+    prepare(signer: auth(SaveValue, LoadValue, IssueStorageCapabilityController, PublishCapability, UnpublishCapability, BorrowValue) &Account) {
+        // 1. COA — idempotent (only create if missing).
         if signer.storage.borrow<&EVM.CadenceOwnedAccount>(from: /storage/evm) == nil {
             let coa <- EVM.createCadenceOwnedAccount()
             signer.storage.save(<-coa, to: /storage/evm)
             let coaCap = signer.capabilities.storage.issue<&EVM.CadenceOwnedAccount>(/storage/evm)
             signer.capabilities.publish(coaCap, at: /public/evm)
         }
-        // 2. MemoKey
+
+        // 2. MemoKey — ALWAYS rotate to the supplied (derived) values.
         let memoStoragePath = PrivateTip.memoKeyStoragePath()
         let memoPublicPath = PrivateTip.memoKeyPublicPath()
-        if signer.storage.borrow<&PrivateTip.MemoKey>(from: memoStoragePath) == nil {
-            let key <- PrivateTip.createMemoKey(
-                privkey: memoPrivkey,
-                pubkeyX: memoPubkeyX,
-                pubkeyY: memoPubkeyY
-            )
-            signer.storage.save(<-key, to: memoStoragePath)
-            let memoCap = signer.capabilities.storage.issue<&{PrivateTip.MemoKeyPublic}>(memoStoragePath)
-            signer.capabilities.publish(memoCap, at: memoPublicPath)
+
+        // Tear down any existing MemoKey + its published capability.
+        if let oldKey <- signer.storage.load<@PrivateTip.MemoKey>(from: memoStoragePath) {
+            destroy oldKey
+            signer.capabilities.unpublish(memoPublicPath)
         }
+
+        // Install the fresh derived MemoKey + republish the public capability.
+        let key <- PrivateTip.createMemoKey(
+            privkey: memoPrivkey,
+            pubkeyX: memoPubkeyX,
+            pubkeyY: memoPubkeyY
+        )
+        signer.storage.save(<-key, to: memoStoragePath)
+        let memoCap = signer.capabilities.storage.issue<&{PrivateTip.MemoKeyPublic}>(memoStoragePath)
+        signer.capabilities.publish(memoCap, at: memoPublicPath)
     }
 }
 `;
 
 /**
- * Smart-setup action: generates a fresh MemoKey client-side, persists the
- * privkey to localStorage, and submits the COA+MemoKey setup tx.
+ * Smart-setup action: sign-derives the MemoKey (HKDF over wallet signature),
+ * caches the privkey in sessionStorage, and submits the COA+MemoKey setup tx.
  *
- * Storage layout in localStorage:
- *   key:    openjanus:memo-privkey:<addr-lowercase>
- *   value:  privkey as decimal string (BabyJub scalar)
+ * v0.4.5 change: switched from random-privkey-in-localStorage to sign-derive.
+ * The keypair is now deterministically reconstructable from any browser the
+ * same Flow Wallet is connected to — no localStorage, no recovery seed.
+ *
+ * The wallet will prompt for ONE signature (the DERIVE_MESSAGE). This happens
+ * BEFORE the Cadence tx popup so the user sees both steps.
  */
 export async function smartSetupAccount(opts: {
   flowAddr: string;
 }): Promise<{ txId: string; pubkey: Point }> {
   const { flowAddr } = opts;
-  // 1. Generate keypair client-side. Privkey is cached in localStorage so the
-  //    recipient can decrypt incoming memos later without re-keying.
-  const kp = await generateBabyJubKeypair();
-  const lsKey = `openjanus:memo-privkey:${flowAddr.toLowerCase()}`;
-  if (typeof window !== "undefined") {
-    localStorage.setItem(lsKey, kp.privkey.toString());
-  }
+  // 1. Derive keypair from wallet signature. Same wallet → same keypair in
+  //    any browser. Privkey is cached in sessionStorage (not localStorage).
+  const kp = await deriveMemoKeyFromWallet();
+  cacheMemoPrivkey(flowAddr, kp.privkey);
 
   const fcl = await getFcl();
   const txId = await fcl.mutate({
@@ -177,14 +398,8 @@ export async function smartSetupAccount(opts: {
   return { txId, pubkey: kp.pubkey };
 }
 
-/** Read the user's cached MemoKey privkey from localStorage (or null). */
-export function loadMemoPrivkey(flowAddr: string): bigint | null {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(
-    `openjanus:memo-privkey:${flowAddr.toLowerCase()}`
-  );
-  return raw ? BigInt(raw) : null;
-}
+// loadMemoPrivkey is defined above (in the MemoKey session cache section).
+// The old localStorage implementation has been removed in v0.4.5.
 
 // SDK COA setup tx — fixes the inline SETUP_COA_CDC divergence.
 export { TX_SETUP_COA };
@@ -466,9 +681,13 @@ export async function sendShieldedTipAction(
       `Insufficient shielded balance: have ${oldBalanceWei} wei, need ${transferAmountWei} wei`
     );
   }
-  if (memo && memo.length > 0 && !recipientMemoPubkey) {
+  // ShieldedNote carries (amount, transferBlinding, memo) — REQUIRED for the
+  // recipient to be able to unwrap. We refuse to send if the recipient has no
+  // MemoKey published; sending without it would brick their shielded balance
+  // (they'd see the commitment update but never recover the underlying values).
+  if (!recipientMemoPubkey) {
     throw new Error(
-      "sendShieldedTipAction: recipientMemoPubkey is required when memo is set"
+      "sendShieldedTipAction: recipient has no published MemoKey — they would not be able to unwrap. Ask them to run setup first."
     );
   }
 
@@ -481,6 +700,7 @@ export async function sendShieldedTipAction(
 
   const publicInputs = proofRes.publicInputs.map((s) => BigInt(s));
   const proof = proofRes.proof.map((s) => BigInt(s));
+  const transferBlinding = BigInt(proofRes.transferBlinding);
 
   // 2. Build EVM calldata.
   const calldataHex = await buildShieldedTransferCalldata(
@@ -489,16 +709,19 @@ export async function sendShieldedTipAction(
     proof
   );
 
-  // 3. Encrypt memo (or send empty payload).
-  let memoCiphertext: number[] = [];
-  let memoEphPubkeyX = 0n;
-  let memoEphPubkeyY = 1n;
-  if (memo && memo.length > 0 && recipientMemoPubkey) {
-    const encrypted = await encryptText(memo, recipientMemoPubkey);
-    memoCiphertext = Array.from(encrypted.ciphertext);
-    memoEphPubkeyX = encrypted.ephemeralPubkey.x;
-    memoEphPubkeyY = encrypted.ephemeralPubkey.y;
-  }
+  // 3. Encrypt a ShieldedNote: amount + transfer blinding + optional memo text.
+  // Always sent (not optional like the old plain memo) because recipient needs
+  // (amount, blinding) for unwrap correctness — the memo text just stows away
+  // as the `data` field.
+  const note: ShieldedNote = {
+    amount: transferAmountWei,
+    blinding: transferBlinding,
+    data: memo && memo.length > 0 ? memo : undefined,
+  };
+  const encrypted = await encryptNote(note, recipientMemoPubkey);
+  const memoCiphertext = Array.from(encrypted.ciphertext);
+  const memoEphPubkeyX = encrypted.ephemeralPubkey.x;
+  const memoEphPubkeyY = encrypted.ephemeralPubkey.y;
 
   // 4. Submit Cadence tx.
   const fcl = await getFcl();
@@ -699,11 +922,39 @@ export function buildGetShieldedTipsByRecipientScript(): string {
   `;
 }
 
+/**
+ * v0.4.2 — returns metadata + the encrypted memo blob in a single script call,
+ * so /tips can decrypt inline without scanning event logs. Memo is nil for
+ * pre-v0.4.2 tips (no on-chain blob persisted before this contract version).
+ */
+export function buildGetShieldedTipsByRecipientWithMemoScript(): string {
+  return `
+    import PrivateTip from 0xb9ac529c14a4c5a1
+    access(all) fun main(recipient: Address): [PrivateTip.TipMetadataWithMemo] {
+      return PrivateTip.getShieldedTipsByRecipientWithMemo(recipient: recipient)
+    }
+  `;
+}
+
 export function buildGetShieldedTipsBySenderScript(): string {
   return `
     import PrivateTip from 0xb9ac529c14a4c5a1
     access(all) fun main(sender: Address): [PrivateTip.TipMetadata] {
       return PrivateTip.getShieldedTipsBySender(sender: sender)
+    }
+  `;
+}
+
+/**
+ * v0.4.3 — sender-side metadata + memo in a single script call.
+ * Mirrors buildGetShieldedTipsByRecipientWithMemoScript but indexes by sender.
+ * Used by the recovery flow to scan all outgoing tips for carbon-copy notes.
+ */
+export function buildGetShieldedTipsBySenderWithMemoScript(): string {
+  return `
+    import PrivateTip from 0xb9ac529c14a4c5a1
+    access(all) fun main(sender: Address): [PrivateTip.TipMetadataWithMemo] {
+      return PrivateTip.getShieldedTipsBySenderWithMemo(sender: sender)
     }
   `;
 }
