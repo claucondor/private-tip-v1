@@ -1,51 +1,102 @@
-/// Setup a per-user MemoKey for encrypted-memo PrivateTips (v0.4.1).
+/// setup_memo_key.cdc — v0.5.2: publish BabyJub memo pubkey atomically on
+/// Cadence (JanusFlow.MemoKey Resource) AND EVM (JanusFlow.publishMemoKey).
 ///
-/// Idempotent: if a MemoKey already exists at /storage/openjanusMemoKey, this
-/// transaction does nothing.
+/// Privacy model:
+///   The privkey is NEVER passed to this transaction. Keypair derivation is
+///   entirely client-side via the sign-derive pattern:
+///       privkey = HKDF(keccak256(wallet.sign("openjanus-memo-key-v1")))
+///   Only (pubkeyX, pubkeyY) travel to chain.
 ///
-/// The (privkey, pubkeyX, pubkeyY) triple is generated OFF-CHAIN in the
-/// signer's browser via @openjanus/sdk's generateBabyJubKeypair() and passed
-/// in as UInt256 arguments. The privkey is stored INSIDE the MemoKey resource
-/// in /storage/openjanusMemoKey — only the resource's owner can borrow it.
-/// The pubkey is exposed via a published capability at /public/openjanusMemoKey
-/// so any sender can encrypt-to it without a Cadence script.
+/// Architecture (v0.5.2 fix):
+///   MemoKey is a GENERIC JanusFlow primitive — the Resource type lives in
+///   JanusFlow.cdc (0x5dcbeb41055ec57e), NOT in PrivateTip.cdc.
+///   This tx imports from JanusFlow and writes to /storage/openjanusMemoKey
+///   (same path as before, but now the resource type is JanusFlow.MemoKey).
 ///
-/// Security note:
-///   The privkey transits this Cadence transaction in cleartext. This is
-///   acceptable for v0.4.1 because: (a) the signer is the privkey owner;
-///   (b) the privkey is committed to chain only inside the signer's own
-///   storage. The transaction history on-chain may leak the privkey to
-///   anyone reading historical block data. For mainnet, replace this with
-///   an off-chain key-derivation scheme (e.g. HKDF of a signed message)
-///   that NEVER puts the privkey in a tx argument.
+/// What this tx does:
+///   1. CADENCE SIDE: creates a JanusFlow.MemoKey (pubkey only) resource and
+///      saves it at /storage/openjanusMemoKey with a public capability at
+///      /public/openjanusMemoKey. Idempotent — skips if already present.
+///   2. EVM SIDE: calls JanusFlow.publishMemoKey(pubkeyX, pubkeyY) on the EVM
+///      proxy via the signer's COA. Idempotent — always overwrites (key
+///      rotation is intentionally supported; last-write wins on EVM).
+///
+/// Parameters:
+///   pubkeyX  BabyJub pubkey X coordinate (derived client-side, NOT the privkey)
+///   pubkeyY  BabyJub pubkey Y coordinate
 
-import PrivateTip from 0xb9ac529c14a4c5a1
+import JanusFlow from 0x5dcbeb41055ec57e
+import EVM from 0x8c5303eaa26202d6
 
-transaction(
-    privkey: UInt256,
-    pubkeyX: UInt256,
-    pubkeyY: UInt256
-) {
+transaction(pubkeyX: UInt256, pubkeyY: UInt256) {
     prepare(signer: auth(SaveValue, IssueStorageCapabilityController, PublishCapability, BorrowValue) &Account) {
-        let storagePath = PrivateTip.memoKeyStoragePath()
-        let publicPath = PrivateTip.memoKeyPublicPath()
+        let storagePath = JanusFlow.memoKeyStoragePath()
+        let publicPath  = JanusFlow.memoKeyPublicPath()
 
-        // Idempotent: skip if a MemoKey already exists.
-        if signer.storage.borrow<&PrivateTip.MemoKey>(from: storagePath) != nil {
-            log("MemoKey already exists at ".concat(storagePath.toString()).concat(" — skipping setup"))
-            return
+        // ── 1. CADENCE SIDE ──────────────────────────────────────────────────
+        // Idempotent: skip if a JanusFlow.MemoKey already exists at the path.
+        if signer.storage.borrow<&JanusFlow.MemoKey>(from: storagePath) == nil {
+            let key <- JanusFlow.createMemoKey(pubkeyX: pubkeyX, pubkeyY: pubkeyY)
+            signer.storage.save(<-key, to: storagePath)
+
+            let cap = signer.capabilities.storage.issue<&{JanusFlow.MemoKeyPublic}>(storagePath)
+            signer.capabilities.publish(cap, at: publicPath)
+
+            log("JanusFlow.MemoKey created at ".concat(storagePath.toString()))
+        } else {
+            log("JanusFlow.MemoKey already exists — skipping Cadence save")
         }
 
-        let key <- PrivateTip.createMemoKey(
-            privkey: privkey,
-            pubkeyX: pubkeyX,
-            pubkeyY: pubkeyY
+        // ── 2. EVM SIDE ──────────────────────────────────────────────────────
+        // Call JanusFlow.publishMemoKey(uint256, uint256) on the EVM proxy.
+        //
+        // ABI encoding (manual — avoids EVM.encodeABIWithSignature issues with
+        // scalar types vs fixed arrays):
+        //   selector: bytes4(keccak256("publishMemoKey(uint256,uint256)")) = 0x6370796a
+        //   data: selector (4 bytes) || pubkeyX (32 bytes BE) || pubkeyY (32 bytes BE)
+        //   total: 68 bytes
+
+        let coa = signer.storage
+            .borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+            ?? panic("setup_memo_key: no COA at /storage/evm — call EVM.createCadenceOwnedAccount() first")
+
+        // Function selector for publishMemoKey(uint256,uint256) = 0x6370796a
+        var calldata: [UInt8] = [0x63, 0x70, 0x79, 0x6a]
+
+        // ABI-encode pubkeyX as 32-byte big-endian uint256
+        var xEncoded: [UInt8] = []
+        var xVal: UInt256 = pubkeyX
+        var xIdx: Int = 0
+        while xIdx < 32 {
+            xEncoded.insert(at: 0, UInt8(xVal & 0xFF))
+            xVal = xVal >> 8
+            xIdx = xIdx + 1
+        }
+        calldata = calldata.concat(xEncoded)
+
+        // ABI-encode pubkeyY as 32-byte big-endian uint256
+        var yEncoded: [UInt8] = []
+        var yVal: UInt256 = pubkeyY
+        var yIdx: Int = 0
+        while yIdx < 32 {
+            yEncoded.insert(at: 0, UInt8(yVal & 0xFF))
+            yVal = yVal >> 8
+            yIdx = yIdx + 1
+        }
+        calldata = calldata.concat(yEncoded)
+
+        let janusFlowEVM = EVM.addressFromString("0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078")
+        let result = coa.call(
+            to: janusFlowEVM,
+            data: calldata,
+            gasLimit: 200_000,
+            value: EVM.Balance(attoflow: 0)
         )
-        signer.storage.save(<-key, to: storagePath)
+        assert(
+            result.status == EVM.Status.successful,
+            message: "setup_memo_key: EVM publishMemoKey failed: ".concat(result.errorMessage)
+        )
 
-        let cap = signer.capabilities.storage.issue<&{PrivateTip.MemoKeyPublic}>(storagePath)
-        signer.capabilities.publish(cap, at: publicPath)
-
-        log("MemoKey published at ".concat(publicPath.toString()))
+        log("MemoKey published on Cadence + EVM for ".concat(signer.address.toString()))
     }
 }

@@ -154,32 +154,46 @@ access(all) contract PrivateTip {
     access(all) event ImplSwapCancelled()
 
     /// Emitted when a user publishes (or rotates) their memo encryption pubkey.
+    /// KEPT for Cadence upgrade compat — Cadence forbids removing event
+    /// declarations. In v0.5.2 this event is no longer emitted here; the
+    /// canonical event is JanusFlow.MemoKeyPublished.
     access(all) event MemoKeyPublished(
         owner: Address,
         pubkeyX: UInt256,
         pubkeyY: UInt256
     )
 
-    // ─── MemoKey Resource ───────────────────────────────────────────────────────
+    // ─── MemoKey Resource — DEPRECATED in v0.5.2 ───────────────────────────────
+    //
+    // v0.5.2 architectural fix: MemoKey is a GENERIC JanusFlow primitive, not a
+    // PrivateTip-specific type. The canonical type is now JanusFlow.MemoKey
+    // (deployed at 0x5dcbeb41055ec57e). New code imports from JanusFlow.
+    //
+    // These declarations are KEPT for Cadence upgrade compat:
+    //   - Removing Resource types is forbidden by the Cadence upgrade validator
+    //     when they exist in storage.
+    //   - Removing the `privkey` field from the existing MemoKey Resource is
+    //     also forbidden — the validator hard-blocks field removal.
+    //   - The `privkey` field is now SECURITY-DEAD: setup_memo_key.cdc no
+    //     longer passes a privkey. Existing on-testnet resources will be
+    //     destroyed by the hard reset before mainnet.
+    //
+    // MIGRATION PATH: After the testnet hard reset, users call setup_memo_key.cdc
+    // which writes a JanusFlow.MemoKey (not PrivateTip.MemoKey) to the SAME
+    // path (/storage/openjanusMemoKey). The paths remain identical, so any
+    // app reading /public/openjanusMemoKey works unchanged.
+    //
+    // DO NOT USE PrivateTip.MemoKey in new code. Import JanusFlow instead.
 
-    /// Per-user BabyJubJub keypair for memo encryption.
-    ///
-    /// Storage layout:
-    ///   /storage/openjanusMemoKey            — &MemoKey (private; holds privkey)
-    ///   /public/openjanusMemoKey             — &{MemoKeyPublic} (read-only pubkey)
-    ///
-    /// The privkey NEVER leaves the resource. Callers retrieve it via
-    /// `withPrivkey<R>(...)` style helpers but in v0.4.1 the simplest pattern
-    /// is: recipient signs a transaction that reads the privkey AND decrypts
-    /// the memo locally (no public privkey getter). For the v0.4.1 MVP we
-    /// expose `borrowPrivkey()` so the browser-side decryption flow can pull
-    /// the scalar via FCL — this is acceptable because the privkey is only
-    /// readable by the resource's owner (no published capability to it).
+    /// @deprecated — use JanusFlow.MemoKeyPublic
     access(all) resource interface MemoKeyPublic {
         access(all) view fun getPubkeyX(): UInt256
         access(all) view fun getPubkeyY(): UInt256
     }
 
+    /// @deprecated — use JanusFlow.MemoKey
+    /// privkey field retained for upgrade compat ONLY. It is NEVER populated
+    /// by new transactions (setup_memo_key.cdc v0.5.2 uses JanusFlow.createMemoKey).
     access(all) resource MemoKey: MemoKeyPublic {
         access(self) let privkey: UInt256
         access(self) let pubkeyX: UInt256
@@ -191,29 +205,22 @@ access(all) contract PrivateTip {
             self.pubkeyY = pubkeyY
         }
 
-        /// Public — anyone with the public capability can read the pubkey.
         access(all) view fun getPubkeyX(): UInt256 { return self.pubkeyX }
         access(all) view fun getPubkeyY(): UInt256 { return self.pubkeyY }
-
-        /// Private — only callers with a direct storage borrow (i.e. the
-        /// owner's signed transaction) can read this. NOT exposed via any
-        /// published capability.
-        access(all) view fun borrowPrivkey(): UInt256 { return self.privkey }
+        // borrowPrivkey() REMOVED — intentionally dropped. Even though
+        // the field still exists for upgrade compat, exposing it as a
+        // callable getter would re-introduce the privkey leak. The field
+        // value is 0 in all new MemoKey resources (createMemoKey now
+        // accepts only pubkeyX/Y and passes 0 for privkey).
     }
 
-    /// Mint a fresh MemoKey resource. The caller is responsible for saving it
-    /// to /storage/openjanusMemoKey and publishing the public capability at
-    /// /public/openjanusMemoKey.
-    ///
-    /// The privkey + pubkey are generated OFF-CHAIN (typically in the user's
-    /// browser via @openjanus/sdk's generateBabyJubKeypair) and passed in as
-    /// arguments. This avoids requiring Cadence-side BabyJub arithmetic.
+    /// @deprecated — use JanusFlow.createMemoKey(pubkeyX:pubkeyY:)
+    /// privkey param silently ignored (always stored as 0).
     access(all) fun createMemoKey(
-        privkey: UInt256,
         pubkeyX: UInt256,
         pubkeyY: UInt256
     ): @MemoKey {
-        return <- create MemoKey(privkey: privkey, pubkeyX: pubkeyX, pubkeyY: pubkeyY)
+        return <- create MemoKey(privkey: 0, pubkeyX: pubkeyX, pubkeyY: pubkeyY)
     }
 
     // ─── Tip Record (FROZEN shape for storage compat) ───────────────────────────
