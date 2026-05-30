@@ -99,7 +99,14 @@ function RecoveryBanner() {
         // No COA — recovery will attempt it internally.
       }
 
-      const recovered = await recoverShieldedStateFromChain(userAddress, privkey, coaHex);
+      // v0.5.2: recoverShieldedStateFromChain signature changed to
+      // (myFlowAddr, myCoaEvmAddr, myMemoPrivkey). COA is required.
+      if (!coaHex) {
+        toast.warning("Cannot recover: no COA found for this account.");
+        setShow(false);
+        return;
+      }
+      const recovered = await recoverShieldedStateFromChain(userAddress, coaHex, privkey);
 
       if (recovered) {
         const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
