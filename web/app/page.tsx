@@ -199,10 +199,16 @@ export default function Home() {
         </motion.p>
         <motion.p
           {...fadeUp(reduced, 0.18)}
-          className="text-sm text-foreground/40 max-w-lg mx-auto mb-10"
+          className="text-sm text-foreground/70 max-w-lg mx-auto mb-3"
         >
           People see who tipped whom — but never how much. Powered by Pedersen
           commitments and Groth16 proofs.
+        </motion.p>
+        <motion.p
+          {...fadeUp(reduced, 0.22)}
+          className="text-[11px] text-foreground/50 max-w-lg mx-auto mb-10"
+        >
+          Privacy, not anonymity. Non-custodial. Sender and recipient addresses stay public on-chain.
         </motion.p>
 
         {/* Hero coin animation */}
