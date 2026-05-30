@@ -17,13 +17,15 @@ import ConnectWallet from "@/components/ConnectWallet";
 import flowJSON from "../../flow.json";
 
 // ---------------------------------------------------------------------------
-// Recovery banner — shown when localStorage is empty but chain has state.
-// Two modes:
-//   "recover"  — normal: shows a blue "Recover" button
-//   "desync"   — RecoveryDesyncError: shows a red error with manual escape hatches
+// Recovery banner — bidirectional sync detector.
+// Three modes:
+//   "recover"     — blue: localStorage empty + chain has state → offer Recover
+//   "stale-local" — yellow: localStorage has state that doesn't match chain
+//                   (admin reset, stale session, etc.) → offer Clear local
+//   "desync"      — red: RecoveryDesyncError → manual escape hatches
 // ---------------------------------------------------------------------------
 
-type RecoveryBannerMode = "recover" | "desync";
+type RecoveryBannerMode = "recover" | "stale-local" | "desync";
 
 function RecoveryBanner() {
   const { user } = useFlowCurrentUser();
@@ -39,7 +41,11 @@ function RecoveryBanner() {
   const [restoreJson, setRestoreJson] = useState("");
   const [restoreError, setRestoreError] = useState<string | null>(null);
 
-  // On wallet connect, check: localStorage empty AND on-chain commit non-identity.
+  // On wallet connect, validate localStorage state against on-chain commitment.
+  // Three outcomes:
+  //   - localStorage matches chain (or both empty) → no banner
+  //   - localStorage empty + chain has state → blue "recover" banner
+  //   - localStorage has state + chain mismatch → yellow "stale-local" banner
   useEffect(() => {
     if (!userAddress) {
       setShow(false);
@@ -48,33 +54,78 @@ function RecoveryBanner() {
     let cancelled = false;
     (async () => {
       try {
-        // Check local state first (cheap).
-        const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
-        const hasLocal = !!localStorage.getItem(localKey);
-        if (hasLocal) {
-          // Already have state — no need to recover.
-          if (!cancelled) setShow(false);
-          return;
-        }
-
-        // Check on-chain commitment (requires COA).
+        // Resolve COA — required for both directions of validation.
         const { getCoaEvmAddress, getCommitment, isIdentityPoint } = await import("@/lib/tip-actions");
         let coaHex: string;
         try {
           coaHex = await getCoaEvmAddress(userAddress);
         } catch {
-          return; // No COA yet — nothing to recover.
+          // No COA yet — nothing to validate against.
+          if (!cancelled) setShow(false);
+          return;
         }
         const commit = await getCommitment(coaHex);
+        const chainIsIdentity = isIdentityPoint(commit);
+
+        const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
+        const localRaw = localStorage.getItem(localKey);
+
+        if (localRaw) {
+          // Local state exists — validate via Pedersen against chain.
+          try {
+            const parsed = JSON.parse(localRaw) as { balanceWei?: string; blinding?: string };
+            const balance = BigInt(parsed.balanceWei ?? "0");
+            const blinding = BigInt(parsed.blinding ?? "0");
+
+            // Fast path: empty local + identity chain → trivially synced.
+            if (balance === 0n && blinding === 0n && chainIsIdentity) {
+              if (!cancelled) setShow(false);
+              return;
+            }
+
+            // General path: compute Pedersen client-side and compare.
+            const { validatePedersenCommit } = await import("@/lib/recovery");
+            const isValid = await validatePedersenCommit(balance, blinding, commit);
+
+            if (!cancelled) {
+              if (isValid) {
+                setShow(false);
+              } else {
+                setMode("stale-local");
+                setShow(true);
+              }
+            }
+          } catch {
+            // Parse or validation error → treat as stale-local (conservative).
+            if (!cancelled) {
+              setMode("stale-local");
+              setShow(true);
+            }
+          }
+          return;
+        }
+
+        // No local state. If chain has commitment, offer recovery.
         if (!cancelled) {
-          setShow(!isIdentityPoint(commit));
-          setMode("recover"); // default; updated to "desync" on RecoveryDesyncError
+          setShow(!chainIsIdentity);
+          setMode("recover");
         }
       } catch {
-        // Non-fatal — hide banner on errors.
+        // Non-fatal network error — hide banner.
+        if (!cancelled) setShow(false);
       }
     })();
     return () => { cancelled = true; };
+  }, [userAddress]);
+
+  const handleClearLocal = useCallback(() => {
+    if (!userAddress) return;
+    const addrLower = userAddress.toLowerCase();
+    localStorage.removeItem(`openjanus:shielded:${addrLower}`);
+    localStorage.removeItem(`openjanus:tip-ingested:${addrLower}`);
+    toast.success("Local shielded state cleared. Reloading…");
+    setShow(false);
+    setTimeout(() => window.location.reload(), 500);
   }, [userAddress]);
 
   const handleRecover = useCallback(async () => {
@@ -161,6 +212,45 @@ function RecoveryBanner() {
   }, [userAddress, restoreJson]);
 
   if (!isLoggedIn || !show) return null;
+
+  // --- Yellow stale-local banner ---
+  // Local state doesn't match on-chain commitment (admin reset, stale session,
+  // device switch with leftover state, etc.). Offer to clear and start fresh.
+  if (mode === "stale-local") {
+    return (
+      <div className="sticky top-[calc(theme(spacing.7)+theme(spacing.14)+1px)] z-40 w-full border-b border-yellow-500/50 bg-yellow-50/95 dark:bg-yellow-950/80 px-4 py-3 text-xs backdrop-blur">
+        <div className="max-w-5xl mx-auto">
+          <div className="flex items-start gap-2 mb-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-yellow-600 dark:text-yellow-400 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="font-semibold text-yellow-900 dark:text-yellow-100">
+                Your local shielded state is out of sync with the chain.
+              </p>
+              <p className="text-yellow-800 dark:text-yellow-200 mt-0.5">
+                The on-chain commitment doesn&apos;t match what&apos;s stored in this browser.
+                Likely cause: admin reset the slot, or this is stale state from another session.
+                Clear local state to restart fresh.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 mt-2">
+            <button
+              onClick={handleClearLocal}
+              className="inline-flex items-center px-3 py-1 rounded border border-yellow-500/60 bg-yellow-50 dark:bg-yellow-950 text-yellow-900 dark:text-yellow-100 font-medium hover:bg-yellow-100 dark:hover:bg-yellow-900 transition-colors"
+            >
+              Clear local state
+            </button>
+            <button
+              onClick={() => setShow(false)}
+              className="inline-flex items-center px-3 py-1 rounded border border-yellow-300/60 bg-transparent text-yellow-700 dark:text-yellow-300 hover:bg-yellow-100/50 dark:hover:bg-yellow-900/30 transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // --- Red desync error banner ---
   if (mode === "desync") {

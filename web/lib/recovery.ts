@@ -38,8 +38,10 @@ export type { RecoveredShieldedState };
 // Re-export snapshot helpers for use in wrap/send/claim pages.
 // encryptSnapshotToSelf: encrypt (balance, blinding) to own MemoKey pubkey.
 // decryptSnapshot: decrypt a raw snapshot blob from a *WithSnapshot event.
+// validatePedersenCommit: client-side Pedersen check for bidirectional sync detection.
 export const encryptSnapshotToSelf = recovery.encryptSnapshotToSelf;
 export const decryptSnapshot = recovery.decryptSnapshot;
+export const validatePedersenCommit = recovery.validatePedersenCommit;
 
 const EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 const JANUS_FLOW_EVM = "0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078";
