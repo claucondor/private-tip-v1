@@ -44,7 +44,6 @@ import {
   XCircle,
   Shield,
   Coins,
-  AlertTriangle,
   EyeOff,
 } from "lucide-react";
 import Link from "next/link";
@@ -558,12 +557,6 @@ export default function WrapPage() {
 
   const onChainEmpty = chainCommit ? isIdentityPoint(chainCommit) : true;
 
-  // Additive-wrap warning: if the chain has an existing commit but we have
-  // no local blinding to track, a second wrap will overwrite the blinding
-  // and the user will be unable to spend the aggregate. See file header.
-  const additiveBlindingWarning =
-    !onChainEmpty && !hasExistingSlot;
-
   return (
     <div className="max-w-lg mx-auto px-4 py-12">
       <div className="mb-8">
@@ -646,29 +639,10 @@ export default function WrapPage() {
         </div>
       </div>
 
-      {/* Additive-blinding warning (chain has commit, local state is empty) */}
-      {additiveBlindingWarning && (
-        <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/30 dark:bg-amber-950/20 p-4 mb-6">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-            <div className="text-xs text-amber-800 dark:text-amber-200">
-              <p className="font-medium mb-1">Chain has a residual commitment</p>
-              <p>
-                On-chain commitment is non-empty but your local state is empty
-                (likely a stale residual from a previous unwrap, or the session
-                state was lost). Wrap is now ADDITIVE: it sums your local
-                balance + blinding with the new wrap. But because the chain
-                blinding is unknown to this browser, your local state would
-                stay desynced after wrapping, and future unwraps would revert.
-                Restore via /send (paste shielded state) before continuing, or
-                ask an admin to reset your slot.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Wrap form — copper accent (boundary-in) */}
+      {/* (Legacy in-page additive-blinding warning removed — global RecoveryBanner
+          in client-layout.tsx now handles desync detection with proper UX:
+          blue "recover" / yellow "clear local" / red "desync error".) */}
       {wrapState.status !== "success" && (
         <div className="rounded-xl border border-[#B45309]/30 janus-copper-glow bg-card p-6 space-y-4 mb-6">
           {/* Source picker — vault or COA. Both run through JanusFlow.wrap,
