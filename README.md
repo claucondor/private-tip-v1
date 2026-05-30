@@ -37,7 +37,7 @@ work is done by JanusFlow:
 | PrivateTip.cdc (router + impl) | Flow Cadence testnet | `0xb9ac529c14a4c5a1` |
 | JanusFlow EVM proxy (via PrivateTip) | Flow EVM testnet | `0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078` |
 
-SDK consumed: `@openjanus/sdk@^0.5.1`
+SDK consumed: `@openjanus/sdk`
 
 No public web URL yet — run it locally (see Quick start below) or deploy your
 own instance.
@@ -140,20 +140,18 @@ Encrypted with ECIES + AES-GCM; the recipient decrypts with their MemoKey privke
 
 ## Security notes
 
-- **Amount privacy**: backed by JanusFlow's Groth16 + Pedersen scheme (v0.5.1 /
-  pot18 ceremony). Amounts never appear in calldata, events, or storage during
-  shielded transfers.
+- **Amount privacy**: backed by JanusFlow's Groth16 + Pedersen scheme. Amounts
+  never appear in calldata, events, or storage during shielded transfers.
 - **Memo privacy**: ECIES + AES-GCM encrypted to the recipient's MemoKey pubkey.
   The app stores only the ciphertext; the plaintext is never transmitted or logged.
-- **Sender/recipient privacy**: NOT hidden in v0.5 — both addresses are visible
-  on-chain. Stealth addresses are a planned v0.6 feature.
+- **Sender/recipient privacy**: NOT hidden — both addresses are visible on-chain.
+  Stealth addresses are a planned future feature.
 - **Wrap/withdraw boundaries**: amounts are visible at `wrap` (msg.value,
   `Wrapped(amount)` event) and at `unwrap` (`Unwrapped(amount, recipient)` event).
   This is by design — the shielded pool is auditable for total custody. If you
   need post-withdraw unlinkability, use a fresh wallet to receive.
 - **Admin functions** (testnet-only): `adminResetSlot`, `adminWipeTipsByRecipient`
-  — convenience for testnet development. Both are flagged for removal in the
-  mainnet preparation checklist.
+  — convenience for testnet development. Both are flagged for removal before mainnet.
 - **Impl upgrade model**: 48-hour time-lock from `proposeImplSwap` to
   `finalizeImplSwap`. Cancellation is immediate.
 
