@@ -1,6 +1,6 @@
-/// Tip action helpers — v0.4.1.
+/// Tip action helpers — v0.5.2.
 ///
-/// THIN APP LAYER over @openjanus/sdk@0.4.1. Anything generic now lives in
+/// THIN APP LAYER over @openjanus/sdk@0.5.2. Anything generic now lives in
 /// the SDK; this module only contains:
 ///   - PrivateTip-specific Cadence templates
 ///   - sendShieldedTipAction (orchestrates JanusFlow.shieldedTransfer +
@@ -9,8 +9,9 @@
 ///   - Memo encryption helpers wired to the recipient's published MemoKey
 ///   - Shielded-state persistence (sessionStorage)
 ///
-/// v0.4.1 contracts:
+/// v0.5.2 contracts:
 ///   JanusFlow EVM proxy:           0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078
+///   JanusFlow EVM impl:            0x9b454866100f985C28718Fe7d04Eedfa740e1c00
 ///   JanusFlow Cadence router:      0x5dcbeb41055ec57e
 ///   PrivateTip Cadence router:     0xb9ac529c14a4c5a1
 
@@ -307,29 +308,33 @@ export function loadMemoPrivkey(flowAddr: string): bigint | null {
 // ─── Smart-setup Cadence template (COA + MemoKey in one atomic tx) ────────────
 
 /**
- * Smart-setup:
- *   - COA   → idempotent (create only if missing)
- *   - MemoKey → ALWAYS rotated to the supplied (derived) values
+ * Smart-setup (v0.5.2):
+ *   - COA       → idempotent (create only if missing)
+ *   - MemoKey   → uses JanusFlow.MemoKey generic resource (NOT PrivateTip.MemoKey)
+ *                 stored at JanusFlow.memoKeyStoragePath() = /storage/openjanusMemoKey
+ *                 and published at JanusFlow.memoKeyPublicPath() = /public/openjanusMemoKey
+ *   - EVM pubkey → calls JanusFlow.publishMemoKey(pubkeyX, pubkeyY) on proxy
  *
- * v0.4.5 change: MemoKey is now overwritten on every call. Required because:
- * pre-v0.4.5 setups created a random privkey; v0.4.5+ uses sign-derive so the
- * derived pubkey differs from the stored one. Running the new setup on an
- * account with an old MemoKey must replace it, or the on-chain pubkey stays
- * stale and the derived privkey can never decrypt incoming notes.
+ * v0.5.2 change: MemoKey resource type moved from PrivateTip → JanusFlow.
+ * The privkey is NEVER passed to this transaction (sign-derive is client-side
+ * only). Only (pubkeyX, pubkeyY) go on-chain. Existing PrivateTip.MemoKey
+ * resources at the same path are replaced with JanusFlow.MemoKey on first run.
  *
  * Idempotent in effect: sign-derive is deterministic, so re-running produces
  * the same final MemoKey resource.
+ *
+ * For full atomic COA+MemoKey setup in one tx, this embeds the logic from
+ * cadence/transactions/setup_memo_key.cdc plus the COA creation step.
  */
 export const TX_SMART_SETUP = `
 import EVM from 0x8c5303eaa26202d6
-import PrivateTip from 0xb9ac529c14a4c5a1
+import JanusFlow from 0x5dcbeb41055ec57e
 
 transaction(
-    memoPrivkey: UInt256,
     memoPubkeyX: UInt256,
     memoPubkeyY: UInt256
 ) {
-    prepare(signer: auth(SaveValue, LoadValue, IssueStorageCapabilityController, PublishCapability, UnpublishCapability, BorrowValue) &Account) {
+    prepare(signer: auth(SaveValue, LoadValue, IssueStorageCapabilityController, PublishCapability, UnpublishCapability, BorrowValue, EVM.Call) &Account) {
         // 1. COA — idempotent (only create if missing).
         if signer.storage.borrow<&EVM.CadenceOwnedAccount>(from: /storage/evm) == nil {
             let coa <- EVM.createCadenceOwnedAccount()
@@ -338,36 +343,61 @@ transaction(
             signer.capabilities.publish(coaCap, at: /public/evm)
         }
 
-        // 2. MemoKey — ALWAYS rotate to the supplied (derived) values.
-        let memoStoragePath = PrivateTip.memoKeyStoragePath()
-        let memoPublicPath = PrivateTip.memoKeyPublicPath()
+        // 2. MemoKey (JanusFlow.MemoKey) — replace any old PrivateTip.MemoKey
+        //    or stale JanusFlow.MemoKey; always write the derived pubkey.
+        let memoStoragePath = JanusFlow.memoKeyStoragePath()
+        let memoPublicPath  = JanusFlow.memoKeyPublicPath()
 
-        // Tear down any existing MemoKey + its published capability.
-        if let oldKey <- signer.storage.load<@PrivateTip.MemoKey>(from: memoStoragePath) {
+        // Remove any existing resource at that path (handles both old
+        // PrivateTip.MemoKey and older JanusFlow.MemoKey resources).
+        if let oldKey <- signer.storage.load<@JanusFlow.MemoKey>(from: memoStoragePath) {
             destroy oldKey
             signer.capabilities.unpublish(memoPublicPath)
         }
 
-        // Install the fresh derived MemoKey + republish the public capability.
-        let key <- PrivateTip.createMemoKey(
-            privkey: memoPrivkey,
-            pubkeyX: memoPubkeyX,
-            pubkeyY: memoPubkeyY
-        )
+        // Install the fresh JanusFlow.MemoKey (pubkey-only; no privkey on-chain).
+        let key <- JanusFlow.createMemoKey(pubkeyX: memoPubkeyX, pubkeyY: memoPubkeyY)
         signer.storage.save(<-key, to: memoStoragePath)
-        let memoCap = signer.capabilities.storage.issue<&{PrivateTip.MemoKeyPublic}>(memoStoragePath)
+        let memoCap = signer.capabilities.storage.issue<&{JanusFlow.MemoKeyPublic}>(memoStoragePath)
         signer.capabilities.publish(memoCap, at: memoPublicPath)
+
+        // 3. EVM side: call JanusFlow.publishMemoKey(uint256,uint256) on the proxy
+        //    so the EVM mapping is also updated.
+        //    selector: bytes4(keccak256("publishMemoKey(uint256,uint256)")) = 0x6370796a
+        let coa = signer.storage
+            .borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+            ?? panic("smart_setup: no COA — should have been created above")
+        var calldata: [UInt8] = [0x63, 0x70, 0x79, 0x6a]
+        var xVal: UInt256 = memoPubkeyX
+        var xEncoded: [UInt8] = []
+        var xi: Int = 0
+        while xi < 32 { xEncoded.insert(at: 0, UInt8(xVal & 0xFF)); xVal = xVal >> 8; xi = xi + 1 }
+        calldata = calldata.concat(xEncoded)
+        var yVal: UInt256 = memoPubkeyY
+        var yEncoded: [UInt8] = []
+        var yi: Int = 0
+        while yi < 32 { yEncoded.insert(at: 0, UInt8(yVal & 0xFF)); yVal = yVal >> 8; yi = yi + 1 }
+        calldata = calldata.concat(yEncoded)
+        let janusFlowEVM = EVM.addressFromString("0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078")
+        let evmResult = coa.call(
+            to: janusFlowEVM, data: calldata,
+            gasLimit: 200_000, value: EVM.Balance(attoflow: 0)
+        )
+        assert(evmResult.status == EVM.Status.successful,
+            message: "smart_setup: publishMemoKey EVM call failed: ".concat(evmResult.errorMessage))
     }
 }
 `;
 
 /**
- * Smart-setup action: sign-derives the MemoKey (HKDF over wallet signature),
- * caches the privkey in sessionStorage, and submits the COA+MemoKey setup tx.
+ * Smart-setup action (v0.5.2): sign-derives the MemoKey (HKDF over wallet
+ * signature), caches the privkey in sessionStorage, and submits the atomic
+ * COA+MemoKey setup tx.
  *
- * v0.4.5 change: switched from random-privkey-in-localStorage to sign-derive.
- * The keypair is now deterministically reconstructable from any browser the
- * same Flow Wallet is connected to — no localStorage, no recovery seed.
+ * v0.5.2 change: MemoKey is now JanusFlow.MemoKey (generic primitive in the
+ * JanusFlow contract, NOT PrivateTip.MemoKey). The privkey is NEVER sent on
+ * chain — only (pubkeyX, pubkeyY) travel to the Cadence tx. The EVM mapping
+ * is also updated atomically (publishMemoKey call inside TX_SMART_SETUP).
  *
  * The wallet will prompt for ONE signature (the DERIVE_MESSAGE). This happens
  * BEFORE the Cadence tx popup so the user sees both steps.
@@ -384,15 +414,15 @@ export async function smartSetupAccount(opts: {
   const fcl = await getFcl();
   const txId = await fcl.mutate({
     cadence: TX_SMART_SETUP,
+    // v0.5.2: only pubkeyX + pubkeyY — no privkey on-chain.
     args: (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
-      arg(kp.privkey.toString(), t.UInt256),
       arg(kp.pubkey.x.toString(), t.UInt256),
       arg(kp.pubkey.y.toString(), t.UInt256),
     ],
     proposer: fcl.authz,
     payer: fcl.authz,
     authorizations: [fcl.authz],
-    limit: 200,
+    limit: 9999,
   });
   await fcl.tx(txId).onceSealed();
   return { txId, pubkey: kp.pubkey };
@@ -529,6 +559,12 @@ export interface WrapParams {
   amountUFix64: string;
   amountWei: bigint;
   source?: WrapSource;
+  /** v0.5.2: encrypted snapshot of post-wrap (balance, blinding). Optional with default "0x". */
+  encryptedSnapshot?: Uint8Array | string;
+  /** v0.5.2: ephemeral pubkey X for snapshot decryption. */
+  ephPubkeyX?: bigint;
+  /** v0.5.2: ephemeral pubkey Y for snapshot decryption. */
+  ephPubkeyY?: bigint;
 }
 
 export interface WrapResult {
@@ -538,7 +574,14 @@ export interface WrapResult {
 }
 
 export async function wrapAction(params: WrapParams): Promise<WrapResult> {
-  const { amountUFix64, amountWei, source = "vault" } = params;
+  const {
+    amountUFix64,
+    amountWei,
+    source = "vault",
+    encryptedSnapshot,
+    ephPubkeyX,
+    ephPubkeyY,
+  } = params;
 
   const proofRes = await generateAmountDiscloseProof(amountWei);
   const txCommit: [bigint, bigint] = [
@@ -547,7 +590,15 @@ export async function wrapAction(params: WrapParams): Promise<WrapResult> {
   ];
   const proof = proofRes.proof.map((s) => BigInt(s));
 
-  const calldataHex = await buildWrapCalldata(txCommit, proof);
+  // v0.5.2: pass snapshot params so JanusFlow emits WrapWithSnapshot event.
+  // If caller doesn't supply them, defaults to "0x", 0n, 0n (backwards compat).
+  const calldataHex = await buildWrapCalldata(
+    txCommit,
+    proof,
+    encryptedSnapshot,
+    ephPubkeyX,
+    ephPubkeyY
+  );
 
   const fcl = await getFcl();
   const cadence = source === "coa" ? TX_WRAP_FROM_COA : TX_WRAP;
@@ -653,6 +704,15 @@ export interface SendShieldedTipParams {
    * `getRecipientMemoPubkey()` before calling sendShieldedTipAction.
    */
   recipientMemoPubkey?: Point;
+  /**
+   * v0.5.2: encrypted snapshot of sender's post-send residual (balance, blinding).
+   * Embedded in the ShieldedTransferWithSnapshot event for cross-device recovery.
+   */
+  encryptedSnapshot?: Uint8Array | string;
+  /** v0.5.2: ephemeral pubkey X for snapshot decryption. */
+  ephPubkeyX?: bigint;
+  /** v0.5.2: ephemeral pubkey Y for snapshot decryption. */
+  ephPubkeyY?: bigint;
 }
 
 export interface SendShieldedTipResult {
@@ -674,6 +734,9 @@ export async function sendShieldedTipAction(
     oldBlinding,
     memo,
     recipientMemoPubkey,
+    encryptedSnapshot,
+    ephPubkeyX,
+    ephPubkeyY,
   } = params;
 
   if (transferAmountWei > oldBalanceWei) {
@@ -702,11 +765,14 @@ export async function sendShieldedTipAction(
   const proof = proofRes.proof.map((s) => BigInt(s));
   const transferBlinding = BigInt(proofRes.transferBlinding);
 
-  // 2. Build EVM calldata.
+  // 2. Build EVM calldata (v0.5.2: pass snapshot params for recovery event).
   const calldataHex = await buildShieldedTransferCalldata(
     recipientCoaHex,
     publicInputs,
-    proof
+    proof,
+    encryptedSnapshot,
+    ephPubkeyX,
+    ephPubkeyY
   );
 
   // 3. Encrypt a ShieldedNote: amount + transfer blinding + optional memo text.
@@ -776,6 +842,12 @@ export interface UnwrapParams {
   oldBalanceWei: bigint;
   oldBlinding: bigint;
   toCadenceVault?: boolean;
+  /** v0.5.2: encrypted snapshot of post-unwrap residual (balance, blinding). */
+  encryptedSnapshot?: Uint8Array | string;
+  /** v0.5.2: ephemeral pubkey X for snapshot decryption. */
+  ephPubkeyX?: bigint;
+  /** v0.5.2: ephemeral pubkey Y for snapshot decryption. */
+  ephPubkeyY?: bigint;
 }
 
 export interface UnwrapResult {
@@ -792,6 +864,9 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
     oldBalanceWei,
     oldBlinding,
     toCadenceVault = false,
+    encryptedSnapshot,
+    ephPubkeyX,
+    ephPubkeyY,
   } = params;
 
   if (claimedAmountWei > oldBalanceWei) {
@@ -816,13 +891,17 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
   const transferPublicInputs = transferRes.publicInputs.map((s) => BigInt(s));
   const transferProof = transferRes.proof.map((s) => BigInt(s));
 
+  // v0.5.2: pass snapshot params so JanusFlow emits UnwrapWithSnapshot event.
   const calldataHex = await buildUnwrapCalldata(
     claimedAmountWei,
     recipientEvmHex,
     txCommit,
     amountProof,
     transferPublicInputs,
-    transferProof
+    transferProof,
+    encryptedSnapshot,
+    ephPubkeyX,
+    ephPubkeyY
   );
 
   const claimedAmountUFix64 = formatWeiToFlowUFix64(claimedAmountWei);
@@ -970,13 +1049,23 @@ export function buildGetTipCountScript(): string {
 
 // ─── Memo encryption — recipient pubkey lookup (PrivateTip-specific) ──────────
 
-/** Resolve a recipient's published memo pubkey via PrivateTip.getMemoPubkey. */
+/**
+ * Resolve a recipient's published memo pubkey.
+ *
+ * v0.5.2: MemoKey is now a JanusFlow generic primitive. The public capability
+ * is published at /public/openjanusMemoKey (same path, different resource type).
+ * We read via JanusFlow.getMemoPubkey() which borrows from that path.
+ *
+ * Falls back to PrivateTip.getMemoPubkey() for accounts that haven't migrated yet
+ * (pre-v0.5.2 setup). Both live at the same storage path; the fallback handles
+ * the case where only the old PrivateTip.MemoKey exists.
+ */
 export async function getRecipientMemoPubkey(flowAddr: string): Promise<Point | null> {
   const fcl = await getFcl();
   const script = `
-    import PrivateTip from 0xb9ac529c14a4c5a1
+    import JanusFlow from 0x5dcbeb41055ec57e
     access(all) fun main(owner: Address): {String: UInt256}? {
-      return PrivateTip.getMemoPubkey(owner: owner)
+      return JanusFlow.getMemoPubkey(owner: owner)
     }
   `;
   try {
