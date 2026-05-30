@@ -1,26 +1,12 @@
-/// Claim/Unwrap page — v0.3.
+/// Claim/Unwrap page — v0.3 + Janus dark theme redesign.
 ///
-/// PrivateTip v0.3 is an ORCHESTRATOR — there is no per-tip claim. Recipients
-/// unwrap from their JanusFlow shielded slot whenever they want to cash out.
-/// The shielded balance is the homomorphic sum of all wraps + received tips
-/// minus all sent tips + unwraps.
-///
-/// Flow:
-///   1. User connects wallet.
-///   2. Load (balance, blinding) from sessionStorage (set during wrap/receive).
-///      If absent, the user pastes them (MVP escape hatch).
-///   3. Show current shielded balance (decrypted via the locally-stored
-///      blinding) + the on-chain Pedersen commitment (read directly from EVM).
-///   4. User enters amount to unwrap.
-///   5. Submit Cadence transaction that calls JanusFlow.unwrap, releasing the
-///      visible amount to the user's COA EVM address.
-///   6. PERSIST new (balance, blinding) so the next operation works.
+/// IMPORTANT — all business logic unchanged. Only visual layer updated.
 
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
 import { useFlowCurrentUser } from "@onflow/react-sdk";
-import { Button } from "@/components/ui/button";
+import { motion } from "framer-motion";
 import {
   ArrowLeft,
   Wallet,
@@ -47,6 +33,9 @@ import {
   type Point,
 } from "@/lib/tip-actions";
 import { encryptSnapshotToSelf } from "@/lib/recovery";
+import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
+
+const EASE = [0.22, 1, 0.36, 1] as const;
 
 interface ShieldedState {
   balanceWei: string;
@@ -99,12 +88,13 @@ export default function ClaimPage() {
     txId: null,
     unwrappedFlow: null,
   });
+  const [showPreAnimation, setShowPreAnimation] = useState(false);
+  const [showPostAnimation, setShowPostAnimation] = useState(false);
 
-  // -- Initial load: COA + on-chain commit + local shielded state --------------
+  // -- Initial load -----------------------------------------------------------
 
   useEffect(() => {
     if (!userAddress) return;
-
     let cancelled = false;
 
     (async () => {
@@ -119,36 +109,23 @@ export default function ClaimPage() {
 
         const s = loadShieldedState(userAddress);
         if (!s) {
-          setClaimState({
-            status: "needs_state",
-            error: null,
-            txId: null,
-            unwrappedFlow: null,
-          });
+          setClaimState({ status: "needs_state", error: null, txId: null, unwrappedFlow: null });
           return;
         }
         setShielded(s);
-        setClaimState({
-          status: "ready",
-          error: null,
-          txId: null,
-          unwrappedFlow: null,
-        });
+        setClaimState({ status: "ready", error: null, txId: null, unwrappedFlow: null });
       } catch (err) {
         if (!cancelled) {
           setClaimState({
             status: "error",
             error: err instanceof Error ? err.message : "Load failed",
-            txId: null,
-            unwrappedFlow: null,
+            txId: null, unwrappedFlow: null,
           });
         }
       }
     })();
 
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [userAddress]);
 
   // -- Unwrap handler ---------------------------------------------------------
@@ -159,61 +136,40 @@ export default function ClaimPage() {
       return;
     }
 
+    // Show pre-unwrap animation
+    setShowPreAnimation(true);
+
     let amountWei: bigint;
     try {
       amountWei = parseFlowToWei(amountFlow);
       if (amountWei <= BigInt(0)) throw new Error("Amount must be > 0");
     } catch (err) {
-      setClaimState((p) => ({
-        ...p,
-        status: "error",
-        error: err instanceof Error ? err.message : "Invalid amount",
-      }));
+      setClaimState((p) => ({ ...p, status: "error", error: err instanceof Error ? err.message : "Invalid amount" }));
       return;
     }
 
     const oldBalance = BigInt(shielded.balanceWei);
     if (amountWei > oldBalance) {
       setClaimState((p) => ({
-        ...p,
-        status: "error",
+        ...p, status: "error",
         error: `Insufficient shielded balance: have ${formatWeiToFlow(oldBalance)} FLOW, claim ${amountFlow} FLOW`,
       }));
       return;
     }
 
-    setClaimState({
-      status: "building_proof",
-      error: null,
-      txId: null,
-      unwrappedFlow: null,
-    });
+    setClaimState({ status: "building_proof", error: null, txId: null, unwrappedFlow: null });
 
     try {
-      setClaimState({
-        status: "submitting",
-        error: null,
-        txId: null,
-        unwrappedFlow: null,
-      });
+      setClaimState({ status: "submitting", error: null, txId: null, unwrappedFlow: null });
 
-      // Use the atomic bundle: unwrap + sweep COA -> Cadence FlowToken.Vault
-      // in the same transaction. User sees FLOW in their wallet immediately
-      // — no follow-up "withdraw from COA" step.
-      // v0.5.2: pre-encrypt post-unwrap snapshot to self for the
-      // UnwrapWithSnapshot EVM event. We don't know newBlinding yet
-      // (comes from proof inside unwrapAction), so we pass undefined
-      // and encrypt post-call, storing for the next operation.
       const result = await unwrapAction({
         claimedAmountWei: amountWei,
         recipientEvmHex: coaHex,
         oldBalanceWei: oldBalance,
         oldBlinding: BigInt(shielded.blinding),
         toCadenceVault: true,
-        // snapshot params: undefined here — will encrypt after result
       });
 
-      // Persist new state.
       const newState: ShieldedState = {
         balanceWei: result.newBalanceWei.toString(),
         blinding: result.newBlinding.toString(),
@@ -221,8 +177,6 @@ export default function ClaimPage() {
       saveShieldedState(userAddress, newState);
       setShielded(newState);
 
-      // v0.5.2: Encrypt post-unwrap snapshot now that we have newBlinding.
-      // Non-fatal — localStorage is already correct.
       try {
         const myPubkey = await getRecipientMemoPubkey(userAddress);
         if (myPubkey) {
@@ -230,32 +184,24 @@ export default function ClaimPage() {
             { balance: result.newBalanceWei, blinding: result.newBlinding },
             myPubkey
           );
-          // snap is available for embedding in a future follow-up tx if needed.
           void snap;
         }
-      } catch {
-        // Non-fatal.
-      }
+      } catch { /* Non-fatal */ }
 
-      // Refresh chain commit
       const c = await getCommitment(coaHex);
       setChainCommit(c);
 
-      setClaimState({
-        status: "success",
-        error: null,
-        txId: result.txId,
-        unwrappedFlow: formatWeiToFlow(amountWei),
-      });
-      toast.success("Unwrap successful!", {
-        description: `${formatWeiToFlow(amountWei)} FLOW deposited to your Cadence vault.`,
-      });
+      setShowPreAnimation(false);
+      setShowPostAnimation(true);
+
+      setClaimState({ status: "success", error: null, txId: result.txId, unwrappedFlow: formatWeiToFlow(amountWei) });
+      toast.success("Unwrap successful!", { description: `${formatWeiToFlow(amountWei)} FLOW deposited to your Cadence vault.` });
     } catch (err) {
+      setShowPreAnimation(false);
       setClaimState({
         status: "error",
         error: err instanceof Error ? err.message : "Unwrap failed",
-        txId: null,
-        unwrappedFlow: null,
+        txId: null, unwrappedFlow: null,
       });
     }
   }, [userAddress, shielded, coaHex, amountFlow]);
@@ -265,192 +211,212 @@ export default function ClaimPage() {
 
   if (!isLoggedIn) {
     return (
-      <div className="max-w-lg mx-auto px-4 py-12">
+      <div className="max-w-lg mx-auto px-4 py-12 janus-page">
         <div className="mb-8">
-          <Link
-            href="/"
-            className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4 mr-1" />
-            Back
+          <Link href="/" className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors">
+            <ArrowLeft className="w-4 h-4 mr-1" />Back
           </Link>
         </div>
         <div className="flex flex-col items-center text-center py-16">
-          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
+          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/12 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
             <Wallet className="w-8 h-8 text-[#B45309]" />
           </div>
-          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Connect Your Wallet</h2>
-          <p className="text-sm text-muted-foreground mb-6 max-w-sm">
-            Connect your wallet to unwrap your shielded balance.
-          </p>
-          <Button onClick={() => authenticate()} size="lg">
+          <h2 className="text-xl font-bold mb-2 text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Connect Your Wallet</h2>
+          <p className="text-sm text-foreground/50 mb-6 max-w-sm">Connect your wallet to unwrap your shielded balance.</p>
+          <motion.button
+            onClick={() => authenticate()}
+            whileHover={{ scale: 1.02, y: -1 }}
+            whileTap={{ scale: 0.98 }}
+            className="janus-button-primary px-6 py-3 rounded-xl text-base"
+          >
             Connect Wallet
-          </Button>
+          </motion.button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-lg mx-auto px-4 py-12">
+    <div className="max-w-lg mx-auto px-4 py-12 janus-page">
       <div className="mb-8">
-        <Link
-          href="/"
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4 mr-1" />
-          Back
+        <Link href="/" className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors">
+          <ArrowLeft className="w-4 h-4 mr-1" />Back
         </Link>
       </div>
 
-      <div className="flex items-center gap-3 mb-8">
-        <div className="w-10 h-10 rounded-lg bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#B45309_12%,transparent)]">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, ease: EASE }}
+        className="flex items-center gap-3 mb-8"
+      >
+        <div className="w-10 h-10 rounded-lg bg-[#B45309]/12 border border-[#B45309]/30 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#B45309_12%,transparent)]">
           <Wallet className="w-5 h-5 text-[#B45309]" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Withdraw FLOW</h1>
-          <p className="text-sm text-muted-foreground">
-            Move your private balance back to your regular wallet — one click.
-          </p>
+          <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Withdraw FLOW</h1>
+          <p className="text-sm text-foreground/50">Move your private balance back to your regular wallet — one click.</p>
         </div>
-      </div>
+      </motion.div>
 
       {/* Balance card */}
-      <div className="rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/5 p-6 mb-6 shadow-[0_0_24px_color-mix(in_oklch,#00EF8B_8%,transparent)]">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, ease: EASE, delay: 0.05 }}
+        className="rounded-xl border border-[#00EF8B]/20 bg-[#00EF8B]/5 p-6 mb-6 shadow-[0_0_24px_color-mix(in_oklch,#00EF8B_6%,transparent)]"
+      >
         <div className="flex items-start gap-3">
           <Shield className="w-6 h-6 text-[#00EF8B] shrink-0 mt-0.5" />
           <div className="flex-1">
-            <p className="text-xs font-medium text-foreground mb-1">
-              Your private balance
-            </p>
+            <p className="text-xs font-medium text-foreground/60 mb-1">Your private balance</p>
             {shielded ? (
               <p className="text-2xl font-bold text-[#00EF8B]" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
                 {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
               </p>
             ) : (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-sm text-foreground/40">
                 Can&apos;t see your balance — try opening from the wallet you used to receive.
               </p>
             )}
             {chainCommit && (
-              <div className="mt-2 text-[10px] text-muted-foreground">
+              <div className="mt-2 text-[10px] text-foreground/30">
                 <p>On-chain proof of balance:</p>
-                <p className="font-mono break-all">
-                  {formatPoint(chainCommit).slice(0, 80)}…
-                </p>
+                <p className="font-mono break-all">{formatPoint(chainCommit).slice(0, 80)}…</p>
               </div>
             )}
-            <p className="text-[10px] text-muted-foreground mt-2">
+            <p className="text-[10px] text-foreground/30 mt-2">
               Only you can see the actual amount. Observers see an opaque crypto point.
             </p>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Needs state */}
       {claimState.status === "needs_state" && (
-        <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/30 dark:bg-amber-950/20 p-4 mb-6">
-          <p className="text-sm text-amber-800 dark:text-amber-200 mb-3">
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-lg border border-[#B45309]/20 bg-[#B45309]/5 p-4 mb-6"
+        >
+          <p className="text-sm text-amber-200/70 mb-3">
             Your private balance isn&apos;t loaded in this browser. If you&apos;ve received tips on another device, just open this page on that device — everything reloads automatically. Or paste your saved balance manually below.
           </p>
           <PasteShieldedStateForm
             addr={userAddress!}
             onSaved={(s) => {
               setShielded(s);
-              setClaimState({
-                status: "ready",
-                error: null,
-                txId: null,
-                unwrappedFlow: null,
-              });
+              setClaimState({ status: "ready", error: null, txId: null, unwrappedFlow: null });
             }}
           />
-        </div>
+        </motion.div>
       )}
 
-      {/* Unwrap form — copper accent (boundary-out, symmetric with wrap) */}
+      {/* Pre-unwrap educational animation */}
       {claimState.status !== "needs_state" && claimState.status !== "success" && (
-        <div className="rounded-xl border border-[#B45309]/30 janus-copper-glow bg-card p-6 space-y-4 mb-6">
+        <PedersenCommitFormation
+          direction="out"
+          trigger={showPreAnimation || (claimState.status === "ready" || claimState.status === "error")}
+          onDismiss={() => setShowPreAnimation(false)}
+        />
+      )}
+
+      {/* Unwrap form */}
+      {claimState.status !== "needs_state" && claimState.status !== "success" && (
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, ease: EASE, delay: 0.1 }}
+          className="rounded-xl border border-[#B45309]/25 janus-copper-glow bg-[#0D1E38]/80 p-6 space-y-4 mb-6"
+        >
           <div>
-            <label className="text-xs font-medium text-muted-foreground mb-1 block">
-              Amount to unwrap (FLOW)
-            </label>
+            <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount to unwrap (FLOW)</label>
             <input
               type="text"
               value={amountFlow}
               onChange={(e) => setAmountFlow(e.target.value)}
               placeholder="e.g. 2"
-              className="w-full px-3 py-2 text-sm border rounded bg-background"
+              className="janus-input"
               disabled={isSubmitting || !shielded}
             />
-            <p className="text-[10px] text-muted-foreground mt-1">
+            <p className="text-[10px] text-foreground/30 mt-1">
               This amount becomes visible when you withdraw. For maximum privacy, send the FLOW to a fresh wallet afterwards.
             </p>
           </div>
 
-          <Button
+          <motion.button
             onClick={handleUnwrap}
-            className="w-full"
-            size="lg"
             disabled={isSubmitting || !shielded || !amountFlow}
+            whileHover={!isSubmitting && !!shielded && !!amountFlow ? { scale: 1.01, y: -1 } : {}}
+            whileTap={{ scale: 0.99 }}
+            className="janus-button-primary w-full py-3 rounded-xl text-base disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                {claimState.status === "building_proof"
-                  ? "Building proofs…"
-                  : "Submitting unwrap…"}
-              </>
+              <span className="flex items-center justify-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                {claimState.status === "building_proof" ? "Building proofs…" : "Submitting unwrap…"}
+              </span>
             ) : (
-              <>
-                <Coins className="w-4 h-4 mr-2" />
+              <span className="flex items-center justify-center gap-2">
+                <Coins className="w-4 h-4" />
                 Unwrap to Cadence Vault
-              </>
+              </span>
             )}
-          </Button>
-          <p className="text-[10px] text-muted-foreground -mt-2">
-            Atomic: EVM unwrap + COA → Cadence vault sweep in a single
-            transaction. No follow-up step.
+          </motion.button>
+          <p className="text-[10px] text-foreground/30 -mt-2">
+            Atomic: EVM unwrap + COA → Cadence vault sweep in a single transaction. No follow-up step.
           </p>
-        </div>
+        </motion.div>
       )}
 
-      {/* Success */}
+      {/* Success + post-animation */}
       {claimState.status === "success" && (
-        <div className="rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/8 p-6 shadow-[0_0_32px_color-mix(in_oklch,#00EF8B_12%,transparent)]">
-          <div className="flex items-start gap-3 mb-3">
-            <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
-            <div>
-              <h3 className="text-lg font-bold mb-1">Unwrap successful!</h3>
-              <p className="text-xs text-muted-foreground">
-                {claimState.unwrappedFlow} FLOW now in your Cadence vault.
-              </p>
+        <>
+          <PedersenCommitFormation
+            direction="out"
+            trigger={showPostAnimation}
+            onDismiss={() => setShowPostAnimation(false)}
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.4, ease: EASE }}
+            className="rounded-xl border border-[#00EF8B]/20 bg-[#00EF8B]/8 p-6 shadow-[0_0_32px_color-mix(in_oklch,#00EF8B_8%,transparent)]"
+          >
+            <div className="flex items-start gap-3 mb-3">
+              <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
+              <div>
+                <h3 className="text-lg font-bold mb-1 text-foreground">Unwrap successful!</h3>
+                <p className="text-xs text-foreground/50">{claimState.unwrappedFlow} FLOW now in your Cadence vault.</p>
+              </div>
             </div>
-          </div>
-          <p className="font-mono text-[10px] break-all mb-3">{claimState.txId}</p>
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <EyeOff className="w-3 h-3" />
-            Remaining shielded balance is still hidden on-chain
-          </div>
-        </div>
+            <p className="font-mono text-[10px] break-all mb-3 text-foreground/40">{claimState.txId}</p>
+            <div className="flex items-center gap-1.5 text-xs text-foreground/40">
+              <EyeOff className="w-3 h-3" />
+              Remaining shielded balance is still hidden on-chain
+            </div>
+          </motion.div>
+        </>
       )}
 
       {/* Error */}
       {claimState.status === "error" && claimState.error && (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-4">
+        <motion.div
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-lg border border-red-500/20 bg-red-950/20 p-4"
+        >
           <div className="flex items-start gap-3">
-            <XCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
+            <XCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-destructive mb-1">
-                Unwrap failed
-              </p>
-              <p className="text-xs text-destructive/80">{claimState.error}</p>
+              <p className="text-sm font-medium text-red-300 mb-1">Unwrap failed</p>
+              <p className="text-xs text-red-400/70">{claimState.error}</p>
             </div>
           </div>
-        </div>
+        </motion.div>
       )}
 
-      <div className="mt-8 text-[10px] text-muted-foreground space-y-0.5">
+      <div className="mt-8 text-[10px] text-foreground/20 space-y-0.5">
         <p>JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span></p>
         <p>PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span></p>
       </div>
@@ -458,7 +424,7 @@ export default function ClaimPage() {
   );
 }
 
-// MVP-paste shielded state form — duplicated from send/page.tsx for simplicity.
+// MVP-paste shielded state form
 function PasteShieldedStateForm({
   addr,
   onSaved,
@@ -478,9 +444,7 @@ function PasteShieldedStateForm({
       onSaved(s);
       toast.success("Shielded state saved (session only)");
     } catch (err) {
-      toast.error("Invalid input", {
-        description: err instanceof Error ? err.message : String(err),
-      });
+      toast.error("Invalid input", { description: err instanceof Error ? err.message : String(err) });
     }
   };
 
@@ -491,18 +455,23 @@ function PasteShieldedStateForm({
         placeholder="Cleartext balance (FLOW, e.g. 5)"
         value={balanceFlow}
         onChange={(e) => setBalanceFlow(e.target.value)}
-        className="w-full px-3 py-2 text-xs font-mono border rounded bg-background"
+        className="janus-input font-mono text-xs"
       />
       <input
         type="text"
         placeholder="Blinding factor (decimal)"
         value={blinding}
         onChange={(e) => setBlinding(e.target.value)}
-        className="w-full px-3 py-2 text-xs font-mono border rounded bg-background"
+        className="janus-input font-mono text-xs"
       />
-      <Button size="sm" variant="outline" onClick={handleSave} className="w-full">
+      <motion.button
+        onClick={handleSave}
+        whileHover={{ scale: 1.01 }}
+        whileTap={{ scale: 0.99 }}
+        className="w-full px-3 py-2 text-sm rounded-lg border border-white/15 bg-white/5 text-foreground/60 hover:text-foreground/80 hover:bg-white/8 transition-colors"
+      >
         Save (session only)
-      </Button>
+      </motion.button>
     </div>
   );
 }

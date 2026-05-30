@@ -1,42 +1,17 @@
-/// Wrap page — v0.3.
-///
-/// In-app wrap flow: pre-fund the user's JanusFlow shielded slot from the
-/// browser. Removes the operator's need to run `node scripts/v03-smoke.mjs`
-/// just to seed `sessionStorage` before sending the first tip.
+/// Wrap page — v0.3 + Janus dark theme redesign.
 ///
 /// Boundary semantics (matches /unwrap and /send):
 ///   - wrap()              : msg.value VISIBLE | commitment opaque   (boundary in)
 ///   - shieldedTransfer()  : amount HIDDEN on calldata/events/storage (full shielded)
 ///   - unwrap()            : claimedAmount + recipient VISIBLE        (boundary out)
 ///
-/// Flow:
-///   1. User connects wallet (useFlowCurrentUser).
-///   2. We read the existing shielded state from sessionStorage (if any) AND
-///      the on-chain Pedersen commitment for visual confirmation.
-///   3. User enters whole-FLOW amount to wrap.
-///   4. wrapAction() generates the amount-disclose proof server-side and
-///      submits the Cadence transaction (JanusFlow.wrap via the FLOW vault).
-///   5. We sum the new amount into the locally-known balance and persist
-///      (balance, blinding) so the very next /send works.
-///
-/// IMPORTANT — additive-wrap UX caveat:
-///   The current SDK helper `buildAmountDiscloseProof` produces a FRESH
-///   commitment binding only the wrap amount. The on-chain contract
-///   homomorphically ADDs that commit point to the user's stored commit, but
-///   to spend the resulting aggregate the user needs (balance_total,
-///   blinding_total) where both are the SUMS of every wrap so far.
-///
-///   We track `balanceWei = old + new` here, but the stored `blinding` is
-///   overwritten by the latest wrap. That's fine on the FIRST wrap (the
-///   blinding is the sum trivially), but a second wrap on top of an existing
-///   commit would desync. We surface this in the UI and the
-///   wrap-on-empty-slot path is the supported one for v0.3.
+/// IMPORTANT — functionality unchanged. Only visual layer updated.
 
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
 import { useFlowCurrentUser } from "@onflow/react-sdk";
-import { Button } from "@/components/ui/button";
+import { motion } from "framer-motion";
 import {
   ArrowLeft,
   Loader2,
@@ -64,13 +39,15 @@ import {
   getRecipientMemoPubkey,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
-  TX_SETUP_COA,
   type Point,
   type WrapSource,
 } from "@/lib/tip-actions";
 import { encryptSnapshotToSelf } from "@/lib/recovery";
+import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
-// --- Local-storage helpers (mirrors /send and /claim) -------------------------
+const EASE = [0.22, 1, 0.36, 1] as const;
+
+// --- Local-storage helpers ---------------------------------------------------
 
 interface ShieldedState {
   balanceWei: string;
@@ -92,7 +69,7 @@ function saveShieldedState(addr: string, state: ShieldedState): void {
   localStorage.setItem(shieldedKey(addr), JSON.stringify(state));
 }
 
-// --- Status types -------------------------------------------------------------
+// --- Status types ------------------------------------------------------------
 
 type WrapStatus =
   | "loading"
@@ -111,7 +88,7 @@ interface WrapState {
   newCommit: Point | null;
 }
 
-// --- Component ----------------------------------------------------------------
+// --- Component ---------------------------------------------------------------
 
 export default function WrapPage() {
   const { user, authenticate } = useFlowCurrentUser();
@@ -123,8 +100,6 @@ export default function WrapPage() {
   const [chainCommit, setChainCommit] = useState<Point | null>(null);
   const [vaultBalanceWei, setVaultBalanceWei] = useState<bigint>(BigInt(0));
   const [coaBalanceWei, setCoaBalanceWei] = useState<bigint>(BigInt(0));
-  // "auto" = pick whichever has enough balance (vault preferred). Users can
-  // override if they specifically want one side or the other.
   const [source, setSource] = useState<"auto" | WrapSource>("auto");
   const [amount, setAmount] = useState("1");
   const [wrapState, setWrapState] = useState<WrapState>({
@@ -138,12 +113,13 @@ export default function WrapPage() {
   const [needsCoaSetup, setNeedsCoaSetup] = useState(false);
   const [needsMemoKey, setNeedsMemoKey] = useState(false);
   const [settingUpCoa, setSettingUpCoa] = useState(false);
+  const [showPreAnimation, setShowPreAnimation] = useState(false);
+  const [showPostAnimation, setShowPostAnimation] = useState(false);
 
-  // -- Initial load: COA + on-chain commit + local shielded state --------------
+  // -- Initial load -----------------------------------------------------------
 
   useEffect(() => {
     if (!userAddress) return;
-
     let cancelled = false;
 
     (async () => {
@@ -157,7 +133,6 @@ export default function WrapPage() {
         if (cancelled) return;
         setChainCommit(c);
 
-        // Fetch both source balances so the UI can hint which side has enough.
         const [vaultWei, coaWei] = await Promise.all([
           getFlowVaultBalanceWei(userAddress),
           getCoaBalanceWei(userAddress),
@@ -166,13 +141,6 @@ export default function WrapPage() {
         setVaultBalanceWei(vaultWei);
         setCoaBalanceWei(coaWei);
 
-        // MemoKey status — sign-derive needs the on-chain pubkey to match the
-        // wallet-derived pubkey AND the privkey to be cached in session.
-        //   - missing on-chain: brand-new account, needs first-time setup.
-        //   - on-chain but no local session: privkey wasn't derived in this
-        //     browser yet (fresh session, or pre-v0.4.5 setup with random key
-        //     that we can't reconstruct). Either way, smartSetupAccount will
-        //     rotate it to a derived key the user can recover from any device.
         const { getRecipientMemoPubkey } = await import("@/lib/tip-actions");
         const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
         const memoPub = await getRecipientMemoPubkey(userAddress);
@@ -183,64 +151,36 @@ export default function WrapPage() {
         const s = loadShieldedState(userAddress);
         if (s) setShielded(s);
 
-        setWrapState({
-          status: "idle",
-          error: null,
-          txId: null,
-          wrappedFlow: null,
-          newCommit: null,
-        });
+        setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        // Detect missing COA → show setup CTA instead of error
         if (msg.includes("No COA at /public/evm") || msg.includes("No COA")) {
           if (!cancelled) {
             setNeedsCoaSetup(true);
-            setWrapState({
-              status: "idle",
-              error: null,
-              txId: null,
-              wrappedFlow: null,
-              newCommit: null,
-            });
+            setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
           }
           return;
         }
         if (!cancelled) {
-          setWrapState({
-            status: "error",
-            error: msg,
-            txId: null,
-            wrappedFlow: null,
-            newCommit: null,
-          });
+          setWrapState({ status: "error", error: msg, txId: null, wrappedFlow: null, newCommit: null });
         }
       }
     })();
 
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [userAddress]);
 
-  // -- Smart setup handler -------------------------------------------------
-  //
-  // Single-button setup: creates COA AND MemoKey in one atomic tx (only what's missing).
-  // MemoKey is required for the recipient to receive encrypted memos.
-  // Privkey is generated server-side and cached in localStorage for browser decrypt.
+  // -- Smart setup handler ----------------------------------------------------
 
   const handleSetupCoa = useCallback(async () => {
     if (!userAddress) return;
     setSettingUpCoa(true);
     try {
-      const { smartSetupAccount, getRecipientMemoPubkey } = await import(
-        "@/lib/tip-actions"
-      );
+      const { smartSetupAccount, getRecipientMemoPubkey } = await import("@/lib/tip-actions");
       toast.info("Creating COA + MemoKey (one-time setup)...");
       const { txId } = await smartSetupAccount({ flowAddr: userAddress });
       toast.success(`Setup complete! Tx: ${txId.slice(0, 10)}...`);
       setNeedsCoaSetup(false);
-      // Re-fetch all state so UI reflects post-setup reality
       const coa = await getCoaEvmAddress(userAddress);
       setCoaHex(coa);
       const c = await getCommitment(coa);
@@ -250,38 +190,24 @@ export default function WrapPage() {
       const hasSessionPrivkey = getCachedMemoPrivkey(userAddress) !== null;
       setNeedsMemoKey(memoPub === null || !hasSessionPrivkey);
     } catch (err) {
-      toast.error(
-        `Setup failed: ${err instanceof Error ? err.message : String(err)}`
-      );
+      toast.error(`Setup failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSettingUpCoa(false);
     }
   }, [userAddress]);
 
-  // -- Wrap handler ----------------------------------------------------------
+  // -- Wrap handler -----------------------------------------------------------
 
   const handleWrap = useCallback(async () => {
-    if (!userAddress) {
-      toast.error("Wallet not connected.");
-      return;
-    }
+    if (!userAddress) { toast.error("Wallet not connected."); return; }
 
-    setWrapState({
-      status: "validating",
-      error: null,
-      txId: null,
-      wrappedFlow: null,
-      newCommit: null,
-    });
+    // Show pre-animation at the moment the user clicks wrap
+    setShowPreAnimation(true);
+
+    setWrapState({ status: "validating", error: null, txId: null, wrappedFlow: null, newCommit: null });
 
     if (!isValidFlowAmount(amount)) {
-      setWrapState({
-        status: "error",
-        error: "Invalid amount.",
-        txId: null,
-        wrappedFlow: null,
-        newCommit: null,
-      });
+      setWrapState({ status: "error", error: "Invalid amount.", txId: null, wrappedFlow: null, newCommit: null });
       return;
     }
 
@@ -290,21 +216,12 @@ export default function WrapPage() {
       amountWei = parseFlowToWei(amount);
       if (amountWei <= BigInt(0)) throw new Error("Amount must be > 0");
     } catch (err) {
-      setWrapState({
-        status: "error",
-        error: err instanceof Error ? err.message : "Invalid amount",
-        txId: null,
-        wrappedFlow: null,
-        newCommit: null,
-      });
+      setWrapState({ status: "error", error: err instanceof Error ? err.message : "Invalid amount", txId: null, wrappedFlow: null, newCommit: null });
       return;
     }
 
     const amountUFix64 = formatWeiToFlowUFix64(amountWei);
 
-    // Resolve auto source: prefer vault (cheaper — no COA withdrawal), fall
-    // back to COA if vault doesn't have enough. Reject early if neither side
-    // can cover the amount.
     let resolvedSource: WrapSource;
     if (source === "auto") {
       if (vaultBalanceWei >= amountWei) {
@@ -315,59 +232,32 @@ export default function WrapPage() {
         setWrapState({
           status: "error",
           error: `Insufficient FLOW: vault has ${formatWeiToFlow(vaultBalanceWei, 4)}, COA has ${formatWeiToFlow(coaBalanceWei, 4)}, need ${amount}.`,
-          txId: null,
-          wrappedFlow: null,
-          newCommit: null,
+          txId: null, wrappedFlow: null, newCommit: null,
         });
         return;
       }
     } else {
       resolvedSource = source;
-      const available =
-        resolvedSource === "vault" ? vaultBalanceWei : coaBalanceWei;
+      const available = resolvedSource === "vault" ? vaultBalanceWei : coaBalanceWei;
       if (available < amountWei) {
         setWrapState({
           status: "error",
           error: `Selected source (${resolvedSource}) has only ${formatWeiToFlow(available, 4)} FLOW, need ${amount}.`,
-          txId: null,
-          wrappedFlow: null,
-          newCommit: null,
+          txId: null, wrappedFlow: null, newCommit: null,
         });
         return;
       }
     }
 
-    setWrapState({
-      status: "building_proof",
-      error: null,
-      txId: null,
-      wrappedFlow: null,
-      newCommit: null,
-    });
+    setWrapState({ status: "building_proof", error: null, txId: null, wrappedFlow: null, newCommit: null });
 
     try {
-      setWrapState({
-        status: "submitting",
-        error: null,
-        txId: null,
-        wrappedFlow: null,
-        newCommit: null,
-      });
+      setWrapState({ status: "submitting", error: null, txId: null, wrappedFlow: null, newCommit: null });
 
-      // Compute post-wrap snapshot BEFORE submitting the tx so the snapshot
-      // can be embedded in the wrap calldata (WrapWithSnapshot EVM event).
-      //
-      // Challenge: wrapAction generates the blinding internally via
-      // generateAmountDiscloseProof. We need old state to pre-compute the
-      // new absolute (balance, blinding) for the snapshot.
-      //
-      // Solution: pre-fetch old state, call generateAmountDiscloseProof here
-      // first, compute new totals, encrypt snapshot, then pass to wrapAction.
       const existing = loadShieldedState(userAddress);
       const oldBalanceWei = existing ? BigInt(existing.balanceWei) : BigInt(0);
       const oldBlinding = existing ? BigInt(existing.blinding) : BigInt(0);
 
-      // Pre-generate the wrap proof to obtain the fresh blinding scalar.
       const preProof = await (async () => {
         const res = await fetch("/api/proof/encrypt", {
           method: "POST",
@@ -382,7 +272,6 @@ export default function WrapPage() {
       const finalNewBlinding = oldBlinding + wrapBlinding;
       const finalNewBalanceWei = oldBalanceWei + amountWei;
 
-      // Encrypt the post-wrap snapshot to our own MemoKey pubkey.
       let snapshotCt: Uint8Array | undefined;
       let snapshotEphX: bigint | undefined;
       let snapshotEphY: bigint | undefined;
@@ -397,22 +286,13 @@ export default function WrapPage() {
           snapshotEphX = snap.ephPubkey.x;
           snapshotEphY = snap.ephPubkey.y;
         }
-      } catch {
-        // Non-fatal — proceed without snapshot; next action will carry it.
-      }
+      } catch { /* Non-fatal */ }
 
       const result = await wrapAction({
-        amountUFix64,
-        amountWei,
-        source: resolvedSource,
-        encryptedSnapshot: snapshotCt,
-        ephPubkeyX: snapshotEphX,
-        ephPubkeyY: snapshotEphY,
+        amountUFix64, amountWei, source: resolvedSource,
+        encryptedSnapshot: snapshotCt, ephPubkeyX: snapshotEphX, ephPubkeyY: snapshotEphY,
       });
 
-      // Use the blinding from the actual proof (result.blinding) for localStorage.
-      // If pre-proof matched: result.blinding === wrapBlinding. If they diverged
-      // (e.g. race condition), use result.blinding for correctness.
       const actualNewBlinding = oldBlinding + result.blinding;
       const actualNewBalanceWei = oldBalanceWei + amountWei;
 
@@ -423,14 +303,8 @@ export default function WrapPage() {
       saveShieldedState(userAddress, newState);
       setShielded(newState);
 
-      // Refresh on-chain commit + source balances for the visual confirmation.
       if (coaHex) {
-        try {
-          const c = await getCommitment(coaHex);
-          setChainCommit(c);
-        } catch {
-          // Non-fatal — surface no error, the user already has txId.
-        }
+        try { const c = await getCommitment(coaHex); setChainCommit(c); } catch { /* non-fatal */ }
       }
       try {
         const [vaultWei, coaWei] = await Promise.all([
@@ -439,29 +313,22 @@ export default function WrapPage() {
         ]);
         setVaultBalanceWei(vaultWei);
         setCoaBalanceWei(coaWei);
-      } catch {
-        // Non-fatal — UI hints can be slightly stale until next visit.
-      }
+      } catch { /* non-fatal */ }
+
+      setShowPreAnimation(false);
+      setShowPostAnimation(true);
 
       setWrapState({
-        status: "success",
-        error: null,
-        txId: result.txId,
-        wrappedFlow: formatWeiToFlow(amountWei, 4),
-        newCommit: result.commitment,
+        status: "success", error: null, txId: result.txId,
+        wrappedFlow: formatWeiToFlow(amountWei, 4), newCommit: result.commitment,
       });
       toast.success("Wrap successful!", {
         description: `${formatWeiToFlow(amountWei, 4)} FLOW now in your shielded slot.`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Wrap failed";
-      setWrapState({
-        status: "error",
-        error: msg,
-        txId: null,
-        wrappedFlow: null,
-        newCommit: null,
-      });
+      setShowPreAnimation(false);
+      setWrapState({ status: "error", error: msg, txId: null, wrappedFlow: null, newCommit: null });
       toast.error("Wrap failed", { description: msg });
     }
   }, [userAddress, amount, coaHex, source, vaultBalanceWei, coaBalanceWei]);
@@ -475,76 +342,63 @@ export default function WrapPage() {
 
   if (!isLoggedIn) {
     return (
-      <div className="max-w-lg mx-auto px-4 py-12">
+      <div className="max-w-lg mx-auto px-4 py-12 janus-page">
         <div className="mb-8">
-          <Link
-            href="/"
-            className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4 mr-1" />
-            Back
+          <Link href="/" className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors">
+            <ArrowLeft className="w-4 h-4 mr-1" />Back
           </Link>
         </div>
         <div className="flex flex-col items-center text-center py-16">
-          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
+          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/12 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
             <Coins className="w-8 h-8 text-[#B45309]" />
           </div>
-          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Connect Your Wallet</h2>
-          <p className="text-sm text-muted-foreground mb-6 max-w-sm">
-            Connect your wallet to wrap FLOW into your shielded slot.
-          </p>
-          <Button onClick={() => authenticate()} size="lg">
+          <h2 className="text-xl font-bold mb-2 text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Connect Your Wallet</h2>
+          <p className="text-sm text-foreground/50 mb-6 max-w-sm">Connect your wallet to wrap FLOW into your shielded slot.</p>
+          <motion.button
+            onClick={() => authenticate()}
+            whileHover={{ scale: 1.02, y: -1 }}
+            whileTap={{ scale: 0.98 }}
+            className="janus-button-primary px-6 py-3 rounded-xl text-base"
+          >
             Connect Wallet
-          </Button>
+          </motion.button>
         </div>
       </div>
     );
   }
 
-  // -- COA setup required ---------------------------------------------------
+  // -- COA setup required ----------------------------------------------------
 
   if (needsCoaSetup) {
     return (
-      <div className="max-w-lg mx-auto px-4 py-12">
+      <div className="max-w-lg mx-auto px-4 py-12 janus-page">
         <div className="mb-8">
-          <Link
-            href="/"
-            className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4 mr-1" />
-            Back
+          <Link href="/" className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors">
+            <ArrowLeft className="w-4 h-4 mr-1" />Back
           </Link>
         </div>
         <div className="flex flex-col items-center text-center py-16">
-          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
+          <div className="w-16 h-16 rounded-2xl bg-[#B45309]/12 border border-[#B45309]/30 flex items-center justify-center mb-6 shadow-[0_0_24px_color-mix(in_oklch,#B45309_15%,transparent)]">
             <Coins className="w-8 h-8 text-[#B45309]" />
           </div>
-          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>One-time wallet setup</h2>
-          <p className="text-sm text-muted-foreground mb-2 max-w-sm">
-            Your Flow account doesn&apos;t have a COA (Cadence Owned Account) or
-            a published MemoKey yet — both are required for shielded transfers.
+          <h2 className="text-xl font-bold mb-2 text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>One-time wallet setup</h2>
+          <p className="text-sm text-foreground/50 mb-2 max-w-sm">
+            Your Flow account doesn&apos;t have a COA or a published MemoKey yet — both are required for shielded transfers.
           </p>
-          <p className="text-sm text-muted-foreground mb-2 max-w-sm">
-            <strong>Setting up: COA + sign-derived MemoKey.</strong> The wallet
-            will prompt for <strong>one signature</strong> to derive your memo
-            key, then a second popup to submit the on-chain setup transaction.
-            Your memo key is reconstructable from any browser using the same
-            Flow Wallet — no seed phrase needed.
+          <p className="text-sm text-foreground/50 mb-2 max-w-sm">
+            <strong className="text-foreground/80">Setting up: COA + sign-derived MemoKey.</strong> The wallet will prompt for{" "}
+            <strong className="text-foreground/80">one signature</strong> to derive your memo key, then a second popup to submit the on-chain setup transaction.
           </p>
-          <p className="text-sm text-muted-foreground mb-6 max-w-sm">
-            This is a one-time, gas-only setup.
-          </p>
-          <Button
+          <p className="text-sm text-foreground/50 mb-6 max-w-sm">This is a one-time, gas-only setup.</p>
+          <motion.button
             onClick={handleSetupCoa}
-            size="lg"
             disabled={settingUpCoa}
+            whileHover={settingUpCoa ? {} : { scale: 1.02, y: -1 }}
+            whileTap={{ scale: 0.98 }}
+            className="janus-button-primary px-6 py-3 rounded-xl text-base disabled:opacity-50"
           >
             {settingUpCoa ? "Setting up..." : "Setup Wallet for Shielded Transfers"}
-          </Button>
-          <p className="text-xs text-muted-foreground mt-4 max-w-sm">
-            After setup, you may need to fund the COA with a small amount of FLOW
-            to pay EVM gas. The wallet popup will guide you.
-          </p>
+          </motion.button>
         </div>
       </div>
     );
@@ -552,287 +406,261 @@ export default function WrapPage() {
 
   // -- Main UI ---------------------------------------------------------------
 
-  const hasExistingSlot =
-    !!shielded && BigInt(shielded.balanceWei) > BigInt(0);
-
   const onChainEmpty = chainCommit ? isIdentityPoint(chainCommit) : true;
 
   return (
-    <div className="max-w-lg mx-auto px-4 py-12">
+    <div className="max-w-lg mx-auto px-4 py-12 janus-page">
       <div className="mb-8">
-        <Link
-          href="/"
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4 mr-1" />
-          Back
+        <Link href="/" className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors">
+          <ArrowLeft className="w-4 h-4 mr-1" />Back
         </Link>
       </div>
 
-      <div className="flex items-center gap-3 mb-8">
-        <div className="w-10 h-10 rounded-lg bg-[#B45309]/15 border border-[#B45309]/30 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#B45309_12%,transparent)]">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, ease: EASE }}
+        className="flex items-center gap-3 mb-8"
+      >
+        <div className="w-10 h-10 rounded-lg bg-[#B45309]/12 border border-[#B45309]/30 flex items-center justify-center shadow-[0_0_16px_color-mix(in_oklch,#B45309_12%,transparent)]">
           <Coins className="w-5 h-5 text-[#B45309]" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Add private FLOW</h1>
-          <p className="text-sm text-muted-foreground">
-            Cross the entry boundary — your FLOW moves into the private zone.
-          </p>
+          <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Add private FLOW</h1>
+          <p className="text-sm text-foreground/50">Cross the entry boundary — your FLOW moves into the private zone.</p>
         </div>
-      </div>
+      </motion.div>
 
-      {/* Setup status — only shows if something missing (compact banner) */}
+      {/* MemoKey setup banner */}
       {needsMemoKey && (
-        <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50/50 dark:bg-amber-950/20 px-3 py-2 mb-4 flex items-center justify-between gap-3 text-xs">
-          <span className="text-amber-900 dark:text-amber-100">
-            Your private inbox isn&apos;t active yet. Click Enable — your wallet
-            will sign one message + confirm one transaction. After that you can
-            send tips, receive private messages, and withdraw.
+        <motion.div
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+          className="rounded-lg border border-[#B45309]/40 bg-[#B45309]/8 px-3 py-2 mb-4 flex items-center justify-between gap-3 text-xs"
+        >
+          <span className="text-amber-200/90">
+            Your private inbox isn&apos;t active yet. Click Enable — your wallet will sign one message + confirm one transaction.
           </span>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 text-xs"
+          <motion.button
             onClick={handleSetupCoa}
             disabled={settingUpCoa}
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            className="shrink-0 px-3 py-1 rounded border border-[#B45309]/50 bg-[#B45309]/12 text-amber-200 font-medium hover:bg-[#B45309]/20 transition-colors disabled:opacity-50 text-xs"
           >
             {settingUpCoa ? "Signing + setting up…" : "Enable"}
-          </Button>
-        </div>
+          </motion.button>
+        </motion.div>
       )}
 
       {/* Current balance card */}
-      <div className="rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/5 dark:bg-[#00EF8B]/5 p-6 mb-6 shadow-[0_0_24px_color-mix(in_oklch,#00EF8B_8%,transparent)]">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, ease: EASE, delay: 0.05 }}
+        className="rounded-xl border border-[#00EF8B]/20 bg-[#00EF8B]/5 p-6 mb-6 shadow-[0_0_24px_color-mix(in_oklch,#00EF8B_6%,transparent)]"
+      >
         <div className="flex items-start gap-3">
           <Shield className="w-6 h-6 text-[#00EF8B] shrink-0 mt-0.5" />
           <div className="flex-1">
-            <p className="text-xs font-medium text-foreground mb-1">
-              Your private balance
-            </p>
+            <p className="text-xs font-medium text-foreground/70 mb-1">Your private balance</p>
             {shielded ? (
-              <>
-                <p className="text-2xl font-bold text-[#00EF8B]" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
-                  {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
-                </p>
-              </>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                Nothing here yet — your first wrap starts it.
+              <p className="text-2xl font-bold text-[#00EF8B]" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+                {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
               </p>
+            ) : (
+              <p className="text-sm text-foreground/40">Nothing here yet — your first wrap starts it.</p>
             )}
             {chainCommit && (
-              <div className="mt-2 text-[10px] text-muted-foreground">
-                <p>
-                  On-chain proof of balance{" "}
-                  {onChainEmpty ? "(empty)" : "(active)"}:
-                </p>
-                <p className="font-mono break-all">
-                  {formatPoint(chainCommit).slice(0, 80)}…
-                </p>
+              <div className="mt-2 text-[10px] text-foreground/30">
+                <p>On-chain proof of balance {onChainEmpty ? "(empty)" : "(active)"}:</p>
+                <p className="font-mono break-all">{formatPoint(chainCommit).slice(0, 80)}…</p>
               </div>
             )}
-            <p className="text-[10px] text-muted-foreground mt-2">
-              Only you see the actual amount — others see an opaque crypto
-              point. Math (Pedersen commitments) handles the privacy.
+            <p className="text-[10px] text-foreground/30 mt-2">
+              Only you see the actual amount — others see an opaque crypto point. Math (Pedersen commitments) handles the privacy.
             </p>
           </div>
         </div>
-      </div>
+      </motion.div>
 
-      {/* Wrap form — copper accent (boundary-in) */}
-      {/* (Legacy in-page additive-blinding warning removed — global RecoveryBanner
-          in client-layout.tsx now handles desync detection with proper UX:
-          blue "recover" / yellow "clear local" / red "desync error".) */}
+      {/* Pre-wrap educational animation */}
       {wrapState.status !== "success" && (
-        <div className="rounded-xl border border-[#B45309]/30 janus-copper-glow bg-card p-6 space-y-4 mb-6">
-          {/* Source picker — vault or COA. Both run through JanusFlow.wrap,
-              privacy semantics are identical (msg.value visible at boundary). */}
+        <PedersenCommitFormation
+          direction="in"
+          trigger={showPreAnimation || wrapState.status === "idle"}
+          onDismiss={() => setShowPreAnimation(false)}
+        />
+      )}
+
+      {/* Wrap form */}
+      {wrapState.status !== "success" && (
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, ease: EASE, delay: 0.1 }}
+          className="rounded-xl border border-[#B45309]/25 janus-copper-glow bg-[#0D1E38]/80 p-6 space-y-4 mb-6"
+        >
+          {/* Source picker */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground mb-1 block">
-              Source of FLOW
-            </label>
+            <label className="text-xs font-medium text-foreground/50 mb-1 block">Source of FLOW</label>
             <div className="grid grid-cols-3 gap-2 mb-1">
-              <button
-                type="button"
-                onClick={() => setSource("auto")}
-                disabled={isSubmitting}
-                className={`px-3 py-2 text-xs rounded border transition-colors ${
-                  source === "auto"
-                    ? "bg-blue-600 text-white border-blue-600"
-                    : "bg-background border-border hover:bg-muted"
-                }`}
-              >
-                Auto
-              </button>
-              <button
-                type="button"
-                onClick={() => setSource("vault")}
-                disabled={isSubmitting}
-                className={`px-3 py-2 text-xs rounded border transition-colors ${
-                  source === "vault"
-                    ? "bg-blue-600 text-white border-blue-600"
-                    : "bg-background border-border hover:bg-muted"
-                }`}
-              >
-                Vault
-              </button>
-              <button
-                type="button"
-                onClick={() => setSource("coa")}
-                disabled={isSubmitting}
-                className={`px-3 py-2 text-xs rounded border transition-colors ${
-                  source === "coa"
-                    ? "bg-blue-600 text-white border-blue-600"
-                    : "bg-background border-border hover:bg-muted"
-                }`}
-              >
-                COA
-              </button>
+              {(["auto", "vault", "coa"] as const).map((s) => (
+                <motion.button
+                  key={s}
+                  type="button"
+                  onClick={() => setSource(s)}
+                  disabled={isSubmitting}
+                  whileHover={!isSubmitting && source !== s ? { scale: 1.02 } : {}}
+                  whileTap={{ scale: 0.98 }}
+                  className={`px-3 py-2 text-xs rounded-lg border transition-all ${
+                    source === s
+                      ? "bg-[#00EF8B]/15 text-[#00EF8B] border-[#00EF8B]/30"
+                      : "bg-white/3 border-white/10 text-foreground/50 hover:border-white/20 hover:text-foreground/70"
+                  }`}
+                >
+                  {s.charAt(0).toUpperCase() + s.slice(1)}
+                </motion.button>
+              ))}
             </div>
-            <div className="text-[10px] text-muted-foreground space-y-0.5">
+            <div className="text-[10px] text-foreground/30 space-y-0.5">
               <p>
-                Vault: <span className="font-mono">{formatWeiToFlow(vaultBalanceWei, 4)}</span> FLOW
+                Vault: <span className="font-mono text-foreground/50">{formatWeiToFlow(vaultBalanceWei, 4)}</span> FLOW
                 {" · "}
-                COA: <span className="font-mono">{formatWeiToFlow(coaBalanceWei, 4)}</span> FLOW
+                COA: <span className="font-mono text-foreground/50">{formatWeiToFlow(coaBalanceWei, 4)}</span> FLOW
               </p>
               <p>
-                {source === "auto" &&
-                  "Auto picks your main FLOW balance first (cheaper); uses your EVM-side balance if main is low."}
-                {source === "vault" &&
-                  "Pulls from your main Flow wallet balance."}
-                {source === "coa" &&
-                  "Pulls from your Flow-EVM balance in one transaction."}
+                {source === "auto" && "Auto picks your main FLOW balance first; uses EVM balance if main is low."}
+                {source === "vault" && "Pulls from your main Flow wallet balance."}
+                {source === "coa" && "Pulls from your Flow-EVM balance in one transaction."}
                 {" "}Privacy is the same either way.
               </p>
             </div>
           </div>
 
           <div>
-            <label className="text-xs font-medium text-muted-foreground mb-1 block">
-              Amount to wrap (FLOW)
-            </label>
+            <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount to wrap (FLOW)</label>
             <input
               type="text"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               placeholder="e.g. 1"
-              className="w-full px-3 py-2 text-sm border rounded bg-background"
+              className="janus-input font-mono"
               disabled={isSubmitting}
             />
-            <p className="text-[10px] text-muted-foreground mt-1">
-              This amount is visible (it&apos;s the entry point). Once inside,
-              every tip you send hides the amount.
+            <p className="text-[10px] text-foreground/30 mt-1">
+              This amount is visible at the entry point. Once inside, every tip you send hides the amount.
             </p>
           </div>
 
-          <Button
+          <motion.button
             onClick={handleWrap}
-            className="w-full"
-            size="lg"
             disabled={isSubmitting || !amount}
+            whileHover={!isSubmitting && !!amount ? { scale: 1.01, y: -1 } : {}}
+            whileTap={{ scale: 0.99 }}
+            className="janus-button-primary w-full py-3 rounded-xl text-base disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              <span className="flex items-center justify-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" />
                 {wrapState.status === "validating" && "Validating…"}
                 {wrapState.status === "building_proof" && "Generating Groth16 proof…"}
                 {wrapState.status === "submitting" && "Submitting…"}
-              </>
+              </span>
             ) : (
-              <>
-                <Coins className="w-4 h-4 mr-2" />
+              <span className="flex items-center justify-center gap-2">
+                <Coins className="w-4 h-4" />
                 Wrap FLOW
-              </>
+              </span>
             )}
-          </Button>
-        </div>
+          </motion.button>
+        </motion.div>
       )}
 
-      {/* Success */}
+      {/* Post-wrap success animation + result */}
       {wrapState.status === "success" && (
-        <div className="rounded-xl border border-[#00EF8B]/30 bg-[#00EF8B]/8 p-6 mb-6 shadow-[0_0_32px_color-mix(in_oklch,#00EF8B_12%,transparent)]">
-          <div className="flex items-start gap-3 mb-3">
-            <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
-            <div>
-              <h3 className="text-lg font-bold mb-1">Wrap successful!</h3>
-              <p className="text-xs text-muted-foreground">
-                {wrapState.wrappedFlow} FLOW now in your shielded slot.
-              </p>
+        <>
+          <PedersenCommitFormation
+            direction="in"
+            trigger={showPostAnimation}
+            onDismiss={() => setShowPostAnimation(false)}
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.4, ease: EASE }}
+            className="rounded-xl border border-[#00EF8B]/25 bg-[#00EF8B]/8 p-6 mb-6 shadow-[0_0_32px_color-mix(in_oklch,#00EF8B_10%,transparent)]"
+          >
+            <div className="flex items-start gap-3 mb-3">
+              <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
+              <div>
+                <h3 className="text-lg font-bold mb-1 text-foreground">Wrap successful!</h3>
+                <p className="text-xs text-foreground/50">{wrapState.wrappedFlow} FLOW now in your shielded slot.</p>
+              </div>
             </div>
-          </div>
-          {wrapState.newCommit && (
+            {wrapState.newCommit && (
+              <div className="mb-3">
+                <p className="text-xs font-medium text-foreground/70 mb-1">Your new commitment (point on BabyJubJub):</p>
+                <p className="font-mono text-[10px] break-all text-[#00EF8B]/80">{formatPoint(wrapState.newCommit)}</p>
+              </div>
+            )}
             <div className="mb-3">
-              <p className="text-xs font-medium text-foreground mb-1">
-                Your new commitment (point on BabyJubJub):
-              </p>
-              <p className="font-mono text-[10px] break-all text-[#00EF8B]">
-                {formatPoint(wrapState.newCommit)}
-              </p>
+              <p className="text-xs font-medium text-foreground/70 mb-1">Transaction:</p>
+              <p className="font-mono text-[10px] break-all text-foreground/50">{wrapState.txId}</p>
             </div>
-          )}
-          <div className="mb-3">
-            <p className="text-xs font-medium text-foreground mb-1">
-              Transaction:
-            </p>
-            <p className="font-mono text-[10px] break-all">{wrapState.txId}</p>
-          </div>
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-4">
-            <EyeOff className="w-3 h-3" />
-            Your blinding factor is stored in your browser (localStorage); future
-            tips will spend from this slot.
-          </div>
-          <div className="flex gap-3 justify-center">
-            <Link href="/send">
-              <Button size="sm">Send a Tip</Button>
-            </Link>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setWrapState({
-                  status: "idle",
-                  error: null,
-                  txId: null,
-                  wrappedFlow: null,
-                  newCommit: null,
-                });
-              }}
-            >
-              Wrap More
-            </Button>
-          </div>
-        </div>
+            <div className="flex items-center gap-1.5 text-xs text-foreground/40 mb-4">
+              <EyeOff className="w-3 h-3" />
+              Your blinding factor is stored locally; future tips will spend from this slot.
+            </div>
+            <div className="flex gap-3 justify-center">
+              <Link href="/send">
+                <motion.span
+                  whileHover={{ scale: 1.02, y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                  className="janus-button-primary px-4 py-2 rounded-lg text-sm cursor-pointer"
+                >
+                  Send a Tip
+                </motion.span>
+              </Link>
+              <motion.button
+                whileHover={{ scale: 1.02, y: -1 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => {
+                  setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
+                  setShowPostAnimation(false);
+                }}
+                className="px-4 py-2 rounded-lg border border-white/15 bg-white/5 text-foreground/70 text-sm font-medium hover:bg-white/10 transition-colors"
+              >
+                Wrap More
+              </motion.button>
+            </div>
+          </motion.div>
+        </>
       )}
 
       {/* Error */}
       {wrapState.status === "error" && wrapState.error && (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-4 mb-6">
+        <motion.div
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-lg border border-red-500/20 bg-red-950/20 p-4 mb-6"
+        >
           <div className="flex items-start gap-3">
-            <XCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
+            <XCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-destructive mb-1">
-                Wrap failed
-              </p>
-              <p className="text-xs text-destructive/80">{wrapState.error}</p>
+              <p className="text-sm font-medium text-red-300 mb-1">Wrap failed</p>
+              <p className="text-xs text-red-400/70">{wrapState.error}</p>
             </div>
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* Footer: addresses */}
-      <div className="mt-8 text-[10px] text-muted-foreground space-y-0.5">
-        <p>
-          JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span>
-        </p>
-        <p>
-          PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span>
-        </p>
+      <div className="mt-8 text-[10px] text-foreground/20 space-y-0.5">
+        <p>JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span></p>
+        <p>PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span></p>
       </div>
     </div>
   );
 }
-
-// BalanceMeter removed in v0.5: with the 2^128 wei cap, any realistic balance
-// is an astronomically small fraction of the limit, so the meter conveys no
-// useful information. The circuit cap is documented in /learn and in SDK
-// JANUS_FLOW_MAX_WRAP_ATTOFLOW.

@@ -1,0 +1,377 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ── Janus design-system tokens ─────────────────────────────────────────── */
+
+@theme inline {
+  /* Shadcn semantic variables (kept intact) */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains);
+  --font-heading: var(--font-fraunces);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* ── openjanus palette tokens ────────────────────────────────────────── */
+  --color-janus-emerald: #00EF8B;   /* Flow primary, "private/safe" */
+  --color-janus-deep:    #0A1628;   /* deep navy — dark bg */
+  --color-janus-gold:    #D4AF37;   /* authority / ceremony / gold */
+  --color-janus-purple:  #6B46C1;   /* crypto / encryption */
+  --color-janus-copper:  #B45309;   /* boundary — wrap/withdraw entry/exit */
+  --color-janus-bone:    #F5F0E1;   /* parchment cream — light bg */
+  --color-janus-ink:     #1A1A1A;   /* text dark */
+}
+
+/* ── Base theme — DARK Janus deep navy as primary ─────────────────────── */
+
+:root {
+  --background: oklch(0.11 0.025 240);   /* janus-deep navy — primary bg */
+  --foreground: oklch(0.95 0.01 90);     /* janus-bone warm white */
+  --card: oklch(0.15 0.028 240);         /* slightly lighter than bg */
+  --card-foreground: oklch(0.95 0.01 90);
+  --popover: oklch(0.15 0.028 240);
+  --popover-foreground: oklch(0.95 0.01 90);
+  --primary: oklch(0.82 0.19 155);       /* janus-emerald */
+  --primary-foreground: oklch(0.11 0.025 240);
+  --secondary: oklch(0.20 0.025 240);
+  --secondary-foreground: oklch(0.95 0.01 90);
+  --muted: oklch(0.20 0.025 240);
+  --muted-foreground: oklch(0.60 0.012 240);
+  --accent: oklch(0.20 0.025 240);
+  --accent-foreground: oklch(0.95 0.01 90);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 10%);
+  --ring: oklch(0.82 0.19 155);
+  --chart-1: oklch(0.82 0.19 155);
+  --chart-2: oklch(0.6 0.15 290);
+  --chart-3: oklch(0.65 0.17 55);
+  --chart-4: oklch(0.7 0.14 210);
+  --chart-5: oklch(0.6 0.18 30);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.15 0.028 240);
+  --sidebar-foreground: oklch(0.95 0.01 90);
+  --sidebar-primary: oklch(0.82 0.19 155);
+  --sidebar-primary-foreground: oklch(0.11 0.025 240);
+  --sidebar-accent: oklch(0.20 0.025 240);
+  --sidebar-accent-foreground: oklch(0.95 0.01 90);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.82 0.19 155);
+}
+
+/* Keep .dark as alias so existing dark: classes still work */
+.dark {
+  --background: oklch(0.11 0.025 240);
+  --foreground: oklch(0.95 0.01 90);
+  --card: oklch(0.15 0.028 240);
+  --card-foreground: oklch(0.95 0.01 90);
+  --popover: oklch(0.15 0.028 240);
+  --popover-foreground: oklch(0.95 0.01 90);
+  --primary: oklch(0.82 0.19 155);
+  --primary-foreground: oklch(0.11 0.025 240);
+  --secondary: oklch(0.20 0.025 240);
+  --secondary-foreground: oklch(0.95 0.01 90);
+  --muted: oklch(0.20 0.025 240);
+  --muted-foreground: oklch(0.60 0.012 240);
+  --accent: oklch(0.20 0.025 240);
+  --accent-foreground: oklch(0.95 0.01 90);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 10%);
+  --ring: oklch(0.82 0.19 155);
+  --chart-1: oklch(0.82 0.19 155);
+  --chart-2: oklch(0.6 0.15 290);
+  --chart-3: oklch(0.65 0.17 55);
+  --chart-4: oklch(0.7 0.14 210);
+  --chart-5: oklch(0.6 0.18 30);
+  --sidebar: oklch(0.15 0.028 240);
+  --sidebar-foreground: oklch(0.95 0.01 90);
+  --sidebar-primary: oklch(0.82 0.19 155);
+  --sidebar-primary-foreground: oklch(0.11 0.025 240);
+  --sidebar-accent: oklch(0.20 0.025 240);
+  --sidebar-accent-foreground: oklch(0.95 0.01 90);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.82 0.19 155);
+}
+
+/* ── Font variables (wired from layout.tsx via next/font/google) ─────── */
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    font-family: var(--font-inter, system-ui, sans-serif);
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-inter, system-ui, sans-serif);
+    /* deep navy with subtle emerald+purple ambient glow */
+    background-image:
+      radial-gradient(ellipse at 20% 0%, color-mix(in oklch, #00EF8B 6%, transparent) 0%, transparent 55%),
+      radial-gradient(ellipse at 80% 100%, color-mix(in oklch, #6B46C1 6%, transparent) 0%, transparent 55%),
+      radial-gradient(ellipse at 50% 50%, color-mix(in oklch, #0A1628 100%, transparent) 0%, transparent 100%);
+  }
+
+  h1, h2, h3 {
+    font-family: var(--font-fraunces, Georgia, serif);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+
+  code, kbd, .font-mono, pre {
+    font-family: var(--font-jetbrains, ui-monospace, monospace);
+  }
+}
+
+/* ── Janus utility classes ─────────────────────────────────────────────── */
+
+@layer utilities {
+  /* Card with parchment-to-white surface */
+  .janus-card {
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--border);
+    background: var(--card);
+    backdrop-filter: blur(8px);
+    padding: 1.5rem;
+    transition: box-shadow 250ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .janus-card:hover {
+    box-shadow: 0 4px 24px color-mix(in oklch, #00EF8B 12%, transparent);
+    transform: translateY(-1px);
+  }
+
+  /* Primary action button */
+  .janus-button-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.625rem 1.25rem;
+    background: #00EF8B;
+    color: #0A1628;
+    font-weight: 600;
+    font-size: 0.875rem;
+    border-radius: var(--radius-lg);
+    border: none;
+    box-shadow: 0 2px 12px color-mix(in oklch, #00EF8B 35%, transparent);
+    transition: box-shadow 200ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+    cursor: pointer;
+  }
+  .janus-button-primary:hover {
+    box-shadow: 0 4px 20px color-mix(in oklch, #00EF8B 50%, transparent);
+    transform: translateY(-1px);
+  }
+  .janus-button-primary:active {
+    transform: translateY(0);
+  }
+
+  /* Shimmer divider — boundary motif */
+  .janus-divider-shimmer {
+    position: relative;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      #D4AF37 20%,
+      #00EF8B 50%,
+      #D4AF37 80%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: janus-shimmer 3s linear infinite;
+  }
+
+  /* Gold shimmer for ceremony-themed cards */
+  .janus-gold-shimmer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      105deg,
+      transparent 30%,
+      color-mix(in oklch, #D4AF37 20%, transparent) 50%,
+      transparent 70%
+    );
+    background-size: 200% 100%;
+    animation: janus-shimmer 2.5s linear infinite;
+    pointer-events: none;
+    border-radius: inherit;
+  }
+
+  /* Emerald glow on hover for primitive cards */
+  .janus-primitive-card {
+    position: relative;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--border);
+    background: var(--card);
+    padding: 1.25rem;
+    transition: box-shadow 250ms cubic-bezier(0.22, 1, 0.36, 1), transform 200ms cubic-bezier(0.22, 1, 0.36, 1), border-color 200ms ease;
+    overflow: hidden;
+  }
+  .janus-primitive-card:hover {
+    border-color: color-mix(in oklch, #00EF8B 40%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklch, #00EF8B 20%, transparent), 0 4px 20px color-mix(in oklch, #00EF8B 15%, transparent);
+    transform: translateY(-2px);
+  }
+
+  /* Gold-ceremony variant */
+  .janus-primitive-card.janus-ceremony {
+    transition: box-shadow 250ms cubic-bezier(0.22, 1, 0.36, 1), transform 200ms cubic-bezier(0.22, 1, 0.36, 1), border-color 200ms ease;
+  }
+  .janus-primitive-card.janus-ceremony:hover {
+    border-color: color-mix(in oklch, #D4AF37 50%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklch, #D4AF37 25%, transparent), 0 4px 20px color-mix(in oklch, #D4AF37 20%, transparent);
+  }
+
+  /* Copper accent for boundary pages (wrap / claim) */
+  .janus-copper-border {
+    border-color: color-mix(in oklch, #B45309 40%, transparent) !important;
+  }
+  .janus-copper-glow:focus-within {
+    box-shadow: 0 0 0 2px color-mix(in oklch, #B45309 25%, transparent);
+  }
+
+  /* Dark-theme input with emerald focus ring */
+  .janus-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    border-radius: var(--radius-lg);
+    border: 1px solid oklch(1 0 0 / 12%);
+    background: oklch(0.13 0.02 240);
+    color: oklch(0.95 0.01 90);
+    transition: border-color 200ms ease, box-shadow 200ms ease;
+    outline: none;
+  }
+  .janus-input:focus {
+    border-color: color-mix(in oklch, #00EF8B 50%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in oklch, #00EF8B 15%, transparent);
+  }
+  .janus-input::placeholder {
+    color: oklch(0.50 0.01 240);
+  }
+  .janus-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Page-level container with fade-in on mount */
+  .janus-page {
+    min-height: 100%;
+    animation: janus-page-in 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Purple accent for shielded ops */
+  .janus-purple-border {
+    border-color: color-mix(in oklch, #6B46C1 40%, transparent) !important;
+  }
+  .janus-purple-glow:focus-within {
+    box-shadow: 0 0 0 2px color-mix(in oklch, #6B46C1 20%, transparent);
+  }
+
+  /* Subtle hexagonal privacy pattern bg */
+  .janus-hex-bg {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100' viewBox='0 0 56 100'%3E%3Cpath d='M28 66L0 50V18L28 2l28 16v32z' fill='none' stroke='%2300EF8B' stroke-opacity='0.04' stroke-width='1'/%3E%3Cpath d='M28 100L0 84V52l28-16 28 16v32z' fill='none' stroke='%2300EF8B' stroke-opacity='0.04' stroke-width='1'/%3E%3C/svg%3E");
+  }
+}
+
+/* ── Keyframes ─────────────────────────────────────────────────────────── */
+
+@keyframes janus-shimmer {
+  0%   { background-position: -100% 0; }
+  100% { background-position: 100% 0; }
+}
+
+@keyframes janus-pulse-gold {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.6; }
+}
+
+@keyframes janus-float {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-4px); }
+}
+
+@keyframes janus-page-in {
+  0%   { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes janus-glyph-breathe {
+  0%, 100% { opacity: 0.7; }
+  50%       { opacity: 1; }
+}
+
+@keyframes janus-emerald-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, #00EF8B 0%, transparent); }
+  50%       { box-shadow: 0 0 0 8px color-mix(in oklch, #00EF8B 0%, transparent); }
+}
+
+@keyframes janus-coin-travel {
+  0%   { transform: translateX(0) scale(1); opacity: 1; }
+  40%  { transform: translateX(120px) scale(0.7); opacity: 0.5; }
+  60%  { transform: translateX(140px) scale(0.3); opacity: 0; }
+  61%  { transform: translateX(160px) scale(0.3); opacity: 0; }
+  80%  { transform: translateX(280px) scale(0.7); opacity: 0.4; }
+  100% { transform: translateX(320px) scale(1); opacity: 1; }
+}
+
+@keyframes janus-commit-form {
+  0%   { transform: scale(0.5) rotate(-20deg); opacity: 0; }
+  50%  { transform: scale(1.1) rotate(5deg); opacity: 0.8; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+@keyframes janus-commit-crack {
+  0%   { transform: scale(1); }
+  30%  { transform: scale(1.15) rotate(3deg); }
+  60%  { transform: scale(1.3) rotate(-3deg); opacity: 0.6; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+@keyframes janus-lock-close {
+  0%   { transform: rotateY(0deg); }
+  50%  { transform: rotateY(90deg); }
+  100% { transform: rotateY(0deg); }
+}

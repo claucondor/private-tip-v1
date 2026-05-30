@@ -212,11 +212,11 @@ export default function TipsPage() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-12">
+    <div className="max-w-2xl mx-auto px-4 py-12 janus-page">
       <div className="mb-8">
         <Link
           href="/"
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+          className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors"
         >
           <ArrowLeft className="w-4 h-4 mr-1" />
           Back
@@ -252,7 +252,7 @@ export default function TipsPage() {
       <div className="rounded-lg border border-[#00EF8B]/25 bg-[#00EF8B]/5 p-3 mb-6">
         <div className="flex items-start gap-2">
           <Shield className="w-4 h-4 text-[#00EF8B] shrink-0 mt-0.5" />
-          <p className="text-xs text-emerald-700 dark:text-emerald-300">
+          <p className="text-xs text-emerald-300">
             <strong>Amounts hidden. Memos encrypted. Balance restored automatically.</strong>{" "}
             Tips you receive arrive with an encrypted note that only your wallet can open. Open the app from any device with the same wallet and your history reconstructs itself.
             For tips you sent, the memo you wrote shows up from a local copy (this browser only).
@@ -338,7 +338,7 @@ export default function TipsPage() {
           and blinding factor. Shown only when there's something to receive. */}
       {!loading && received.length > 0 && activeFilter !== "sent" && (
         <div className="mb-4 rounded-lg border border-[#D4AF37]/30 bg-[#D4AF37]/8 p-4 flex items-center justify-between gap-3 shadow-[0_0_16px_color-mix(in_oklch,#D4AF37_10%,transparent)]">
-          <div className="text-xs text-amber-900 dark:text-[#D4AF37]">
+          <div className="text-xs text-[#D4AF37]">
             <strong>Ready to claim your treasure?</strong> All your received tips add up to one private balance — withdraw any amount, anytime.
           </div>
           <Button
