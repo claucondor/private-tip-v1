@@ -466,7 +466,7 @@ export default function ClientLayout({
                 PrivateTip
               </span>
               <span className="hidden sm:inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded border border-[#00EF8B]/30 bg-[#00EF8B]/5 text-[9px] uppercase tracking-wider text-[#00EF8B]/80 font-mono">
-                openjanus demo
+                Janus demo
               </span>
             </Link>
 
@@ -510,7 +510,7 @@ export default function ClientLayout({
               GitHub
             </a>
             <span className="text-foreground/30">·</span>
-            <span className="font-mono text-foreground/40">v0.5.4</span>
+            <span className="font-mono text-foreground/40">v0.5.5</span>
             <span className="text-foreground/30">·</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
               testnet

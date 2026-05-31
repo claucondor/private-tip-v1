@@ -420,7 +420,7 @@ function CompareTable() {
         <thead>
           <tr className="border-b border-border bg-muted/30">
             <th className="px-3 py-2.5 text-left font-semibold text-muted-foreground uppercase tracking-wider">Feature</th>
-            <th className="px-3 py-2.5 text-left font-semibold text-[#00EF8B] uppercase tracking-wider">openjanus</th>
+            <th className="px-3 py-2.5 text-left font-semibold text-[#00EF8B] uppercase tracking-wider">Janus</th>
             <th className="px-3 py-2.5 text-left font-semibold text-muted-foreground uppercase tracking-wider">Railgun</th>
             <th className="px-3 py-2.5 text-left font-semibold text-muted-foreground uppercase tracking-wider">Aztec</th>
           </tr>
@@ -644,7 +644,7 @@ function CeremonyBadge() {
     <div className="inline-flex flex-wrap items-center gap-3 bg-muted/40 border border-border rounded-xl px-4 py-3 my-6 text-xs font-mono">
       <span className="flex items-center gap-1.5 text-[#A78BFA]">
         <span className="w-2 h-2 rounded-full bg-[#A78BFA]" />
-        pot14
+        pot18
       </span>
       <span className="text-muted-foreground">·</span>
       <span className="flex items-center gap-1.5 text-[#D4AF37]">
@@ -952,7 +952,7 @@ function TabHowItWorks() {
         <P>
           PrivateTip charges a <Em>0.1% fee at the boundary</Em> — when you wrap FLOW into a
           shielded balance and when you unwrap back out. Shielded transfers between users are
-          free. The fee is hard-capped at 1% by the contract and flows to the openjanus admin
+          free. The fee is hard-capped at 1% by the contract and flows to the Janus admin
           COA.
         </P>
       </section>
@@ -984,7 +984,7 @@ function TabCompare() {
         </P>
         <AccountVsUTXO />
         <P>
-          openjanus chose the account model for v1. Flow&apos;s resource model maps cleanly to
+          Janus chose the account model for v1. Flow&apos;s resource model maps cleanly to
           &quot;one owned object per user.&quot; Stealth addresses can be layered on top without
           rewriting the commitment math.
         </P>
@@ -998,14 +998,14 @@ function TabCompare() {
           </div>
           <div>
             <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
-              openjanus vs Railgun vs Aztec
+              Janus vs Railgun vs Aztec
             </h2>
             <p className="text-xs text-muted-foreground">Feature-by-feature</p>
           </div>
         </div>
         <CompareTable />
         <Callout accent="emerald" label="Why Cadence cross-VM">
-          openjanus runs the ZK verifier as an EVM contract but wraps it in a Cadence
+          Janus runs the ZK verifier as an EVM contract but wraps it in a Cadence
           transaction — giving you Flow&apos;s resource model (no approvals, typed ownership)
           and EVM&apos;s mature proof toolchain in one atomic call. No other chain can do this.
         </Callout>
@@ -1037,7 +1037,7 @@ function TabArchitecture() {
         </P>
         <SignDeriveAnimation />
         <P>
-          openjanus&apos;s answer is <Em>sign-derive</Em>. Instead of a random key, you derive
+          Janus&apos;s answer is <Em>sign-derive</Em>. Instead of a random key, you derive
           one deterministically from a wallet signature over a fixed message. The same wallet,
           same message, always produces the same signature bytes — which go through HKDF-SHA256
           to produce your BabyJubJub MemoKey scalar.
