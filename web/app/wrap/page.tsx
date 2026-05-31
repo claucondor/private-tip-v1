@@ -42,6 +42,25 @@ import {
   type Point,
   type WrapSource,
 } from "@/lib/tip-actions";
+// Fee helpers — inline to avoid SDK rebuild dependency
+function computeNetWrap(grossWei: bigint, feeBps: number): bigint {
+  if (feeBps === 0) return grossWei;
+  return grossWei - (grossWei * BigInt(feeBps)) / 10000n;
+}
+function computeWrapFee(grossWei: bigint, feeBps: number): bigint {
+  if (feeBps === 0) return 0n;
+  return (grossWei * BigInt(feeBps)) / 10000n;
+}
+async function fetchFeeBps(contractAddress: string): Promise<number> {
+  try {
+    const { JsonRpcProvider, Interface } = await import("ethers");
+    const provider = new JsonRpcProvider("https://testnet.evm.nodes.onflow.org");
+    const iface = new Interface(["function feeBps() view returns (uint16)"]);
+    const result = await provider.call({ to: contractAddress, data: iface.encodeFunctionData("feeBps") });
+    const [bps] = iface.decodeFunctionResult("feeBps", result);
+    return Number(bps);
+  } catch { return 10; } // default 0.1%
+}
 import { encryptSnapshotToSelf } from "@/lib/recovery";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
@@ -110,6 +129,7 @@ export default function WrapPage() {
     newCommit: null,
   });
 
+  const [feeBps, setFeeBps] = useState<number>(10); // default 10 bps = 0.1%
   const [needsCoaSetup, setNeedsCoaSetup] = useState(false);
   const [needsMemoKey, setNeedsMemoKey] = useState(false);
   const [settingUpCoa, setSettingUpCoa] = useState(false);
@@ -150,6 +170,10 @@ export default function WrapPage() {
 
         const s = loadShieldedState(userAddress);
         if (s) setShielded(s);
+
+        // Read fee rate from chain (non-fatal)
+        const bps = await fetchFeeBps(JANUS_FLOW_EVM);
+        if (!cancelled) setFeeBps(bps);
 
         setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
       } catch (err) {
@@ -549,9 +573,28 @@ export default function WrapPage() {
               className="janus-input font-mono"
               disabled={isSubmitting}
             />
-            <p className="text-[10px] text-foreground/30 mt-1">
-              This amount is visible at the entry point. Once inside, every tip you send hides the amount.
-            </p>
+            {/* Fee disclosure */}
+            {(() => {
+              try {
+                const grossWei = parseFlowToWei(amount);
+                if (grossWei > 0n) {
+                  const netWei  = computeNetWrap(grossWei, feeBps);
+                  const feeWei  = computeWrapFee(grossWei, feeBps);
+                  const feePct  = feeBps / 100;
+                  return (
+                    <p className="text-[10px] text-foreground/40 mt-1">
+                      Wrapping {amount} FLOW → <span className="text-[#00EF8B]/70">{formatWeiToFlow(netWei, 4)} FLOW</span> credited
+                      {" "}(<span className="text-foreground/50">{formatWeiToFlow(feeWei, 4)} FLOW fee, {feePct}%</span>)
+                    </p>
+                  );
+                }
+              } catch { /* invalid amount */ }
+              return (
+                <p className="text-[10px] text-foreground/30 mt-1">
+                  This amount is visible at the entry point. A {feeBps / 100}% fee applies. Once inside, every tip you send hides the amount.
+                </p>
+              );
+            })()}
           </div>
 
           <motion.button

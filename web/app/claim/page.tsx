@@ -32,6 +32,25 @@ import {
   JANUS_FLOW_EVM,
   type Point,
 } from "@/lib/tip-actions";
+// Fee helpers — inline to avoid SDK rebuild dependency
+function computeNetUnwrap(claimedWei: bigint, feeBps: number): bigint {
+  if (feeBps === 0) return claimedWei;
+  return claimedWei - (claimedWei * BigInt(feeBps)) / 10000n;
+}
+function computeUnwrapFee(claimedWei: bigint, feeBps: number): bigint {
+  if (feeBps === 0) return 0n;
+  return (claimedWei * BigInt(feeBps)) / 10000n;
+}
+async function fetchFeeBps(contractAddress: string): Promise<number> {
+  try {
+    const { JsonRpcProvider, Interface } = await import("ethers");
+    const provider = new JsonRpcProvider("https://testnet.evm.nodes.onflow.org");
+    const iface = new Interface(["function feeBps() view returns (uint16)"]);
+    const result = await provider.call({ to: contractAddress, data: iface.encodeFunctionData("feeBps") });
+    const [bps] = iface.decodeFunctionResult("feeBps", result);
+    return Number(bps);
+  } catch { return 10; } // default 0.1%
+}
 import { encryptSnapshotToSelf } from "@/lib/recovery";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
@@ -82,6 +101,7 @@ export default function ClaimPage() {
   const [coaHex, setCoaHex] = useState<string | null>(null);
   const [chainCommit, setChainCommit] = useState<Point | null>(null);
   const [amountFlow, setAmountFlow] = useState("");
+  const [feeBps, setFeeBps] = useState<number>(10); // default 10 bps = 0.1%
   const [claimState, setClaimState] = useState<ClaimState>({
     status: "loading",
     error: null,
@@ -110,10 +130,14 @@ export default function ClaimPage() {
         const s = loadShieldedState(userAddress);
         if (!s) {
           setClaimState({ status: "needs_state", error: null, txId: null, unwrappedFlow: null });
-          return;
+        } else {
+          setShielded(s);
+          setClaimState({ status: "ready", error: null, txId: null, unwrappedFlow: null });
         }
-        setShielded(s);
-        setClaimState({ status: "ready", error: null, txId: null, unwrappedFlow: null });
+
+        // Read fee rate from chain (non-fatal)
+        const bps = await fetchFeeBps(JANUS_FLOW_EVM);
+        if (!cancelled) setFeeBps(bps);
       } catch (err) {
         if (!cancelled) {
           setClaimState({
@@ -339,9 +363,29 @@ export default function ClaimPage() {
               className="janus-input"
               disabled={isSubmitting || !shielded}
             />
-            <p className="text-[10px] text-foreground/30 mt-1">
-              This amount becomes visible when you withdraw. For maximum privacy, send the FLOW to a fresh wallet afterwards.
-            </p>
+            {/* Fee disclosure */}
+            {(() => {
+              try {
+                const claimedWei = parseFlowToWei(amountFlow);
+                if (claimedWei > 0n) {
+                  const netWei  = computeNetUnwrap(claimedWei, feeBps);
+                  const feeWei  = computeUnwrapFee(claimedWei, feeBps);
+                  const feePct  = feeBps / 100;
+                  return (
+                    <p className="text-[10px] text-foreground/40 mt-1">
+                      Withdrawing {amountFlow} FLOW → you receive{" "}
+                      <span className="text-[#00EF8B]/70">{formatWeiToFlow(netWei, 4)} FLOW</span>
+                      {" "}(<span className="text-foreground/50">{formatWeiToFlow(feeWei, 4)} FLOW fee, {feePct}%</span>)
+                    </p>
+                  );
+                }
+              } catch { /* invalid amount */ }
+              return (
+                <p className="text-[10px] text-foreground/30 mt-1">
+                  A {feeBps / 100}% fee applies. For maximum privacy, send the FLOW to a fresh wallet afterwards.
+                </p>
+              );
+            })()}
           </div>
 
           <motion.button
