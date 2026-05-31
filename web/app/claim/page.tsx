@@ -51,7 +51,6 @@ async function fetchFeeBps(contractAddress: string): Promise<number> {
     return Number(bps);
   } catch { return 10; } // default 0.1%
 }
-import { encryptSnapshotToSelf } from "@/lib/recovery";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -186,12 +185,22 @@ export default function ClaimPage() {
     try {
       setClaimState({ status: "submitting", error: null, txId: null, unwrappedFlow: null });
 
+      // v0.5.6: fetch own pubkey BEFORE calling unwrapAction so the snapshot
+      // can be encrypted internally (after proof gen, when newBlinding is known)
+      // and embedded in the UnwrapWithSnapshot event.
+      let selfMemoPubkey: { x: bigint; y: bigint } | undefined;
+      try {
+        const pk = await getRecipientMemoPubkey(userAddress);
+        if (pk) selfMemoPubkey = pk;
+      } catch { /* non-fatal — unwrap proceeds, recovery just won't have this snap */ }
+
       const result = await unwrapAction({
         claimedAmountWei: amountWei,
         recipientEvmHex: coaHex,
         oldBalanceWei: oldBalance,
         oldBlinding: BigInt(shielded.blinding),
         toCadenceVault: true,
+        selfMemoPubkey,
       });
 
       const newState: ShieldedState = {
@@ -200,17 +209,6 @@ export default function ClaimPage() {
       };
       saveShieldedState(userAddress, newState);
       setShielded(newState);
-
-      try {
-        const myPubkey = await getRecipientMemoPubkey(userAddress);
-        if (myPubkey) {
-          const snap = await encryptSnapshotToSelf(
-            { balance: result.newBalanceWei, blinding: result.newBlinding },
-            myPubkey
-          );
-          void snap;
-        }
-      } catch { /* Non-fatal */ }
 
       const c = await getCommitment(coaHex);
       setChainCommit(c);

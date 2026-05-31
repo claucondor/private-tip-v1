@@ -729,6 +729,14 @@ export interface SendShieldedTipParams {
   ephPubkeyX?: bigint;
   /** v0.5.2: ephemeral pubkey Y for snapshot decryption. */
   ephPubkeyY?: bigint;
+  /**
+   * v0.5.6: Sender's own MemoKey pubkey. When provided, sendShieldedTipAction
+   * will encrypt the post-send (newBalance, newBlinding) snapshot INTERNALLY,
+   * immediately after proof generation (when transferBlinding is first known),
+   * and embed it in the ShieldedTransferWithSnapshot event for recovery.
+   * selfMemoPubkey takes precedence over any pre-computed encryptedSnapshot.
+   */
+  selfMemoPubkey?: Point;
 }
 
 export interface SendShieldedTipResult {
@@ -750,6 +758,9 @@ export async function sendShieldedTipAction(
     oldBlinding,
     memo,
     recipientMemoPubkey,
+    selfMemoPubkey,
+  } = params;
+  let {
     encryptedSnapshot,
     ephPubkeyX,
     ephPubkeyY,
@@ -780,6 +791,36 @@ export async function sendShieldedTipAction(
   const publicInputs = proofRes.publicInputs.map((s) => BigInt(s));
   const proof = proofRes.proof.map((s) => BigInt(s));
   const transferBlinding = BigInt(proofRes.transferBlinding);
+
+  // v0.5.6 snapshot fix: now that transferBlinding is known from the proof, we
+  // can compute newBlinding = oldBlinding - transferBlinding and encrypt the
+  // sender's post-send residual snapshot to their own MemoKey pubkey BEFORE
+  // building calldata. selfMemoPubkey takes precedence over any pre-computed
+  // encryptedSnapshot passed by the caller.
+  if (selfMemoPubkey) {
+    try {
+      const newBalanceWei = oldBalanceWei - transferAmountWei;
+      const newBlinding = BigInt(proofRes.newBlinding);
+      const res = await fetch("/api/note/encrypt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: newBalanceWei.toString(),
+          blinding: newBlinding.toString(),
+          recipientPubkey: {
+            x: selfMemoPubkey.x.toString(),
+            y: selfMemoPubkey.y.toString(),
+          },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        encryptedSnapshot = new Uint8Array(data.ciphertext as number[]);
+        ephPubkeyX = BigInt(data.ephemeralPubkey.x);
+        ephPubkeyY = BigInt(data.ephemeralPubkey.y);
+      }
+    } catch { /* non-fatal: tx still goes through, recovery will just fail for this event */ }
+  }
 
   // 2. Build EVM calldata (v0.5.2: pass snapshot params for recovery event).
   const calldataHex = await buildShieldedTransferCalldata(
@@ -864,6 +905,17 @@ export interface UnwrapParams {
   ephPubkeyX?: bigint;
   /** v0.5.2: ephemeral pubkey Y for snapshot decryption. */
   ephPubkeyY?: bigint;
+  /**
+   * v0.5.6: Caller's own MemoKey pubkey. When provided, unwrapAction will
+   * encrypt the post-unwrap (newBalance, newBlinding) snapshot INTERNALLY,
+   * immediately after proof generation (when newBlinding is first known),
+   * and pass it to buildUnwrapCalldata so the contract emits a decryptable
+   * UnwrapWithSnapshot event. This is the correct fix for the bug where the
+   * caller computed the snapshot AFTER the tx (too late) and discarded it.
+   * If both selfMemoPubkey and encryptedSnapshot are provided, selfMemoPubkey
+   * takes precedence (internal encryption is always fresh and correct).
+   */
+  selfMemoPubkey?: Point;
 }
 
 export interface UnwrapResult {
@@ -880,6 +932,9 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
     oldBalanceWei,
     oldBlinding,
     toCadenceVault = false,
+    selfMemoPubkey,
+  } = params;
+  let {
     encryptedSnapshot,
     ephPubkeyX,
     ephPubkeyY,
@@ -906,6 +961,37 @@ export async function unwrapAction(params: UnwrapParams): Promise<UnwrapResult> 
   const amountProof = amountRes.proof.map((s) => BigInt(s));
   const transferPublicInputs = transferRes.publicInputs.map((s) => BigInt(s));
   const transferProof = transferRes.proof.map((s) => BigInt(s));
+
+  // v0.5.6 snapshot fix: now that proofs are generated, newBlinding is known.
+  // Encrypt the post-unwrap (balance, blinding) snapshot to selfMemoPubkey so
+  // the contract emits a decryptable UnwrapWithSnapshot event.
+  // Uses /api/note/encrypt (server-side) to avoid pulling circomlibjs into the
+  // client bundle. selfMemoPubkey takes precedence over any pre-computed
+  // encryptedSnapshot passed by the caller.
+  if (selfMemoPubkey) {
+    try {
+      const newBalanceWei = oldBalanceWei - claimedAmountWei;
+      const newBlinding = BigInt(transferRes.newBlinding);
+      const res = await fetch("/api/note/encrypt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: newBalanceWei.toString(),
+          blinding: newBlinding.toString(),
+          recipientPubkey: {
+            x: selfMemoPubkey.x.toString(),
+            y: selfMemoPubkey.y.toString(),
+          },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        encryptedSnapshot = new Uint8Array(data.ciphertext as number[]);
+        ephPubkeyX = BigInt(data.ephemeralPubkey.x);
+        ephPubkeyY = BigInt(data.ephemeralPubkey.y);
+      }
+    } catch { /* non-fatal: tx still goes through, recovery will just fail for this event */ }
+  }
 
   // v0.5.2: pass snapshot params so JanusFlow emits UnwrapWithSnapshot event.
   const calldataHex = await buildUnwrapCalldata(

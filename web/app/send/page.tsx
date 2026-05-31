@@ -37,7 +37,6 @@ import {
   getRecipientMemoPubkey,
   type Point,
 } from "@/lib/tip-actions";
-import { encryptSnapshotToSelf } from "@/lib/recovery";
 import { ShieldedNoteEncrypt } from "@/components/animations/ShieldedNoteEncrypt";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -234,13 +233,15 @@ export default function SendTipPage() {
     try {
       setSendState({ status: "submitting", error: null, txId: null, newCommit: null });
 
-      let snapshotCt: Uint8Array | undefined;
-      let snapshotEphX: bigint | undefined;
-      let snapshotEphY: bigint | undefined;
-      let myPubkeyForSnap: { x: bigint; y: bigint } | null = null;
+      // v0.5.6: fetch own pubkey BEFORE calling sendShieldedTipAction so the
+      // sender's post-send residual snapshot can be encrypted internally (after
+      // proof gen, when transferBlinding is known) and embedded in the
+      // ShieldedTransferWithSnapshot event for cross-device recovery.
+      let selfMemoPubkey: { x: bigint; y: bigint } | undefined;
       try {
-        myPubkeyForSnap = await getRecipientMemoPubkey(userAddress);
-      } catch { /* non-fatal */ }
+        const pk = await getRecipientMemoPubkey(userAddress);
+        if (pk) selfMemoPubkey = pk;
+      } catch { /* non-fatal — send proceeds, recovery just won't have this snap */ }
 
       const result = await sendShieldedTipAction({
         recipientFlowAddr: recipient,
@@ -250,20 +251,8 @@ export default function SendTipPage() {
         oldBlinding: BigInt(shielded.blinding),
         memo: memo || undefined,
         recipientMemoPubkey,
+        selfMemoPubkey,
       });
-
-      if (myPubkeyForSnap) {
-        try {
-          const snap = await encryptSnapshotToSelf(
-            { balance: result.newBalanceWei, blinding: result.newBlinding },
-            myPubkeyForSnap
-          );
-          snapshotCt = snap.ciphertext;
-          snapshotEphX = snap.ephPubkey.x;
-          snapshotEphY = snap.ephPubkey.y;
-        } catch { /* non-fatal */ }
-      }
-      void snapshotCt; void snapshotEphX; void snapshotEphY;
 
       const newState: ShieldedState = {
         balanceWei: result.newBalanceWei.toString(),
