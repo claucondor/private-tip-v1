@@ -15,7 +15,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Key, RefreshCw, AlertTriangle, Menu, X } from "lucide-react";
 import { flowConfig } from "@/lib/fcl-config";
 import ConnectWallet from "@/components/ConnectWallet";
-import flowJSON from "../../flow.json";
+// Copy of /flow.json bundled inside web/ so Vercel's build root (web/) can resolve it.
+// Keep web/flow.json in sync with /flow.json when contracts/aliases change.
+import flowJSON from "../flow.json";
 
 // ---------------------------------------------------------------------------
 // Recovery banner — bidirectional sync detector.
