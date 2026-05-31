@@ -353,10 +353,11 @@ export default function WrapPage() {
 
       setWrapState({
         status: "success", error: null, txId: result.txId,
-        wrappedFlow: formatWeiToFlow(amountWei, 4), newCommit: result.commitment,
+        // Display NET amount (what actually got credited to the slot post-fee), not gross.
+        wrappedFlow: formatWeiToFlow(netAmountWei, 4), newCommit: result.commitment,
       });
       toast.success("Wrap successful!", {
-        description: `${formatWeiToFlow(amountWei, 4)} FLOW now in your shielded slot.`,
+        description: `${formatWeiToFlow(netAmountWei, 4)} FLOW now in your shielded slot.`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Wrap failed";
