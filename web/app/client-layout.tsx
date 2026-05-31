@@ -436,6 +436,8 @@ export default function ClientLayout({
         <span className="font-mono">⬡</span>{" "}
         <span className="hidden sm:inline">Testnet Mode — </span>
         No real FLOW is used. For demonstration only.
+        <span className="hidden sm:inline"> · Audit in progress — not for production.</span>
+        <span className="sm:hidden"> · Audit in progress.</span>
       </div>
 
       {/* Nav bar — Fraunces wordmark */}
@@ -486,6 +488,29 @@ export default function ClientLayout({
 
       {/* Main content area */}
       <main className="flex-1">{children}</main>
+
+      {/* Footer */}
+      <footer className="w-full border-t border-white/8 bg-[#0A1628]/60 px-4 py-4 text-[11px] text-foreground/50">
+        <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
+          <span className="font-mono">Privacy, not anonymity.</span>
+          <div className="flex items-center gap-3">
+            <a
+              href="https://github.com/claucondor/private-tip"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-foreground transition-colors"
+            >
+              GitHub
+            </a>
+            <span className="text-foreground/30">·</span>
+            <span className="font-mono text-foreground/40">v0.5.4</span>
+            <span className="text-foreground/30">·</span>
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
+              testnet
+            </span>
+          </div>
+        </div>
+      </footer>
 
       {/* Toast notifications */}
       <Toaster

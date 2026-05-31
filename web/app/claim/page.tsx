@@ -388,6 +388,12 @@ export default function ClaimPage() {
             })()}
           </div>
 
+          {userAddress && (
+            <div className="text-xs text-foreground/60 mb-2">
+              Withdraws to: <span className="font-mono">{userAddress}</span>
+            </div>
+          )}
+
           <motion.button
             onClick={handleUnwrap}
             disabled={isSubmitting || !shielded || !amountFlow}

@@ -1,11 +1,11 @@
 /// /learn — Theory explainer for the openjanus privacy stack.
-/// Rebuilt with openjanus design system: Fraunces headings, Janus palette,
-/// framer-motion entrance animations, interactive crypto illustrations.
+/// Rebuilt with tabbed layout: How it works / Compare / Architecture / Roadmap
+/// Framer-motion AnimatePresence tab transitions, URL hash routing, sticky tab nav.
 
 "use client";
 
-import { useState, useRef, useCallback } from "react";
-import { motion, useReducedMotion, AnimatePresence } from "framer-motion";
+import { useState, useCallback, useEffect } from "react";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   Lock,
   Eye,
@@ -19,75 +19,29 @@ import {
   RefreshCw,
   Cpu,
   GitBranch,
+  CheckCircle2,
+  Clock,
+  FlaskConical,
+  Coins,
 } from "lucide-react";
 import Link from "next/link";
+import { ShieldedNoteLifecycle } from "@/components/animations/ShieldedNoteLifecycle";
 
-// ── Motion config ───────────────────────────────────────────────────────────
+// ── Motion helpers ───────────────────────────────────────────────────────────
 
 const EASE_OUT_EXPO = [0.22, 1, 0.36, 1] as const;
 
 function useFadeIn(delay = 0) {
   const reduced = useReducedMotion();
-  if (reduced) return { opacity: 1 };
+  if (reduced) return {};
   return {
-    initial: { opacity: 0, y: 24 },
-    whileInView: { opacity: 1, y: 0 },
-    viewport: { once: true, margin: "-80px" },
-    transition: { duration: 0.55, ease: EASE_OUT_EXPO, delay },
+    initial: { opacity: 0, y: 18 },
+    animate: { opacity: 1, y: 0 },
+    transition: { duration: 0.5, ease: EASE_OUT_EXPO, delay },
   };
 }
 
-// ── Section wrapper ─────────────────────────────────────────────────────────
-
-interface SectionProps {
-  icon: React.ReactNode;
-  iconBg: string;
-  readTime: string;
-  heading: string;
-  subheading: string;
-  children: React.ReactNode;
-  id: string;
-}
-
-function Section({
-  icon,
-  iconBg,
-  readTime,
-  heading,
-  subheading,
-  children,
-  id,
-}: SectionProps) {
-  const anim = useFadeIn();
-  return (
-    <motion.section
-      id={id}
-      {...anim}
-      className="w-full max-w-3xl mx-auto px-4 py-12 border-b border-border last:border-0"
-    >
-      <div className="flex items-start gap-4 mb-6">
-        <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ring-1 ${iconBg}`}>
-          {icon}
-        </div>
-        <div>
-          <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold">
-            {readTime}
-          </span>
-          <h2
-            className="text-xl sm:text-2xl font-bold leading-tight mt-0.5"
-            style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}
-          >
-            {heading}
-          </h2>
-          <p className="text-sm text-muted-foreground mt-1">{subheading}</p>
-        </div>
-      </div>
-      <div>{children}</div>
-    </motion.section>
-  );
-}
-
-// ── Typography helpers ──────────────────────────────────────────────────────
+// ── Typography helpers ───────────────────────────────────────────────────────
 
 function P({ children }: { children: React.ReactNode }) {
   return (
@@ -104,7 +58,7 @@ function Em({ children }: { children: React.ReactNode }) {
 function MathLine({ children }: { children: React.ReactNode }) {
   return (
     <div className="my-4 flex justify-center">
-      <span className="inline-block font-mono text-sm bg-[#6B46C1]/10 text-[#A78BFA] dark:text-purple-200 border border-[#6B46C1]/25 px-4 py-2 rounded-lg">
+      <span className="inline-block font-mono text-sm bg-[#A78BFA]/10 text-[#A78BFA] border border-[#A78BFA]/25 px-4 py-2 rounded-lg">
         {children}
       </span>
     </div>
@@ -123,15 +77,15 @@ function Callout({
   const styles: Record<string, string> = {
     amber:   "bg-amber-50/60 dark:bg-amber-950/30 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100",
     emerald: "bg-[#00EF8B]/8 border-[#00EF8B]/30 text-emerald-900 dark:text-emerald-100",
-    purple:  "bg-[#6B46C1]/8 border-[#6B46C1]/30 text-[#A78BFA] dark:text-purple-200",
+    purple:  "bg-[#A78BFA]/8 border-[#A78BFA]/30 text-[#A78BFA]",
     blue:    "bg-blue-50/60 dark:bg-blue-950/30 border-blue-300 dark:border-blue-700 text-blue-900 dark:text-blue-100",
     gold:    "bg-[#D4AF37]/8 border-[#D4AF37]/30 text-amber-900 dark:text-[#D4AF37]",
-    copper:  "bg-[#B45309]/8 border-[#B45309]/30 text-[#FBBF24] dark:text-amber-300",
+    copper:  "bg-[#FBBF24]/8 border-[#FBBF24]/30 text-[#FBBF24]",
   };
   const labelStyles: Record<string, string> = {
     amber:   "text-amber-700 dark:text-amber-300",
     emerald: "text-[#00EF8B]",
-    purple:  "text-[#A78BFA] dark:text-purple-300",
+    purple:  "text-[#A78BFA]",
     blue:    "text-blue-700 dark:text-blue-300",
     gold:    "text-[#D4AF37]",
     copper:  "text-[#FBBF24]",
@@ -146,20 +100,18 @@ function Callout({
   );
 }
 
-// ── TOC ─────────────────────────────────────────────────────────────────────
+// ── Tab definition ────────────────────────────────────────────────────────────
 
-const TOC_ITEMS = [
-  { id: "public-chains",    label: "The problem" },
-  { id: "pedersen",         label: "Pedersen commitment" },
-  { id: "account-vs-utxo",  label: "Account vs UTXO" },
-  { id: "shielded-note",    label: "ShieldedNote" },
-  { id: "sign-derive",      label: "Sign-derive" },
-  { id: "boundary",         label: "The boundary" },
-  { id: "ceremony",         label: "Ceremony" },
-  { id: "roadmap",          label: "What's next" },
+type TabId = "how-it-works" | "compare" | "architecture" | "roadmap";
+
+const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
+  { id: "how-it-works",  label: "How it works",  icon: <BookOpen className="w-3.5 h-3.5" /> },
+  { id: "compare",       label: "Compare",        icon: <Layers className="w-3.5 h-3.5" /> },
+  { id: "architecture",  label: "Architecture",   icon: <Cpu className="w-3.5 h-3.5" /> },
+  { id: "roadmap",       label: "Roadmap",        icon: <GitBranch className="w-3.5 h-3.5" /> },
 ];
 
-// ── Section 1 illustration — public vs private toggle ──────────────────────
+// ── Animations — unchanged from original, inline ─────────────────────────────
 
 function PublicPrivateToggle() {
   const [isPrivate, setIsPrivate] = useState(false);
@@ -176,7 +128,7 @@ function PublicPrivateToggle() {
           onClick={() => setIsPrivate((p) => !p)}
           className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
             isPrivate
-              ? "bg-[#6B46C1] text-white"
+              ? "bg-[#A78BFA]/25 text-[#A78BFA] border border-[#A78BFA]/40"
               : "bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-200"
           }`}
         >
@@ -202,7 +154,7 @@ function PublicPrivateToggle() {
                 animate={{ opacity: 1, scale: 1 }}
                 exit={reduced ? {} : { opacity: 0, scale: 0.9 }}
                 transition={{ duration: 0.3 }}
-                className="px-2 py-0.5 rounded bg-[#6B46C1]/20 text-[#A78BFA] dark:text-purple-300 blur-[2px] select-none"
+                className="px-2 py-0.5 rounded bg-[#A78BFA]/20 text-[#A78BFA] blur-[2px] select-none"
               >
                 0x4e2f9c3d7a1b8e45f23c9d1a7b3e5f2a
               </motion.span>
@@ -229,7 +181,7 @@ function PublicPrivateToggle() {
                 initial={reduced ? {} : { opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={reduced ? {} : { opacity: 0 }}
-                className="text-[#6B46C1]/60 blur-[2px] select-none"
+                className="text-[#A78BFA]/60 blur-[2px] select-none"
               >
                 {"{encrypted ECIES blob}"}
               </motion.span>
@@ -256,14 +208,10 @@ function PublicPrivateToggle() {
   );
 }
 
-// ── Section 2 illustration — Pedersen curve interactive ────────────────────
-
 function PedersenInteractive() {
   const [value, setValue] = useState("5");
   const [blinding, setBlinding] = useState("42");
 
-  // Fake-but-plausible commitment visualization:
-  // pointX = (parseInt(value)*37 + parseInt(blinding)*131) % 360
   const v = Math.abs(parseInt(value) || 0) % 1000;
   const b = Math.abs(parseInt(blinding) || 0) % 10000;
   const angle = ((v * 37 + b * 131) % 360) * (Math.PI / 180);
@@ -274,8 +222,8 @@ function PedersenInteractive() {
   const hue = (v * 13 + b * 7) % 360;
 
   return (
-    <div className="my-6 rounded-xl border border-[#6B46C1]/20 bg-[#6B46C1]/5 p-4">
-      <p className="text-xs font-semibold text-[#A78BFA] dark:text-purple-300 uppercase tracking-wider mb-3">
+    <div className="my-6 rounded-xl border border-[#A78BFA]/20 bg-[#A78BFA]/5 p-4">
+      <p className="text-xs font-semibold text-[#A78BFA] uppercase tracking-wider mb-3">
         Interactive: watch the commitment point move
       </p>
       <div className="flex flex-col sm:flex-row gap-4">
@@ -290,7 +238,7 @@ function PedersenInteractive() {
               onChange={(e) => setValue(e.target.value)}
               min="0"
               max="999"
-              className="w-full px-3 py-2 text-sm font-mono border border-[#6B46C1]/30 rounded bg-background focus:outline-none focus:ring-2 focus:ring-[#6B46C1]/30"
+              className="w-full px-3 py-2 text-sm font-mono border border-[#A78BFA]/30 rounded bg-background focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/30"
             />
           </div>
           <div>
@@ -303,30 +251,25 @@ function PedersenInteractive() {
               onChange={(e) => setBlinding(e.target.value)}
               min="0"
               max="9999"
-              className="w-full px-3 py-2 text-sm font-mono border border-[#6B46C1]/30 rounded bg-background focus:outline-none focus:ring-2 focus:ring-[#6B46C1]/30"
+              className="w-full px-3 py-2 text-sm font-mono border border-[#A78BFA]/30 rounded bg-background focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/30"
             />
           </div>
-          <div className="rounded-lg bg-[#6B46C1]/10 px-3 py-2 text-xs font-mono text-[#A78BFA] dark:text-purple-200">
+          <div className="rounded-lg bg-[#A78BFA]/10 px-3 py-2 text-xs font-mono text-[#A78BFA]">
             C = a·G + b·H
           </div>
           <p className="text-[10px] text-muted-foreground">
             Same amount, different blinding → completely different point. This is perfect hiding.
           </p>
         </div>
-        {/* SVG elliptic curve visualization */}
         <div className="shrink-0 flex items-center justify-center">
           <svg width="260" height="140" viewBox="0 0 260 140" className="overflow-visible">
-            {/* Curve (sinusoidal approximation of BabyJub shape) */}
-            <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="none" stroke="#6B46C1" strokeOpacity="0.25" strokeWidth="1.5" />
-            {/* Grid */}
+            <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="none" stroke="#A78BFA" strokeOpacity="0.25" strokeWidth="1.5" />
             <line x1="30" y1={cy} x2={cx+rx+30} y2={cy} stroke="currentColor" strokeOpacity="0.1" strokeWidth="0.5" />
             <line x1={cx} y1="20" x2={cx} y2={cy+ry+30} stroke="currentColor" strokeOpacity="0.1" strokeWidth="0.5" />
-            {/* Fixed generators */}
             <circle cx={cx + rx} cy={cy} r="3.5" fill="#00EF8B" opacity="0.7" />
             <text x={cx + rx + 5} y={cy + 4} fontSize="8" fill="#00EF8B" opacity="0.8">G</text>
             <circle cx={cx - rx} cy={cy} r="3.5" fill="#D4AF37" opacity="0.7" />
             <text x={cx - rx - 12} y={cy + 4} fontSize="8" fill="#D4AF37" opacity="0.8">H</text>
-            {/* Commitment point */}
             <motion.circle
               cx={px}
               cy={py}
@@ -347,7 +290,6 @@ function PedersenInteractive() {
               transition={{ type: "spring", stiffness: 180, damping: 22 }}
             />
             <text x={cx+5} y="15" fontSize="8" fill="currentColor" opacity="0.5">BabyJubJub curve</text>
-            {/* Label C */}
             <motion.text
               fontSize="9"
               fill={`hsl(${hue}, 70%, 45%)`}
@@ -363,8 +305,6 @@ function PedersenInteractive() {
     </div>
   );
 }
-
-// ── Section 3 illustration — Account vs UTXO ───────────────────────────────
 
 function AccountVsUTXO() {
   const [step, setStep] = useState(0);
@@ -390,7 +330,7 @@ function AccountVsUTXO() {
               onClick={() => setStep(i)}
               className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
                 step === i
-                  ? "bg-[#6B46C1] text-white"
+                  ? "bg-[#A78BFA]/25 text-[#A78BFA] border border-[#A78BFA]/40"
                   : "bg-background text-muted-foreground hover:bg-muted"
               }`}
             >
@@ -400,7 +340,6 @@ function AccountVsUTXO() {
         </div>
       </div>
       <div className="grid grid-cols-2 divide-x divide-border">
-        {/* Account model */}
         <div className="p-4">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-3">Account model</p>
           <div className="flex flex-col items-center gap-2">
@@ -425,11 +364,10 @@ function AccountVsUTXO() {
             </p>
           </div>
         </div>
-        {/* UTXO model */}
         <div className="p-4">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-3">UTXO model</p>
           <div className="flex flex-col items-center gap-2">
-            <div className="w-full min-h-[80px] rounded-lg border border-[#6B46C1]/30 bg-[#6B46C1]/5 px-3 py-3 flex flex-wrap gap-2 items-center justify-center">
+            <div className="w-full min-h-[80px] rounded-lg border border-[#A78BFA]/30 bg-[#A78BFA]/5 px-3 py-3 flex flex-wrap gap-2 items-center justify-center">
               <AnimatePresence mode="popLayout">
                 {utxoCoins[step].length === 0 ? (
                   <motion.p
@@ -449,7 +387,7 @@ function AccountVsUTXO() {
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.6 }}
                       transition={{ type: "spring", stiffness: 200, damping: 20 }}
-                      className="w-14 h-14 rounded-full border-2 border-[#6B46C1]/40 bg-[#6B46C1]/15 flex items-center justify-center text-xs font-bold text-[#A78BFA] dark:text-purple-300"
+                      className="w-14 h-14 rounded-full border-2 border-[#A78BFA]/40 bg-[#A78BFA]/15 flex items-center justify-center text-xs font-bold text-[#A78BFA]"
                     >
                       {coin.v}
                     </motion.div>
@@ -467,13 +405,11 @@ function AccountVsUTXO() {
   );
 }
 
-// ── Section 3 compare table (kept from original) ───────────────────────────
-
 function CompareTable() {
   const rows = [
     { feature: "Balance model",      openjanus: "One accumulated commitment",         railgun: "Many unspent notes (UTXOs)",       aztec: "One accumulated commitment" },
     { feature: "Amount hiding",      openjanus: "Yes — Pedersen + Groth16",           railgun: "Yes — Groth16 (UTXO-per-note)",    aztec: "Yes — Honk / UltraHonk" },
-    { feature: "Sender/recipient",   openjanus: "Visible (v0.5) → stealth v0.6",      railgun: "Hidden (stealth + UTXO set)",      aztec: "Hidden (account abstraction)" },
+    { feature: "Sender/recipient",   openjanus: "Visible today → stealth on roadmap", railgun: "Hidden (stealth + UTXO set)",      aztec: "Hidden (account abstraction)" },
     { feature: "Pattern hiding",     openjanus: "Partial (commit changes visible)",    railgun: "Strong (UTXO set membership)",     aztec: "Strong" },
     { feature: "Flow ergonomics",    openjanus: "Native (resource model fits)",        railgun: "N/A — Ethereum only",              aztec: "N/A — L2 rollup" },
     { feature: "Tx complexity",      openjanus: "Low — one Cadence cross-VM tx",       railgun: "High — Merkle witnesses",          aztec: "High — kernel circuits" },
@@ -504,83 +440,6 @@ function CompareTable() {
   );
 }
 
-// ── Section 4 illustration — ShieldedNote flight ───────────────────────────
-
-function ShieldedNoteAnimation() {
-  const [opened, setOpened] = useState(false);
-  const reduced = useReducedMotion();
-
-  return (
-    <div className="my-6 rounded-xl border border-[#00EF8B]/25 bg-[#00EF8B]/5 p-4">
-      <p className="text-xs font-semibold text-[#00EF8B] uppercase tracking-wider mb-4">
-        ShieldedNote lifecycle
-      </p>
-      <div className="flex items-center justify-between gap-2">
-        {/* Sender side */}
-        <div className="flex flex-col items-center gap-1 text-center">
-          <div className="w-10 h-10 rounded-full bg-[#6B46C1]/15 border border-[#6B46C1]/30 flex items-center justify-center text-sm">
-            🧑
-          </div>
-          <p className="text-[10px] text-muted-foreground">Sender</p>
-          <div className="text-[10px] font-mono bg-[#6B46C1]/10 rounded px-2 py-1 text-[#A78BFA] dark:text-purple-300">
-            C = a·G + b·H
-          </div>
-        </div>
-
-        {/* Animated envelope */}
-        <div className="flex-1 flex items-center justify-center">
-          <motion.div
-            animate={reduced ? {} : { x: opened ? 40 : 0 }}
-            transition={{ type: "spring", stiffness: 120, damping: 20 }}
-            className="text-2xl cursor-pointer select-none"
-            onClick={() => setOpened(!opened)}
-            title="Click to open"
-          >
-            {opened ? "📬" : "📩"}
-          </motion.div>
-          <div className="flex-1 h-px border-t border-dashed border-[#00EF8B]/40 mx-2" />
-        </div>
-
-        {/* Recipient side */}
-        <div className="flex flex-col items-center gap-1 text-center">
-          <div className="w-10 h-10 rounded-full bg-[#00EF8B]/15 border border-[#00EF8B]/30 flex items-center justify-center text-sm">
-            🧑‍💻
-          </div>
-          <p className="text-[10px] text-muted-foreground">Recipient</p>
-          <AnimatePresence mode="wait">
-            {opened ? (
-              <motion.div
-                key="open"
-                initial={reduced ? {} : { opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="text-[10px] font-mono bg-[#00EF8B]/10 rounded px-2 py-1 text-[#00EF8B] space-y-0.5"
-              >
-                <p>amount: 5 FLOW</p>
-                <p>blinding: 0x4f2a…</p>
-                <p>memo: "great talk!"</p>
-              </motion.div>
-            ) : (
-              <motion.div
-                key="closed"
-                initial={reduced ? {} : { opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-[10px] font-mono text-muted-foreground italic"
-              >
-                (encrypted)
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      </div>
-      <p className="text-[10px] text-muted-foreground mt-3 text-center">
-        Click the envelope to simulate decryption with MemoKey privkey.
-      </p>
-    </div>
-  );
-}
-
-// ── Section 5 illustration — Sign-derive HKDF ──────────────────────────────
-
 function SignDeriveAnimation() {
   const [derived, setDerived] = useState(false);
   const [running, setRunning] = useState(false);
@@ -604,7 +463,6 @@ function SignDeriveAnimation() {
         Sign-derive: same wallet → same key forever
       </p>
       <div className="space-y-3">
-        {/* Step 1: wallet signature */}
         <div className="flex items-start gap-3">
           <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">1</div>
           <div className="flex-1">
@@ -615,7 +473,6 @@ function SignDeriveAnimation() {
           </div>
         </div>
 
-        {/* Step 2: HKDF box */}
         <div className="flex items-start gap-3">
           <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">2</div>
           <div className="flex-1">
@@ -631,7 +488,6 @@ function SignDeriveAnimation() {
           </div>
         </div>
 
-        {/* Output */}
         <AnimatePresence>
           {derived && (
             <motion.div
@@ -653,7 +509,6 @@ function SignDeriveAnimation() {
           )}
         </AnimatePresence>
 
-        {/* Second device */}
         {derived && (
           <motion.div
             initial={reduced ? {} : { opacity: 0 }}
@@ -674,13 +529,10 @@ function SignDeriveAnimation() {
   );
 }
 
-// ── Section 6 illustration — Boundary diagram (enhanced) ───────────────────
-
 function BoundaryDiagram() {
   return (
     <div className="my-6 rounded-xl border border-border bg-card overflow-hidden">
-      {/* Public zone */}
-      <div className="bg-[#B45309]/8 px-4 py-3 border-b border-border">
+      <div className="bg-[#FBBF24]/8 px-4 py-3 border-b border-border">
         <p className="text-[10px] uppercase tracking-wider font-semibold text-[#FBBF24] mb-2">Public zone (visible)</p>
         <div className="grid grid-cols-3 gap-2 text-center">
           {[
@@ -692,25 +544,21 @@ function BoundaryDiagram() {
               <p className="text-[10px] text-muted-foreground uppercase mb-1">{cell.label}</p>
               <span className={`font-mono px-2 py-0.5 rounded text-xs ${
                 cell.note === "hidden"
-                  ? "bg-[#6B46C1]/15 text-[#6B46C1]/60 dark:text-purple-400/60 blur-[1px]"
-                  : "bg-[#B45309]/15 text-[#FBBF24]"
+                  ? "bg-[#A78BFA]/15 text-[#A78BFA]/60 blur-[1px]"
+                  : "bg-[#FBBF24]/15 text-[#FBBF24]"
               }`}>{cell.value}</span>
             </div>
           ))}
         </div>
       </div>
-
-      {/* Animated shimmer boundary */}
       <div className="janus-divider-shimmer" />
-
-      {/* Private zone */}
       <div className="bg-[#00EF8B]/5 px-4 py-3">
         <p className="text-[10px] uppercase tracking-wider font-semibold text-[#00EF8B] mb-2">Private zone (your wallet)</p>
         <div className="grid grid-cols-3 gap-2 text-center">
           {[
-            { label: "Wrap", value: "+2.0", tone: "emerald" },
-            { label: "Tips sent", value: "−0.5", tone: "emerald" },
-            { label: "Withdraw", value: "−1.5", tone: "emerald" },
+            { label: "Wrap", value: "+2.0" },
+            { label: "Tips sent", value: "−0.5" },
+            { label: "Withdraw", value: "−1.5" },
           ].map((cell) => (
             <div key={cell.label} className="text-xs">
               <p className="text-[10px] text-muted-foreground uppercase mb-1">{cell.label}</p>
@@ -723,15 +571,13 @@ function BoundaryDiagram() {
   );
 }
 
-// ── Section 7 illustration — Ceremony contributor nodes ────────────────────
-
 function CeremonyAnimation() {
   const reduced = useReducedMotion();
   const contributors = [
-    { label: "Researcher A", color: "#6B46C1", x: 40, y: 40 },
+    { label: "Researcher A", color: "#A78BFA", x: 40, y: 40 },
     { label: "Wallet Dev",   color: "#00EF8B", x: 200, y: 20 },
-    { label: "Academic",    color: "#B45309", x: 340, y: 50 },
-    { label: "Anon",        color: "#6B46C1", x: 80, y: 110 },
+    { label: "Academic",    color: "#FBBF24", x: 340, y: 50 },
+    { label: "Anon",        color: "#A78BFA", x: 80, y: 110 },
     { label: "Foundation",  color: "#00EF8B", x: 280, y: 100 },
   ];
 
@@ -744,7 +590,6 @@ function CeremonyAnimation() {
         <svg className="absolute inset-0 w-full h-full" viewBox="0 0 400 150" preserveAspectRatio="none">
           {contributors.map((c) => (
             <g key={c.label}>
-              {/* Line to center */}
               <line
                 x1={c.x} y1={c.y}
                 x2={200} y2={75}
@@ -755,17 +600,14 @@ function CeremonyAnimation() {
               />
             </g>
           ))}
-          {/* Central ceremony point */}
           <circle cx={200} cy={75} r={22} fill="#D4AF37" fillOpacity="0.15" stroke="#D4AF37" strokeWidth="1.5" strokeOpacity="0.6" />
           <text x={200} y={79} textAnchor="middle" fontSize="10" fill="#D4AF37" fontWeight="600">Ceremony</text>
-          {/* Flow VRF beacon */}
           <circle cx={200} cy={75} r={32} fill="none" stroke="#D4AF37" strokeWidth="1" strokeOpacity="0.2" strokeDasharray="6 4">
             {!reduced && (
               <animateTransform attributeName="transform" type="rotate" from="0 200 75" to="360 200 75" dur="8s" repeatCount="indefinite" />
             )}
           </circle>
         </svg>
-        {/* Contributor dots */}
         {contributors.map((c) => (
           <div
             key={c.label}
@@ -781,7 +623,6 @@ function CeremonyAnimation() {
             {c.label[0]}
           </div>
         ))}
-        {/* Gold VRF beacon marker */}
         <div
           className="absolute w-8 h-8 rounded-full flex items-center justify-center text-[9px] font-bold text-[#0A1628]"
           style={{ left: "50%", top: "50%", transform: "translate(-50%, -50%)", background: "#D4AF37" }}
@@ -802,7 +643,7 @@ function CeremonyBadge() {
   return (
     <div className="inline-flex flex-wrap items-center gap-3 bg-muted/40 border border-border rounded-xl px-4 py-3 my-6 text-xs font-mono">
       <span className="flex items-center gap-1.5 text-[#A78BFA]">
-        <span className="w-2 h-2 rounded-full bg-[#6B46C1]" />
+        <span className="w-2 h-2 rounded-full bg-[#A78BFA]" />
         pot14
       </span>
       <span className="text-muted-foreground">·</span>
@@ -821,136 +662,158 @@ function CeremonyBadge() {
   );
 }
 
-// ── Section 8 — Roadmap arches ─────────────────────────────────────────────
+// ── Roadmap Kanban ────────────────────────────────────────────────────────────
 
-function RoadmapRow({
-  version, label, description, status,
-}: {
+type RoadmapStatus = "now" | "next" | "later";
+
+interface RoadmapCard {
+  title: string;
+  desc: string;
+  status: RoadmapStatus;
   version: string;
-  label: string;
-  description: string;
-  status: "live" | "next" | "planned" | "research";
-}) {
-  const statusBadge: Record<string, string> = {
-    live:     "bg-[#00EF8B]/15 text-[#00EF8B] border-[#00EF8B]/30",
-    next:     "bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border-blue-300/40",
-    planned:  "bg-[#D4AF37]/12 text-[#D4AF37] border-[#D4AF37]/30",
-    research: "bg-[#6B46C1]/12 text-[#A78BFA] dark:text-purple-300 border-[#6B46C1]/30",
-  };
-  const statusLabel: Record<string, string> = {
-    live: "Shipping now", next: "Next up", planned: "Planned", research: "Research track",
-  };
+}
+
+const ROADMAP_CARDS: RoadmapCard[] = [
+  // NOW
+  {
+    status: "now",
+    version: "v0.5",
+    title: "128-bit balance range",
+    desc: "Mainnet-ready math — proofs handle amounts up to 128 bits with overflow guards.",
+  },
+  {
+    status: "now",
+    version: "v0.5",
+    title: "Shielded transfer",
+    desc: "Full Cadence cross-VM shielded tip in one transaction.",
+  },
+  {
+    status: "now",
+    version: "v0.5",
+    title: "MemoKey sign-derive",
+    desc: "Deterministic inbox key from wallet signature — no seed phrase.",
+  },
+  {
+    status: "now",
+    version: "v0.5",
+    title: "Balance recovery",
+    desc: "Reconstruct position on any device from ShieldedNote history.",
+  },
+  // NEXT
+  {
+    status: "next",
+    version: "Next",
+    title: "Sender↔recipient unlink",
+    desc: "ERC-5564-style stealth addresses — the chain no longer reveals who tipped whom.",
+  },
+  {
+    status: "next",
+    version: "Next",
+    title: "Fee management",
+    desc: "Gas sponsorship for private txs — pay fees without revealing shielded balance.",
+  },
+  {
+    status: "next",
+    version: "Next",
+    title: "Multisig admin",
+    desc: "Multi-party key for contract upgrades and parameter changes.",
+  },
+  // LATER
+  {
+    status: "later",
+    version: "v0.7+",
+    title: "UTXO mode",
+    desc: "Large hidden-set mode for dark pools and sealed-bid auctions.",
+  },
+  {
+    status: "later",
+    version: "v0.8",
+    title: "Encrypted history backup",
+    desc: "Portable recovery blob — ShieldedNote history exported and re-importable.",
+  },
+  {
+    status: "later",
+    version: "R1–R3",
+    title: "ZK identity & FHE",
+    desc: "Research track: FHE over encrypted state, lattice post-quantum variants.",
+  },
+];
+
+const COL_META: Record<RoadmapStatus, { label: string; icon: React.ReactNode; color: string; border: string; bg: string }> = {
+  now:   { label: "Now",   icon: <CheckCircle2 className="w-3.5 h-3.5" />, color: "#00EF8B", border: "border-[#00EF8B]/30", bg: "bg-[#00EF8B]/5"  },
+  next:  { label: "Next",  icon: <Clock className="w-3.5 h-3.5" />,       color: "#FBBF24", border: "border-[#FBBF24]/30", bg: "bg-[#FBBF24]/5"  },
+  later: { label: "Later", icon: <FlaskConical className="w-3.5 h-3.5" />, color: "#A78BFA", border: "border-[#A78BFA]/30", bg: "bg-[#A78BFA]/5"  },
+};
+
+function RoadmapKanban() {
+  const reduced = useReducedMotion();
+  const cols: RoadmapStatus[] = ["now", "next", "later"];
+
   return (
-    <div className="flex items-start gap-4 py-4 border-b border-border last:border-0">
-      <div className="font-mono text-xs font-bold text-muted-foreground w-10 shrink-0 pt-0.5">{version}</div>
-      <div className="flex-1 min-w-0">
-        <div className="flex flex-wrap items-center gap-2 mb-1">
-          <span className="font-semibold text-sm text-foreground">{label}</span>
-          <span className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full border ${statusBadge[status]}`}>
-            {statusLabel[status]}
-          </span>
-        </div>
-        <p className="text-xs text-muted-foreground leading-relaxed">{description}</p>
-      </div>
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 my-6">
+      {cols.map((col) => {
+        const meta = COL_META[col];
+        const cards = ROADMAP_CARDS.filter((c) => c.status === col);
+        return (
+          <div key={col} className={`rounded-xl border ${meta.border} ${meta.bg} overflow-hidden`}>
+            {/* Column header */}
+            <div
+              className="flex items-center gap-2 px-3 py-2.5 border-b"
+              style={{ borderColor: meta.color + "22", background: meta.color + "10" }}
+            >
+              <span style={{ color: meta.color }}>{meta.icon}</span>
+              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: meta.color }}>
+                {meta.label}
+              </span>
+            </div>
+            {/* Cards */}
+            <div className="p-2 space-y-2">
+              {cards.map((card, i) => (
+                <motion.div
+                  key={card.title}
+                  initial={reduced ? {} : { opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.4, ease: EASE_OUT_EXPO, delay: i * 0.08 }}
+                  className="rounded-lg border border-border/50 bg-background/60 px-3 py-2.5"
+                >
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <span className="text-xs font-semibold text-foreground leading-snug">{card.title}</span>
+                    <span
+                      className="text-[9px] font-mono shrink-0 px-1.5 py-0.5 rounded border"
+                      style={{ color: meta.color, borderColor: meta.color + "40", background: meta.color + "12" }}
+                    >
+                      {card.version}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">{card.desc}</p>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-// ── Page ────────────────────────────────────────────────────────────────────
+// ── Tab panels ────────────────────────────────────────────────────────────────
 
-export default function LearnPage() {
-  const heroAnim = useFadeIn(0);
-
+function TabHowItWorks() {
   return (
-    <div className="flex flex-col items-center janus-hex-bg">
-      {/* Hero */}
-      <motion.div
-        {...heroAnim}
-        className="w-full max-w-3xl mx-auto px-4 pt-14 pb-8 text-center"
-      >
-        {/* Janus arch SVG */}
-        <div className="flex justify-center mb-6">
-          <svg width="80" height="60" viewBox="0 0 80 60" fill="none" className="drop-shadow-[0_0_12px_rgba(107,70,193,0.4)]">
-            {/* Left arch half */}
-            <path d="M40 50 Q10 50 10 20 Q10 5 25 5" stroke="#6B46C1" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-            {/* Right arch half */}
-            <path d="M40 50 Q70 50 70 20 Q70 5 55 5" stroke="#00EF8B" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-            {/* Left face */}
-            <circle cx="20" cy="15" r="6" fill="#6B46C1" fillOpacity="0.3" stroke="#6B46C1" strokeWidth="1.5" />
-            <circle cx="18" cy="14" r="1.2" fill="#6B46C1" />
-            <circle cx="22" cy="14" r="1.2" fill="#6B46C1" />
-            {/* Right face */}
-            <circle cx="60" cy="15" r="6" fill="#00EF8B" fillOpacity="0.3" stroke="#00EF8B" strokeWidth="1.5" />
-            <circle cx="58" cy="14" r="1.2" fill="#00EF8B" />
-            <circle cx="62" cy="14" r="1.2" fill="#00EF8B" />
-            {/* Keystone */}
-            <circle cx="40" cy="5" r="4" fill="#D4AF37" fillOpacity="0.7" />
-          </svg>
+    <div className="space-y-10 py-6">
+      {/* Section: The problem */}
+      <section id="how-public-chains" className="scroll-mt-32">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-[#FBBF24]/15 border border-[#FBBF24]/30 flex items-center justify-center shrink-0">
+            <Eye className="w-4 h-4 text-[#FBBF24]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              The problem with public chains
+            </h2>
+            <p className="text-xs text-muted-foreground">2 min · Everything leaks by default</p>
+          </div>
         </div>
-
-        <h1
-          className="text-3xl sm:text-4xl font-bold tracking-tight mb-3"
-          style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}
-        >
-          The Two Faces of On-Chain Money
-        </h1>
-        <p className="text-base text-muted-foreground max-w-2xl mx-auto mb-6">
-          A plain-language explainer for the cryptography behind PrivateTip and the{" "}
-          <span className="font-mono text-sm bg-muted px-1.5 py-0.5 rounded">
-            @openjanus/sdk
-          </span>{" "}
-          stack. No heavy notation. Show your work.
-        </p>
-        <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <BookOpen className="w-3 h-3" /> ~15 min read
-          </span>
-          <span>·</span>
-          <span>8 sections</span>
-          <span>·</span>
-          <span>Updated May 2026</span>
-        </div>
-
-        {/* Back link */}
-        <div className="mt-6 flex justify-center">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            ← Back to PrivateTip
-          </Link>
-        </div>
-      </motion.div>
-
-      {/* Shimmer divider under hero */}
-      <div className="w-full max-w-3xl px-4 mb-2">
-        <div className="janus-divider-shimmer rounded-full" />
-      </div>
-
-      {/* TOC */}
-      <div className="w-full max-w-3xl mx-auto px-4 py-6">
-        <div className="flex flex-wrap gap-2">
-          {TOC_ITEMS.map((item) => (
-            <a
-              key={item.id}
-              href={`#${item.id}`}
-              className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-full border border-border bg-background hover:border-[#00EF8B]/40 hover:bg-[#00EF8B]/5 text-muted-foreground hover:text-foreground transition-all"
-            >
-              {item.label}
-            </a>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Section 1: The problem with public chains ── */}
-      <Section
-        id="public-chains"
-        icon={<Eye className="w-5 h-5" />}
-        iconBg="bg-[#B45309]/15 text-[#FBBF24] ring-[#B45309]/30"
-        readTime="2 min read"
-        heading="The problem with public chains"
-        subheading="Everything leaks by default — and that matters more than you think."
-      >
         <P>
           Every transaction on a public blockchain reveals at least three things: who sent it,
           who received it, and how much moved. That&apos;s not a bug — it&apos;s the entire point
@@ -967,21 +830,24 @@ export default function LearnPage() {
         <Callout accent="copper" label="Where PrivateTip sits today">
           PrivateTip is <strong>confidential tier</strong> — amounts are cryptographically hidden,
           but sender and recipient addresses are visible on-chain. That&apos;s deliberate for v0.5:
-          the &quot;who tipped whom&quot; visibility is social proof. Full anonymity is planned for
-          v0.6. See the{" "}
-          <a href="#roadmap" className="underline hover:text-foreground">roadmap</a>.
+          the &quot;who tipped whom&quot; visibility is social proof. Sender/recipient unlink
+          (stealth addresses) is on the roadmap.
         </Callout>
-      </Section>
+      </section>
 
-      {/* ── Section 2: Pedersen commitment ── */}
-      <Section
-        id="pedersen"
-        icon={<Lock className="w-5 h-5" />}
-        iconBg="bg-[#6B46C1]/15 text-[#A78BFA] ring-[#6B46C1]/30"
-        readTime="3 min read"
-        heading="The Pedersen commitment"
-        subheading="A sealed envelope that anyone can verify without opening."
-      >
+      {/* Section: Pedersen */}
+      <section id="how-pedersen" className="scroll-mt-32 pt-2 border-t border-border">
+        <div className="flex items-center gap-3 mb-4 mt-4">
+          <div className="w-8 h-8 rounded-lg bg-[#A78BFA]/15 border border-[#A78BFA]/30 flex items-center justify-center shrink-0">
+            <Lock className="w-4 h-4 text-[#A78BFA]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              The Pedersen commitment
+            </h2>
+            <p className="text-xs text-muted-foreground">3 min · A sealed envelope anyone can verify</p>
+          </div>
+        </div>
         <P>
           The core primitive is a <Em>Pedersen commitment</Em>. Take an amount and some random
           noise (a blinding factor), mix them mathematically in a one-way direction, and publish
@@ -1002,49 +868,29 @@ export default function LearnPage() {
           commitment homomorphically, and the owner can always prove their total without
           revealing it.
         </Callout>
-      </Section>
+      </section>
 
-      {/* ── Section 3: Account vs UTXO ── */}
-      <Section
-        id="account-vs-utxo"
-        icon={<Layers className="w-5 h-5" />}
-        iconBg="bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 ring-blue-300/40"
-        readTime="4 min read"
-        heading="Account model vs UTXO model"
-        subheading="Two schools of thought on how to structure private balances."
-      >
-        <P>
-          The privacy industry has settled into two camps. The <Em>UTXO model</Em> treats each
-          incoming payment as a discrete &quot;note&quot; — like a physical coin. The{" "}
-          <Em>account model</Em> keeps one accumulated balance per address, updated
-          homomorphically.
-        </P>
-        <AccountVsUTXO />
-        <CompareTable />
-        <P>
-          openjanus chose the account model for v1. Flow&apos;s resource model maps cleanly to
-          &quot;one owned object per user.&quot; Stealth addresses can be layered on top without
-          rewriting the commitment math (planned v0.6 —{" "}
-          <a href="#roadmap" className="underline hover:text-foreground">see roadmap</a>).
-        </P>
-      </Section>
-
-      {/* ── Section 4: ShieldedNote ── */}
-      <Section
-        id="shielded-note"
-        icon={<Key className="w-5 h-5" />}
-        iconBg="bg-[#00EF8B]/15 text-[#00EF8B] ring-[#00EF8B]/30"
-        readTime="2 min read"
-        heading="The ShieldedNote — the recovery channel"
-        subheading="Without this, private balances accumulate silently and can never be spent."
-      >
+      {/* Section: ShieldedNote — THE GOOD ANIMATION */}
+      <section id="how-shieldednote" className="scroll-mt-32 pt-2 border-t border-border">
+        <div className="flex items-center gap-3 mb-4 mt-4">
+          <div className="w-8 h-8 rounded-lg bg-[#00EF8B]/15 border border-[#00EF8B]/30 flex items-center justify-center shrink-0">
+            <Key className="w-4 h-4 text-[#00EF8B]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              The ShieldedNote — the recovery channel
+            </h2>
+            <p className="text-xs text-muted-foreground">2 min · Without this, balances accumulate silently</p>
+          </div>
+        </div>
         <P>
           Here&apos;s a subtle problem most explainers gloss over. Suppose Alice sends Bob 5 FLOW,
           privately. The on-chain commitment at Bob&apos;s address changes by some opaque amount.
           How does Bob know he received 5? Without the exact <em>(amount, blinding)</em> pair,
           he cannot construct a valid ZK proof when he wants to withdraw.
         </P>
-        <ShieldedNoteAnimation />
+        {/* THE REDESIGNED ANIMATION */}
+        <ShieldedNoteLifecycle />
         <P>
           The solution is the <Em>ShieldedNote</Em>. Every shielded transfer ships an encrypted
           payload alongside the commitment update. The payload contains the amount, blinding
@@ -1057,17 +903,133 @@ export default function LearnPage() {
           ShieldedNote to. The recipient would receive a commitment they can never decode — a
           permanently unspendable balance.
         </Callout>
-      </Section>
+      </section>
 
-      {/* ── Section 5: Sign-derive ── */}
-      <Section
-        id="sign-derive"
-        icon={<RefreshCw className="w-5 h-5" />}
-        iconBg="bg-[#D4AF37]/15 text-[#D4AF37] ring-[#D4AF37]/30"
-        readTime="3 min read"
-        heading="Sign-derive — the multi-device unlock"
-        subheading="How your inbox key survives browser resets without a seed phrase."
-      >
+      {/* Section: What's NOT private */}
+      <section id="how-not-private" className="scroll-mt-32 pt-2 border-t border-border">
+        <div className="flex items-center gap-3 mb-4 mt-4">
+          <div className="w-8 h-8 rounded-lg bg-[#FBBF24]/15 border border-[#FBBF24]/30 flex items-center justify-center shrink-0">
+            <Eye className="w-4 h-4 text-[#FBBF24]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              What&apos;s NOT private
+            </h2>
+            <p className="text-xs text-muted-foreground">1 min · Honest scope of today&apos;s privacy guarantees</p>
+          </div>
+        </div>
+        <P>
+          PrivateTip hides <Em>amounts</Em>. It does not hide identities or patterns. Before you
+          use it, know exactly what stays public:
+        </P>
+        <Callout accent="copper" label="What's NOT private">
+          <ul className="list-disc pl-5 space-y-1 text-sm">
+            <li>Sender address (visible on-chain)</li>
+            <li>Recipient address (visible on-chain)</li>
+            <li>Transaction timestamp</li>
+            <li>Tx graph / frequency / social pattern</li>
+          </ul>
+        </Callout>
+        <P>
+          If you need sender/recipient unlinkability, wait for stealth-address support on the
+          roadmap — or compose PrivateTip with a separate stealth-address primitive.
+        </P>
+      </section>
+
+      {/* Section: Fee model */}
+      <section id="how-fees" className="scroll-mt-32 pt-2 border-t border-border">
+        <div className="flex items-center gap-3 mb-4 mt-4">
+          <div className="w-8 h-8 rounded-lg bg-[#00EF8B]/15 border border-[#00EF8B]/30 flex items-center justify-center shrink-0">
+            <Coins className="w-4 h-4 text-[#00EF8B]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              Fees
+            </h2>
+            <p className="text-xs text-muted-foreground">30 sec · Boundary-only, hard-capped</p>
+          </div>
+        </div>
+        <P>
+          PrivateTip charges a <Em>0.1% fee at the boundary</Em> — when you wrap FLOW into a
+          shielded balance and when you unwrap back out. Shielded transfers between users are
+          free. The fee is hard-capped at 1% by the contract and flows to the openjanus admin
+          COA.
+        </P>
+      </section>
+    </div>
+  );
+}
+
+function TabCompare() {
+  return (
+    <div className="space-y-10 py-6">
+      {/* Account vs UTXO */}
+      <section id="compare-models" className="scroll-mt-32">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-950/60 border border-blue-300/40 flex items-center justify-center shrink-0">
+            <Layers className="w-4 h-4 text-blue-700 dark:text-blue-300" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              Account model vs UTXO model
+            </h2>
+            <p className="text-xs text-muted-foreground">4 min · Two schools of privacy architecture</p>
+          </div>
+        </div>
+        <P>
+          The privacy industry has settled into two camps. The <Em>UTXO model</Em> treats each
+          incoming payment as a discrete &quot;note&quot; — like a physical coin. The{" "}
+          <Em>account model</Em> keeps one accumulated balance per address, updated
+          homomorphically.
+        </P>
+        <AccountVsUTXO />
+        <P>
+          openjanus chose the account model for v1. Flow&apos;s resource model maps cleanly to
+          &quot;one owned object per user.&quot; Stealth addresses can be layered on top without
+          rewriting the commitment math.
+        </P>
+      </section>
+
+      {/* Industry comparison */}
+      <section id="compare-industry" className="scroll-mt-32 pt-2 border-t border-border">
+        <div className="flex items-center gap-3 mb-4 mt-4">
+          <div className="w-8 h-8 rounded-lg bg-[#00EF8B]/15 border border-[#00EF8B]/30 flex items-center justify-center shrink-0">
+            <Sparkles className="w-4 h-4 text-[#00EF8B]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              openjanus vs Railgun vs Aztec
+            </h2>
+            <p className="text-xs text-muted-foreground">Feature-by-feature</p>
+          </div>
+        </div>
+        <CompareTable />
+        <Callout accent="emerald" label="Why Cadence cross-VM">
+          openjanus runs the ZK verifier as an EVM contract but wraps it in a Cadence
+          transaction — giving you Flow&apos;s resource model (no approvals, typed ownership)
+          and EVM&apos;s mature proof toolchain in one atomic call. No other chain can do this.
+        </Callout>
+      </section>
+    </div>
+  );
+}
+
+function TabArchitecture() {
+  return (
+    <div className="space-y-10 py-6">
+      {/* Sign-derive */}
+      <section id="arch-sign-derive" className="scroll-mt-32">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-[#D4AF37]/15 border border-[#D4AF37]/30 flex items-center justify-center shrink-0">
+            <RefreshCw className="w-4 h-4 text-[#D4AF37]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              Sign-derive — the multi-device unlock
+            </h2>
+            <p className="text-xs text-muted-foreground">3 min · How your inbox key survives browser resets</p>
+          </div>
+        </div>
         <P>
           The MemoKey private key is the master key to your private inbox. Lose it and all your
           incoming tips are permanently inaccessible. The naive approach — store it in
@@ -1085,17 +1047,21 @@ export default function LearnPage() {
           produces the same scalar. Your MemoKey is back — without a backup phrase, without a
           server, without persistent storage.
         </Callout>
-      </Section>
+      </section>
 
-      {/* ── Section 6: Boundary pattern ── */}
-      <Section
-        id="boundary"
-        icon={<Eye className="w-5 h-5" />}
-        iconBg="bg-[#B45309]/15 text-[#FBBF24] ring-[#B45309]/30"
-        readTime="2 min read"
-        heading="The boundary pattern"
-        subheading="Amounts leak at entry and exit. Everything in between is opaque."
-      >
+      {/* Boundary pattern */}
+      <section id="arch-boundary" className="scroll-mt-32 pt-2 border-t border-border">
+        <div className="flex items-center gap-3 mb-4 mt-4">
+          <div className="w-8 h-8 rounded-lg bg-[#FBBF24]/15 border border-[#FBBF24]/30 flex items-center justify-center shrink-0">
+            <Eye className="w-4 h-4 text-[#FBBF24]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              The boundary pattern
+            </h2>
+            <p className="text-xs text-muted-foreground">2 min · Amounts leak at entry and exit only</p>
+          </div>
+        </div>
         <P>
           When you <Em>wrap</Em> FLOW into your shielded balance, you&apos;re crossing the entry
           boundary. The amount is public at this point — the Cadence transaction must transfer real
@@ -1112,17 +1078,21 @@ export default function LearnPage() {
           fresh wallet you&apos;ve never used publicly. This breaks the link between your shielded
           identity and your future spending wallet.
         </Callout>
-      </Section>
+      </section>
 
-      {/* ── Section 7: Trusted setup ceremony ── */}
-      <Section
-        id="ceremony"
-        icon={<Shield className="w-5 h-5" />}
-        iconBg="bg-[#D4AF37]/15 text-[#D4AF37] ring-[#D4AF37]/30"
-        readTime="3 min read"
-        heading="The trusted setup ceremony"
-        subheading="Why ZK proofs require a ceremony — and why multi-party computation makes it trustworthy."
-      >
+      {/* Ceremony */}
+      <section id="arch-ceremony" className="scroll-mt-32 pt-2 border-t border-border">
+        <div className="flex items-center gap-3 mb-4 mt-4">
+          <div className="w-8 h-8 rounded-lg bg-[#D4AF37]/15 border border-[#D4AF37]/30 flex items-center justify-center shrink-0">
+            <Shield className="w-4 h-4 text-[#D4AF37]" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+              The trusted setup ceremony
+            </h2>
+            <p className="text-xs text-muted-foreground">3 min · Why ZK needs a ceremony — and why MPC makes it safe</p>
+          </div>
+        </div>
         <P>
           Groth16 requires a one-time <Em>trusted setup</Em>. During setup, a secret random value
           (&quot;toxic waste&quot;) is used to construct the proving and verification keys. If
@@ -1140,67 +1110,198 @@ export default function LearnPage() {
           is a one-time cost paid by a diverse group — comparable to Zcash Sprout, Hermez,
           and Tornado Cash in production.
         </Callout>
-      </Section>
 
-      {/* ── Section 8: Roadmap ── */}
-      <Section
-        id="roadmap"
-        icon={<GitBranch className="w-5 h-5" />}
-        iconBg="bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 ring-blue-300/40"
-        readTime="2 min read"
-        heading="What's next (v0.5 → v1.0)"
-        subheading="Privacy gains grouped by what they unlock, not by version."
+        {/* Architecture layers callout */}
+        <div className="mt-8 rounded-xl border border-border bg-card p-4">
+          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Layer diagram</p>
+          <div className="space-y-2">
+            {[
+              { label: "Cadence router", note: "Transaction entry · resource ownership", color: "#00EF8B" },
+              { label: "EVM proxy (CrossVM call)", note: "Atomic bridge · Flow cross-VM", color: "#D4AF37" },
+              { label: "Groth16 verifier", note: "On-chain proof check · 200k gas", color: "#A78BFA" },
+              { label: "MemoStore", note: "ECIES-encrypted ShieldedNote registry", color: "#FBBF24" },
+            ].map((row, i) => (
+              <div key={row.label} className="flex items-center gap-3">
+                <div
+                  className="w-2 h-8 rounded-full shrink-0"
+                  style={{ background: row.color + "40", borderLeft: `2px solid ${row.color}` }}
+                />
+                <div>
+                  <p className="text-xs font-semibold" style={{ color: row.color }}>{row.label}</p>
+                  <p className="text-[10px] text-muted-foreground">{row.note}</p>
+                </div>
+                {i < 3 && (
+                  <div className="ml-auto">
+                    <ArrowRight className="w-3 h-3 text-foreground/20 rotate-90" />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TabRoadmap() {
+  return (
+    <div className="py-6">
+      <div className="mb-4">
+        <h2 className="text-lg font-bold mb-1" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+          What&apos;s next (v0.5 → v1.0)
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Every upgrade is anchored to a concrete use case that would be blocked without it.
+        </p>
+      </div>
+      <RoadmapKanban />
+      <Callout accent="emerald" label="Research track">
+        R1–R3 items (FHE, multi-circuit zkVM, post-quantum lattices) are exploratory — no
+        ship date. They require either ecosystem tooling maturation or protocol-level changes
+        on Flow.
+      </Callout>
+    </div>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+export default function LearnPage() {
+  const [activeTab, setActiveTab] = useState<TabId>("how-it-works");
+  const reduced = useReducedMotion();
+
+  // URL hash sync on mount + back/forward
+  useEffect(() => {
+    const syncFromHash = () => {
+      const hash = window.location.hash.replace("#", "") as TabId;
+      if (TABS.some((t) => t.id === hash)) {
+        setActiveTab(hash);
+      }
+    };
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+    return () => window.removeEventListener("hashchange", syncFromHash);
+  }, []);
+
+  const handleTabChange = useCallback((id: TabId) => {
+    setActiveTab(id);
+    window.history.replaceState(null, "", `#${id}`);
+  }, []);
+
+  const heroAnim = useFadeIn(0);
+
+  const tabContent: Record<TabId, React.ReactNode> = {
+    "how-it-works": <TabHowItWorks />,
+    compare: <TabCompare />,
+    architecture: <TabArchitecture />,
+    roadmap: <TabRoadmap />,
+  };
+
+  return (
+    <div className="flex flex-col items-center janus-hex-bg min-h-screen">
+      {/* ── Compact Hero ───────────────────────────────────────────────────── */}
+      <motion.div
+        {...heroAnim}
+        className="w-full max-w-3xl mx-auto px-4 pt-10 pb-6 text-center"
       >
-        <P>
-          Every upgrade on the roadmap is anchored to a concrete use case that would be blocked
-          without it.
-        </P>
-
-        <div className="rounded-xl border border-border overflow-hidden my-6">
-          <div className="px-4 py-3 bg-muted/30 border-b border-border">
-            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-              Shipping + planned
-            </span>
-          </div>
-          <div className="px-4">
-            <RoadmapRow version="v0.5" label="128-bit balance range" status="live"
-              description="Mainnet-ready math. Current proofs handle amounts up to 128 bits — effectively unbounded. The upgrade makes the range explicit in circuit constraints and adds overflow guards." />
-            <RoadmapRow version="v0.6" label="Sender↔recipient unlink (stealth addresses)" status="next"
-              description="ERC-5564-style stealth addresses. Senders derive a one-time address per recipient using their published viewing key. The public chain no longer reveals who tipped whom." />
-            <RoadmapRow version="v0.7" label="Optional UTXO mode" status="planned"
-              description="High-anonymity-set mode for sealed-bid auctions, dark pools, mixers. Account model stays the default. UTXO mode is a separate circuit + contract pair, opted into per-application." />
-            <RoadmapRow version="v0.8" label="Encrypted history backup" status="planned"
-              description="Portable balance recovery without device dependence. The full ShieldedNote history can be exported as an encrypted blob — recoverable from any device with the MemoKey." />
-          </div>
+        {/* Janus arch SVG — compact */}
+        <div className="flex justify-center mb-4">
+          <svg width="60" height="46" viewBox="0 0 80 60" fill="none" className="drop-shadow-[0_0_10px_rgba(167,139,250,0.4)]">
+            <path d="M40 50 Q10 50 10 20 Q10 5 25 5" stroke="#A78BFA" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+            <path d="M40 50 Q70 50 70 20 Q70 5 55 5" stroke="#00EF8B" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+            <circle cx="20" cy="15" r="6" fill="#A78BFA" fillOpacity="0.3" stroke="#A78BFA" strokeWidth="1.5" />
+            <circle cx="18" cy="14" r="1.2" fill="#A78BFA" />
+            <circle cx="22" cy="14" r="1.2" fill="#A78BFA" />
+            <circle cx="60" cy="15" r="6" fill="#00EF8B" fillOpacity="0.3" stroke="#00EF8B" strokeWidth="1.5" />
+            <circle cx="58" cy="14" r="1.2" fill="#00EF8B" />
+            <circle cx="62" cy="14" r="1.2" fill="#00EF8B" />
+            <circle cx="40" cy="5" r="4" fill="#D4AF37" fillOpacity="0.7" />
+          </svg>
         </div>
 
-        <div className="rounded-xl border border-border overflow-hidden my-6">
-          <div className="px-4 py-3 bg-muted/30 border-b border-border">
-            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-              Research track
-            </span>
-          </div>
-          <div className="px-4">
-            <RoadmapRow version="R1" label="FHE computation over encrypted state" status="research"
-              description="Fully Homomorphic Encryption would allow the chain to compute over shielded balances without decryption — no ZK proofs required at the individual transfer level." />
-            <RoadmapRow version="R2" label="Multi-circuit zkVM composition" status="research"
-              description="Compose multiple specialized circuits into a single recursive proof. Flow's cross-VM atomic execution makes multi-circuit verification tractable." />
-            <RoadmapRow version="R3" label="Post-quantum lattice variants" status="research"
-              description="BabyJubJub and BN254 are vulnerable to a sufficiently powerful quantum computer. Lattice-based commitments would preserve the homomorphic property with long-term safety." />
+        <h1
+          className="text-2xl sm:text-3xl font-bold tracking-tight mb-2"
+          style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}
+        >
+          The Two Faces of On-Chain Money
+        </h1>
+        <p className="text-sm text-muted-foreground max-w-xl mx-auto mb-3">
+          Plain-language cryptography behind PrivateTip and the{" "}
+          <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+            @openjanus/sdk
+          </span>{" "}
+          stack.
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-3 text-xs text-muted-foreground mb-4">
+          <span className="flex items-center gap-1">
+            <BookOpen className="w-3 h-3" /> ~15 min
+          </span>
+          <span>·</span>
+          <span>4 tabs</span>
+          <span>·</span>
+          <span>Updated May 2026</span>
+          <span>·</span>
+          <Link href="/" className="flex items-center gap-1 hover:text-foreground transition-colors">
+            ← Back
+          </Link>
+        </div>
+      </motion.div>
+
+      {/* ── Sticky Tab Nav ─────────────────────────────────────────────────── */}
+      <div className="sticky top-0 z-30 w-full bg-background/90 backdrop-blur border-b border-border">
+        <div className="max-w-3xl mx-auto px-4">
+          <div className="flex gap-0 overflow-x-auto scrollbar-hide">
+            {TABS.map((tab) => {
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => handleTabChange(tab.id)}
+                  className={`flex items-center gap-1.5 px-4 py-3 text-xs font-semibold whitespace-nowrap transition-all border-b-2 ${
+                    isActive
+                      ? "border-[#00EF8B] text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                  }`}
+                >
+                  <span className={isActive ? "text-[#00EF8B]" : ""}>{tab.icon}</span>
+                  {tab.label}
+                </button>
+              );
+            })}
           </div>
         </div>
-      </Section>
+      </div>
 
-      {/* ── CTA ── */}
+      {/* ── Tab content ────────────────────────────────────────────────────── */}
+      <div className="w-full max-w-3xl mx-auto px-4 pb-16">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={activeTab}
+            initial={reduced ? {} : { opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduced ? {} : { opacity: 0, y: -8 }}
+            transition={{ duration: 0.3, ease: EASE_OUT_EXPO }}
+          >
+            {tabContent[activeTab]}
+          </motion.div>
+        </AnimatePresence>
+      </div>
+
+      {/* ── CTA (always visible, below tabs) ───────────────────────────────── */}
       <motion.section
-        {...useFadeIn(0.1)}
-        className="w-full max-w-3xl mx-auto px-4 py-12"
+        initial={reduced ? {} : { opacity: 0, y: 18 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true }}
+        transition={{ duration: 0.5, ease: EASE_OUT_EXPO }}
+        className="w-full max-w-3xl mx-auto px-4 pb-12"
       >
-        <div className="relative overflow-hidden rounded-3xl border border-[#6B46C1]/20 bg-gradient-to-br from-[#6B46C1]/8 via-background to-[#00EF8B]/8 p-8 sm:p-10">
-          <div className="absolute -top-16 -left-16 w-48 h-48 rounded-full bg-[#6B46C1]/15 blur-3xl pointer-events-none" aria-hidden />
+        <div className="relative overflow-hidden rounded-3xl border border-[#A78BFA]/20 bg-gradient-to-br from-[#A78BFA]/8 via-background to-[#00EF8B]/8 p-8 sm:p-10">
+          <div className="absolute -top-16 -left-16 w-48 h-48 rounded-full bg-[#A78BFA]/15 blur-3xl pointer-events-none" aria-hidden />
           <div className="absolute -bottom-16 -right-16 w-48 h-48 rounded-full bg-[#00EF8B]/15 blur-3xl pointer-events-none" aria-hidden />
           <div className="relative text-center">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-[#6B46C1]/10 border border-[#6B46C1]/20 mb-5">
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-[#A78BFA]/10 border border-[#A78BFA]/20 mb-5">
               <Cpu className="w-6 h-6 text-[#A78BFA]" />
             </div>
             <h2
@@ -1217,7 +1318,7 @@ export default function LearnPage() {
               {[
                 "Sealed-bid NFT auctions", "Hidden pack openings",
                 "AlphaArena private positions", "Confidential payroll",
-                "Anonymous donations", "Cross-VM privacy wallets",
+                "Confidential donations", "Cross-VM privacy wallets",
                 "Dark-pool AMMs", "ZK voting",
               ].map((tag) => (
                 <span

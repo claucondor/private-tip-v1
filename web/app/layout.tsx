@@ -32,10 +32,24 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
+const SITE_DESCRIPTION =
+  "Send FLOW with cryptographically hidden amounts using Pedersen commitments and Groth16 proofs on Flow EVM testnet. Privacy, not anonymity. Audit in progress.";
+
 export const metadata: Metadata = {
   title: "PrivateTip — Confidential Tipping on Flow",
-  description:
-    "Send and receive tips with cryptographically hidden amounts on Flow blockchain using JanusToken ElGamal encryption.",
+  description: SITE_DESCRIPTION,
+  openGraph: {
+    title: "PrivateTip — Confidential tipping on Flow",
+    description: SITE_DESCRIPTION,
+    type: "website",
+    images: ["/og-image.png"],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "PrivateTip — Confidential tipping on Flow",
+    description: SITE_DESCRIPTION,
+    images: ["/og-image.png"],
+  },
 };
 
 export default function RootLayout({

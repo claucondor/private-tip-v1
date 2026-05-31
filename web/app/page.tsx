@@ -352,7 +352,7 @@ export default function Home() {
                   animate={{ opacity: [1, 0.3, 1] }}
                   transition={{ duration: 2, repeat: Infinity }}
                 />
-                @openjanus/sdk · v0.4.5 live on npm
+                @openjanus/sdk · v0.5.4 · audit in progress
               </div>
               <h2
                 className="text-3xl sm:text-4xl font-bold tracking-tight mb-3 text-foreground"
@@ -439,7 +439,7 @@ export default function Home() {
                 <UseCaseTag>Hidden-pack openings</UseCaseTag>
                 <UseCaseTag>Private trading arenas</UseCaseTag>
                 <UseCaseTag>Confidential payroll</UseCaseTag>
-                <UseCaseTag>Anonymous donations</UseCaseTag>
+                <UseCaseTag>Confidential donations</UseCaseTag>
                 <UseCaseTag>Cross-VM privacy wallets</UseCaseTag>
               </div>
             </div>

@@ -344,13 +344,13 @@ export default function SendTipPage() {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Wrap First</h1>
-            <p className="text-sm text-foreground/50">v0.3 orchestrator requires a pre-funded shielded slot</p>
+            <p className="text-sm text-foreground/50">PrivateTip requires a pre-funded shielded slot.</p>
           </div>
         </div>
 
         <div className="rounded-xl border border-[#B45309]/20 bg-[#B45309]/5 p-6 space-y-4">
           <p className="text-sm text-amber-200/80">
-            <strong className="text-amber-200">Pre-condition:</strong> PrivateTip v0.3 is a pure orchestrator over JanusFlow. To send shielded tips you must first wrap N FLOW into your JanusFlow shielded slot.
+            <strong className="text-amber-200">Pre-condition:</strong> PrivateTip requires a pre-funded shielded slot. To send shielded tips you must first wrap N FLOW into your JanusFlow shielded slot.
           </p>
           <p className="text-xs text-amber-200/50">
             The wrap is a one-time visible deposit (msg.value boundary). Subsequent tips draw down your shielded balance with amounts hidden by Pedersen commitments.
@@ -496,7 +496,10 @@ export default function SendTipPage() {
         </div>
 
         <div>
-          <label className="text-xs font-medium text-foreground/50 mb-1 block">Memo (optional, max 280 chars)</label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-xs font-medium text-foreground/50 block">Memo (optional, max 280 chars)</label>
+            <span className="text-[10px] font-mono text-foreground/40">{memo.length}/280</span>
+          </div>
           <input
             type="text"
             value={memo}
