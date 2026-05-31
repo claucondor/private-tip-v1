@@ -55,7 +55,7 @@ own instance.
 
 | | Hidden | Visible |
 |---|---|---|
-| **Amount** | Yes — Pedersen commitment, never in events or calldata | Only at wrap/unwrap boundaries (msg.value, `Wrapped`/`Unwrapped` events) |
+| **Amount** | Yes — Pedersen commitment, never in events or calldata during shielded transfers | At wrap (gross in `msg.value`, net in `Wrapped` + `WrapWithSnapshot` events); at unwrap (claimedAmount in calldata + `Unwrapped` + `UnwrapWithSnapshot` events + internal FLOW transfer — see note below) |
 | **Memo content** | Yes — ECIES encrypted to recipient's MemoKey | Only the encrypted blob's existence |
 | **Shielded balance** | Yes — commitment is an opaque BabyJubJub point | The aggregate `totalLocked` pool (by design) |
 | **Sender** | No | Visible on-chain |
@@ -153,10 +153,16 @@ Encrypted with ECIES + AES-GCM; the recipient decrypts with their MemoKey privke
   The app stores only the ciphertext; the plaintext is never transmitted or logged.
 - **Sender/recipient privacy**: NOT hidden — both addresses are visible on-chain.
   Stealth addresses are a planned future feature.
-- **Wrap/withdraw boundaries**: amounts are visible at `wrap` (msg.value,
-  `Wrapped(amount)` event) and at `unwrap` (`Unwrapped(amount, recipient)` event).
-  This is by design — the shielded pool is auditable for total custody. If you
-  need post-withdraw unlinkability, use a fresh wallet to receive.
+- **Wrap/withdraw boundaries**: amounts are visible at `wrap` (`msg.value` carries
+  the gross; `Wrapped(sender, netAmount)` and `WrapWithSnapshot(sender, netAmount, …)`
+  events carry the net post-fee) and at `unwrap` (`claimedAmount` is a proof public
+  input in calldata; `Unwrapped(sender, recipient, netToRecipient)` and
+  `UnwrapWithSnapshot(sender, claimedAmount, …)` events are emitted; additionally the
+  native FLOW transfer to the recipient is an internal transaction visible on any
+  block explorer — removing events would not make unwraps private). This is
+  amount privacy on shielded transfers, transparency at boundaries — by design,
+  not by accident. The shielded pool is auditable for total custody via `totalLocked`.
+  If you need post-withdraw unlinkability, use a fresh wallet to receive.
 - **Admin functions** (testnet-only): `adminResetSlot`, `adminWipeTipsByRecipient`
   — convenience for testnet development. Both are flagged for removal before mainnet.
 - **Impl upgrade model**: 48-hour time-lock from `proposeImplSwap` to

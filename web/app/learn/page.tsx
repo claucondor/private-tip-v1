@@ -1073,6 +1073,15 @@ function TabArchitecture() {
           amounts. When you <Em>withdraw</Em> (exit boundary), you provide a ZK proof that your
           commitment covers the claimed withdrawal amount, and the contract releases actual FLOW.
         </P>
+        <Callout accent="amber" label="Why withdraw amounts are always public — architecture, not a bug">
+          Withdraw (unwrap) amounts are inherently public on Flow EVM. The contract
+          sends native FLOW to the recipient via an internal transaction, which any
+          block explorer shows regardless of what events are emitted. Calldata,
+          the internal value transfer, the <Em>totalLocked</Em> storage delta, and
+          the contract balance delta all independently reveal the amount. This is a
+          property of EVM — not of this contract. The design is <Em>amount privacy
+          on shielded transfers, transparency at boundaries</Em>.
+        </Callout>
         <Callout accent="copper" label="Practical privacy tip">
           For the strongest privacy, after withdrawing, immediately forward your FLOW to a
           fresh wallet you&apos;ve never used publicly. This breaks the link between your shielded
