@@ -282,11 +282,16 @@ export default function WrapPage() {
       const oldBalanceWei = existing ? BigInt(existing.balanceWei) : BigInt(0);
       const oldBlinding = existing ? BigInt(existing.blinding) : BigInt(0);
 
+      // v0.5.4-fees: contract takes a 0.1% fee on msg.value. The proof MUST bind
+      // to the NET amount (msg.value - fee), not the gross. Compute net here so
+      // both the pre-proof (snapshot) and the wrapAction proof use the same value.
+      const netAmountWei = computeNetWrap(amountWei, feeBps);
+
       const preProof = await (async () => {
         const res = await fetch("/api/proof/encrypt", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: amountWei.toString() }),
+          body: JSON.stringify({ amount: netAmountWei.toString() }),
         });
         if (!res.ok) return null;
         return res.json() as Promise<{ blinding: string; txCommit: string[]; proof: string[]; commitment: { x: string; y: string }; publicInputs: string[] }>;
@@ -294,7 +299,8 @@ export default function WrapPage() {
 
       const wrapBlinding = preProof ? BigInt(preProof.blinding) : 0n;
       const finalNewBlinding = oldBlinding + wrapBlinding;
-      const finalNewBalanceWei = oldBalanceWei + amountWei;
+      // Local state tracks the NET (what's actually committed on-chain), not gross.
+      const finalNewBalanceWei = oldBalanceWei + netAmountWei;
 
       let snapshotCt: Uint8Array | undefined;
       let snapshotEphX: bigint | undefined;
@@ -315,10 +321,13 @@ export default function WrapPage() {
       const result = await wrapAction({
         amountUFix64, amountWei, source: resolvedSource,
         encryptedSnapshot: snapshotCt, ephPubkeyX: snapshotEphX, ephPubkeyY: snapshotEphY,
+        // v0.5.4-fees: tell wrapAction the proof must bind to the NET amount
+        netAmountForProofWei: netAmountWei,
       });
 
       const actualNewBlinding = oldBlinding + result.blinding;
-      const actualNewBalanceWei = oldBalanceWei + amountWei;
+      // Local state += NET (chain commit grew by net, not gross)
+      const actualNewBalanceWei = oldBalanceWei + netAmountWei;
 
       const newState: ShieldedState = {
         balanceWei: actualNewBalanceWei.toString(),

@@ -560,6 +560,7 @@ export async function generateShieldedTransferProof(params: {
 
 export interface WrapParams {
   amountUFix64: string;
+  /** GROSS amount in wei. This is the msg.value transferred to the contract. */
   amountWei: bigint;
   source?: WrapSource;
   /** v0.5.2: encrypted snapshot of post-wrap (balance, blinding). Optional with default "0x". */
@@ -568,6 +569,13 @@ export interface WrapParams {
   ephPubkeyX?: bigint;
   /** v0.5.2: ephemeral pubkey Y for snapshot decryption. */
   ephPubkeyY?: bigint;
+  /**
+   * v0.5.4-fees: NET amount in wei that the on-chain commitment binds to.
+   * If omitted, falls back to `amountWei` (backwards-compat with pre-fee builds).
+   * For fee-enabled contracts: net = gross - (gross * feeBps / 10000).
+   * The proof MUST bind to this net amount, not the gross msg.value.
+   */
+  netAmountForProofWei?: bigint;
 }
 
 export interface WrapResult {
@@ -584,9 +592,14 @@ export async function wrapAction(params: WrapParams): Promise<WrapResult> {
     encryptedSnapshot,
     ephPubkeyX,
     ephPubkeyY,
+    netAmountForProofWei,
   } = params;
 
-  const proofRes = await generateAmountDiscloseProof(amountWei);
+  // v0.5.4-fees: the on-chain contract verifies the proof against the NET amount
+  // (msg.value - fee). If caller supplies netAmountForProofWei, use it; otherwise
+  // fall back to amountWei (pre-fee build assumption).
+  const proofAmount = netAmountForProofWei ?? amountWei;
+  const proofRes = await generateAmountDiscloseProof(proofAmount);
   const txCommit: [bigint, bigint] = [
     BigInt(proofRes.txCommit[0]),
     BigInt(proofRes.txCommit[1]),
