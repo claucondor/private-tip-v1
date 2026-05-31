@@ -7,8 +7,15 @@ A reference app showing how to build privacy-preserving payments on Flow using
 sees an encrypted note with the value and memo. Multi-device by design. Browser
 UI included.
 
-> **Testnet only.** Admin functions `adminResetSlot` and `adminWipeTipsByRecipient`
-> are present and flagged for removal before any mainnet deployment.
+> **Testnet only — do not use for real value.** The openjanus stack and
+> PrivateTip are deployed on Flow EVM testnet for demonstration purposes.
+> **Not recommended for production use until third-party audit completes**
+> (audit pending). Admin functions `adminResetSlot` and `adminWipeTipsByRecipient`
+> are present on testnet and flagged for removal before any mainnet deployment.
+
+> **Fee model (v0.5.4+)**: wrap and unwrap each carry a **0.1% fee** at the
+> boundary; shielded tips between users are **free**. OFAC sanctions screening
+> via Chainalysis Oracle will be wired in for mainnet — privacy, not impunity.
 
 ---
 
