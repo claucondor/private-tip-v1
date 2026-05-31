@@ -223,14 +223,14 @@ export default function TipsPage() {
         </Link>
       </div>
 
-      <div className="flex items-center justify-between mb-8">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-[#6B46C1]/15 border border-[#6B46C1]/30 flex items-center justify-center">
+      <div className="flex items-start justify-between gap-3 mb-8">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-lg bg-[#6B46C1]/15 border border-[#6B46C1]/30 flex items-center justify-center shrink-0">
             <List className="w-5 h-5 text-[#6B46C1]" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h1 className="text-2xl font-bold" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>My tips</h1>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-xs sm:text-sm text-muted-foreground">
               Senders, recipients, and timestamps — but never amounts.
             </p>
           </div>
@@ -240,6 +240,7 @@ export default function TipsPage() {
           size="sm"
           onClick={handleRefresh}
           disabled={loading}
+          className="shrink-0"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
           <span className="ml-1 hidden sm:inline">Refresh</span>
@@ -367,8 +368,8 @@ export default function TipsPage() {
       )}
 
       <div className="mt-8 text-[10px] text-muted-foreground space-y-0.5">
-        <p>JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span></p>
-        <p>PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span></p>
+        <p>JanusFlow EVM: <span className="font-mono break-all">{JANUS_FLOW_EVM}</span></p>
+        <p>PrivateTip: <span className="font-mono break-all">{PRIVATE_TIP_CADENCE}</span></p>
       </div>
     </div>
   );
@@ -474,7 +475,7 @@ function TipCard({
     <div className="rounded-lg border border-border bg-card p-4 hover:bg-muted/30 transition-colors">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1 space-y-1.5">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span
               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
                 isReceived

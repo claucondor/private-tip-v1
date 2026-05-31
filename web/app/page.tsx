@@ -144,7 +144,7 @@ export default function Home() {
     <div className="flex flex-col items-center janus-hex-bg">
 
       {/* ── HERO ────────────────────────────────────────────────────────── */}
-      <section className="relative w-full min-h-screen flex flex-col items-center justify-center px-4 py-20 text-center overflow-hidden">
+      <section className="relative w-full min-h-screen flex flex-col items-center justify-center px-4 py-12 sm:py-20 text-center overflow-hidden">
 
         {/* Decorative ambient blobs */}
         <div className="absolute inset-0 pointer-events-none" aria-hidden>
@@ -478,14 +478,14 @@ function PrivacyFlowDiagram() {
   return (
     <div className="rounded-2xl border border-white/8 bg-[#0D1E38]/70 overflow-hidden shadow-sm">
       {/* Public lane */}
-      <div className="bg-[#B45309]/8 border-b border-white/8 px-5 py-4">
+      <div className="bg-[#B45309]/8 border-b border-white/8 px-3 sm:px-5 py-4">
         <div className="flex items-center gap-2 mb-3">
           <Eye className="w-4 h-4 text-[#B45309]" />
           <span className="text-xs font-semibold text-[#B45309]/80">
             Public chain — what observers see
           </span>
         </div>
-        <div className="grid grid-cols-4 gap-2 sm:gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4">
           <PublicCell label="You wrap" value="+2.0 FLOW" tone="visible" note="visible at entry" />
           <PublicCell label="You send" value="0x4e…f3a" tone="opaque" note="amount opaque" />
           <PublicCell label="Friend tips" value="0xd1…9c2" tone="opaque" note="amount opaque" />
@@ -493,26 +493,23 @@ function PrivacyFlowDiagram() {
         </div>
       </div>
 
-      {/* Boundary band */}
-      <div className="relative h-12 bg-gradient-to-b from-[#B45309]/5 via-[#0A1628]/50 to-[#00EF8B]/5">
+      {/* Boundary band — simplified on mobile (no absolute grid overlay) */}
+      <div className="relative h-10 sm:h-12 bg-gradient-to-b from-[#B45309]/5 via-[#0A1628]/50 to-[#00EF8B]/5 flex items-center justify-center">
         <div className="absolute top-1/2 left-0 right-0 -translate-y-1/2 janus-divider-shimmer opacity-50" />
-        <div className="absolute inset-0 grid grid-cols-4 items-center px-5">
-          <BoundaryArrow direction="down" label="boundary in" />
-          <PrivacyBand label="hidden zone" />
-          <PrivacyBand label="hidden zone" />
-          <BoundaryArrow direction="up" label="boundary out" />
-        </div>
+        <span className="relative z-10 text-[9px] uppercase tracking-widest font-semibold text-[#6B46C1]/70 bg-[#0A1628]/80 px-3 py-1 rounded-full">
+          hidden zone
+        </span>
       </div>
 
       {/* Private lane */}
-      <div className="bg-[#00EF8B]/5 border-t border-white/8 px-5 py-4">
+      <div className="bg-[#00EF8B]/5 border-t border-white/8 px-3 sm:px-5 py-4">
         <div className="flex items-center gap-2 mb-3">
           <Key className="w-4 h-4 text-[#00EF8B]" />
           <span className="text-xs font-semibold text-[#00EF8B]/80">
             Your wallet — what you see
           </span>
         </div>
-        <div className="grid grid-cols-4 gap-2 sm:gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4">
           <PrivateCell label="You wrap" value="+2.0" running="balance: 2.0" />
           <PrivateCell label="You send" value="−0.5" running="balance: 1.5" />
           <PrivateCell label="Friend tips" value="+1.0" running="balance: 2.5" />
@@ -521,13 +518,13 @@ function PrivacyFlowDiagram() {
       </div>
 
       {/* Caption strip */}
-      <div className="border-t border-white/8 bg-white/3 px-5 py-3 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+      <div className="border-t border-white/8 bg-white/3 px-3 sm:px-5 py-3 flex flex-col sm:flex-row flex-wrap items-start sm:items-center justify-between gap-2 text-[11px]">
         <span className="text-foreground/40 inline-flex items-center gap-1.5">
-          <Lock className="w-3 h-3 text-[#6B46C1]" />
+          <Lock className="w-3 h-3 text-[#6B46C1] shrink-0" />
           Inside the hidden zone: Pedersen commitments hide amounts, ECIES encrypts memos.
         </span>
         <span className="text-foreground/40 inline-flex items-center gap-1.5">
-          <Sparkles className="w-3 h-3 text-[#D4AF37]" />
+          <Sparkles className="w-3 h-3 text-[#D4AF37] shrink-0" />
           Sender ↔ recipient stays public — that&apos;s the social proof part of tipping.
         </span>
       </div>

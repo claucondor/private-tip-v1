@@ -12,7 +12,7 @@ import { FlowProvider, useFlowCurrentUser } from "@onflow/react-sdk";
 import { Toaster } from "sonner";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
-import { Key, RefreshCw, AlertTriangle } from "lucide-react";
+import { Key, RefreshCw, AlertTriangle, Menu, X } from "lucide-react";
 import { flowConfig } from "@/lib/fcl-config";
 import ConnectWallet from "@/components/ConnectWallet";
 import flowJSON from "../../flow.json";
@@ -476,8 +476,13 @@ export default function ClientLayout({
               <NavLink href="/learn" highlight>Learn</NavLink>
             </div>
           </div>
-          <ConnectWallet />
+          <div className="flex items-center gap-2">
+            <ConnectWallet />
+            <MobileMenuButton />
+          </div>
         </div>
+        {/* Mobile nav dropdown */}
+        <MobileNav />
       </nav>
 
       {/* Global MemoKey status banner */}
@@ -519,6 +524,79 @@ export default function ClientLayout({
         closeButton
       />
     </FlowProvider>
+  );
+}
+
+// Global mobile menu state — shared between button and nav panel
+let _setMobileMenuOpen: ((v: boolean) => void) | null = null;
+
+function MobileMenuButton() {
+  const [open, setOpen] = useState(false);
+  _setMobileMenuOpen = setOpen;
+
+  return (
+    <button
+      type="button"
+      aria-label="Toggle navigation"
+      onClick={() => setOpen((v) => !v)}
+      className="sm:hidden p-2 rounded-md text-foreground/60 hover:text-foreground hover:bg-white/8 transition-colors"
+    >
+      {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+    </button>
+  );
+}
+
+function MobileNav() {
+  const pathname = usePathname();
+  const [open, setOpen] = useState(false);
+
+  // Register setter so MobileMenuButton can toggle this
+  useEffect(() => {
+    _setMobileMenuOpen = setOpen;
+  });
+
+  // Close on route change
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
+  if (!open) return null;
+
+  const links: { href: string; label: string; highlight?: boolean }[] = [
+    { href: "/wrap",  label: "Wrap" },
+    { href: "/send",  label: "Send" },
+    { href: "/tips",  label: "Tips" },
+    { href: "/claim", label: "Withdraw" },
+    { href: "/learn", label: "Learn", highlight: true },
+  ];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -4 }}
+      transition={{ duration: 0.18 }}
+      className="sm:hidden border-t border-white/8 bg-[#0A1628]/98 px-4 py-3 space-y-1"
+    >
+      {links.map(({ href, label, highlight }) => {
+        const isActive = pathname === href;
+        return (
+          <Link
+            key={href}
+            href={href}
+            className={`flex items-center px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+              isActive
+                ? "bg-[#00EF8B]/10 text-[#00EF8B]"
+                : highlight
+                ? "text-purple-400 hover:bg-[#6B46C1]/10 hover:text-purple-300"
+                : "text-foreground/70 hover:bg-white/5 hover:text-foreground"
+            }`}
+          >
+            {label}
+          </Link>
+        );
+      })}
+    </motion.div>
   );
 }
 

@@ -261,8 +261,8 @@ function PedersenInteractive() {
             Same amount, different blinding → completely different point. This is perfect hiding.
           </p>
         </div>
-        <div className="shrink-0 flex items-center justify-center">
-          <svg width="260" height="140" viewBox="0 0 260 140" className="overflow-visible">
+        <div className="shrink-0 flex items-center justify-center overflow-x-auto">
+          <svg width="260" height="140" viewBox="0 0 260 140" className="overflow-visible min-w-[260px]">
             <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="none" stroke="#A78BFA" strokeOpacity="0.25" strokeWidth="1.5" />
             <line x1="30" y1={cy} x2={cx+rx+30} y2={cy} stroke="currentColor" strokeOpacity="0.1" strokeWidth="0.5" />
             <line x1={cx} y1="20" x2={cx} y2={cy+ry+30} stroke="currentColor" strokeOpacity="0.1" strokeWidth="0.5" />
@@ -1249,7 +1249,7 @@ export default function LearnPage() {
       </motion.div>
 
       {/* ── Sticky Tab Nav ─────────────────────────────────────────────────── */}
-      <div className="sticky top-0 z-30 w-full bg-background/90 backdrop-blur border-b border-border">
+      <div className="sticky top-[calc(theme(spacing.7)+theme(spacing.14))] z-30 w-full bg-background/90 backdrop-blur border-b border-border">
         <div className="max-w-3xl mx-auto px-4">
           <div className="flex gap-0 overflow-x-auto scrollbar-hide">
             {TABS.map((tab) => {
@@ -1297,7 +1297,7 @@ export default function LearnPage() {
         transition={{ duration: 0.5, ease: EASE_OUT_EXPO }}
         className="w-full max-w-3xl mx-auto px-4 pb-12"
       >
-        <div className="relative overflow-hidden rounded-3xl border border-[#A78BFA]/20 bg-gradient-to-br from-[#A78BFA]/8 via-background to-[#00EF8B]/8 p-8 sm:p-10">
+        <div className="relative overflow-hidden rounded-3xl border border-[#A78BFA]/20 bg-gradient-to-br from-[#A78BFA]/8 via-background to-[#00EF8B]/8 p-5 sm:p-8 md:p-10">
           <div className="absolute -top-16 -left-16 w-48 h-48 rounded-full bg-[#A78BFA]/15 blur-3xl pointer-events-none" aria-hidden />
           <div className="absolute -bottom-16 -right-16 w-48 h-48 rounded-full bg-[#00EF8B]/15 blur-3xl pointer-events-none" aria-hidden />
           <div className="relative text-center">

@@ -619,8 +619,8 @@ export default function SendTipPage() {
 
       {/* Footer */}
       <div className="mt-8 text-[10px] text-foreground/20 space-y-0.5">
-        <p>JanusFlow EVM: <span className="font-mono">{JANUS_FLOW_EVM}</span></p>
-        <p>PrivateTip: <span className="font-mono">{PRIVATE_TIP_CADENCE}</span></p>
+        <p>JanusFlow EVM: <span className="font-mono break-all">{JANUS_FLOW_EVM}</span></p>
+        <p>PrivateTip: <span className="font-mono break-all">{PRIVATE_TIP_CADENCE}</span></p>
       </div>
     </div>
   );
