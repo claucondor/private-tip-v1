@@ -1,6 +1,6 @@
 /// API route for v0.3 confidential-transfer (shielded transfer) proof generation.
 ///
-/// Server-side endpoint because @openjanus/sdk/crypto uses Node.js APIs (fs, path)
+/// Server-side endpoint because @claucondor/sdk/crypto uses Node.js APIs (fs, path)
 /// for reading circuit artifacts (.wasm, .zkey) and generating Groth16 proofs via snarkjs.
 ///
 /// Used for the shielded transfer path (and the transfer-half of unwrap).
@@ -29,16 +29,18 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   buildShieldedTransferProof,
   generateBlinding,
-} from "@openjanus/sdk/crypto";
+} from "@claucondor/sdk/crypto";
 import path from "path";
 
+// v0.5.1 circuits (pot18 ceremony, 128-bit range, Pedersen(256)). Must match
+// the SDK's computeCommitmentV05 output — v0.3 wasm would fail the witness.
 const SDK_ROOT = path.resolve(
   process.cwd(),
   "node_modules",
-  "@openjanus",
+  "@claucondor",
   "sdk",
   "circuits",
-  "v0.3"
+  "v0.5.1"
 );
 const TRANSFER_WASM = path.join(SDK_ROOT, "confidential_transfer.wasm");
 const TRANSFER_ZKEY = path.join(SDK_ROOT, "confidential_transfer_final.zkey");

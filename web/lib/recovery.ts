@@ -9,7 +9,7 @@
 ///   This replaces the old "self-tip" pattern where a second Cadence tx was
 ///   submitted after each action. There is no longer a TX_RECORD_SELF_TIP.
 ///
-/// Recovery algorithm (delegated to @openjanus/sdk recovery module):
+/// Recovery algorithm (delegated to @claucondor/sdk recovery module):
 ///   1. Scan JanusFlow *WithSnapshot events for the user's COA address.
 ///   2. Decrypt each snapshot with the user's MemoKey privkey.
 ///   3. Fetch incoming PrivateTip tips (for the recipient delta since last snap).
@@ -24,12 +24,12 @@
 
 "use client";
 
-import { recovery } from "@openjanus/sdk";
+import { recovery } from "@claucondor/sdk";
 import {
   type RecoveredShieldedState,
   RecoveryDesyncError,
   type Snapshot,
-} from "@openjanus/sdk/recovery";
+} from "@claucondor/sdk/recovery";
 import { ethers } from "ethers";
 
 export { RecoveryDesyncError };
@@ -49,7 +49,7 @@ const JANUS_FLOW_EVM = "0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078";
 /**
  * Reconstruct shielded state from chain using the v0.5.2 inline-snapshot model.
  *
- * Delegates to @openjanus/sdk recovery module which:
+ * Delegates to @claucondor/sdk recovery module which:
  *   1. Scans WrapWithSnapshot / ShieldedTransferWithSnapshot / UnwrapWithSnapshot events.
  *   2. Decrypts each with myMemoPrivkey.
  *   3. Takes the latest as absolute base state.

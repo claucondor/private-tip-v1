@@ -1,6 +1,6 @@
 /// Tip action helpers — v0.5.2.
 ///
-/// THIN APP LAYER over @openjanus/sdk@0.5.2. Anything generic now lives in
+/// THIN APP LAYER over @claucondor/sdk@0.5.2. Anything generic now lives in
 /// the SDK; this module only contains:
 ///   - PrivateTip-specific Cadence templates
 ///   - sendShieldedTipAction (orchestrates JanusFlow.shieldedTransfer +
@@ -36,7 +36,7 @@ import {
   readTotalLocked as sdkReadTotalLocked,
   // Source resolver
   resolveWrapSource,
-} from "@openjanus/sdk/tokens";
+} from "@claucondor/sdk/tokens";
 import {
   // COA helpers
   getCoaEvmAddress as sdkGetCoaEvmAddress,
@@ -44,8 +44,8 @@ import {
   getCoaBalanceWei as sdkGetCoaBalanceWei,
   getFlowVaultBalanceWei as sdkGetFlowVaultBalanceWei,
   TX_SETUP_COA,
-} from "@openjanus/sdk/network";
-// NOTE: @openjanus/sdk/crypto transitively pulls circomlibjs (~30MB) into
+} from "@claucondor/sdk/network";
+// NOTE: @claucondor/sdk/crypto transitively pulls circomlibjs (~30MB) into
 // the client bundle, which makes Turbopack compile take 30+ min. We removed
 // the top-level imports and route the heavy crypto through API routes
 // (server-only). Pure unit conversions live in /utils which IS browser-safe.
@@ -166,12 +166,12 @@ import {
   formatPoint as sdkFormatPoint,
   isValidFlowAddress as sdkIsValidFlowAddress,
   isValidFlowAmount as sdkIsValidFlowAmount,
-} from "@openjanus/sdk/utils";
+} from "@claucondor/sdk/utils";
 // Type-only imports — fully erased at build time, so they don't pull the SDK
 // barrel into the client bundle. The value `isIdentityPoint` would re-trigger
 // the heavy crypto import chain (amount-disclose -> dynamic url import that
 // Turbopack mis-polyfills to native-url), so we inline it here.
-import type { Point, WrapSource } from "@openjanus/sdk";
+import type { Point, WrapSource } from "@claucondor/sdk";
 
 /** BabyJub identity check (point at infinity = (0, 1)). */
 function sdkIsIdentityPoint(p: Point): boolean {

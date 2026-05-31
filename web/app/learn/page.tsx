@@ -1238,7 +1238,7 @@ export default function LearnPage() {
         <p className="text-sm text-muted-foreground max-w-xl mx-auto mb-3">
           Plain-language cryptography behind PrivateTip and the{" "}
           <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
-            @openjanus/sdk
+            @claucondor/sdk
           </span>{" "}
           stack.
         </p>
@@ -1340,16 +1340,16 @@ export default function LearnPage() {
             </div>
             <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
               <a
-                href="https://www.npmjs.com/package/@openjanus/sdk"
+                href="https://www.npmjs.com/package/@claucondor/sdk"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-[#0A1628] dark:bg-[#00EF8B] text-[#00EF8B] dark:text-[#0A1628] font-mono text-sm font-semibold hover:opacity-90 transition-opacity shadow-[0_2px_12px_color-mix(in_oklch,#00EF8B_25%,transparent)]"
               >
-                npm i @openjanus/sdk
+                npm i @claucondor/sdk
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
               <a
-                href="https://github.com/openjanus"
+                href="https://github.com/claucondor"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-border bg-background/80 backdrop-blur text-sm font-medium hover:bg-background transition-colors"

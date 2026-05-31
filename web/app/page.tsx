@@ -156,7 +156,7 @@ export default function Home() {
         {/* openjanus brand pill — clarifies this is a demo of the broader stack */}
         <motion.a
           {...fadeUp(reduced, 0)}
-          href="https://github.com/openjanus"
+          href="https://github.com/claucondor"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-2 mb-6 px-3 py-1.5 rounded-full border border-[#00EF8B]/40 bg-[#00EF8B]/8 hover:bg-[#00EF8B]/15 hover:border-[#00EF8B]/60 transition-colors group"
@@ -352,7 +352,7 @@ export default function Home() {
                   animate={{ opacity: [1, 0.3, 1] }}
                   transition={{ duration: 2, repeat: Infinity }}
                 />
-                @openjanus/sdk · v0.5.4 · audit in progress
+                @claucondor/sdk · v0.5.4 · audit in progress
               </div>
               <h2
                 className="text-3xl sm:text-4xl font-bold tracking-tight mb-3 text-foreground"
@@ -447,16 +447,16 @@ export default function Home() {
             {/* CTAs */}
             <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
               <a
-                href="https://www.npmjs.com/package/@openjanus/sdk"
+                href="https://www.npmjs.com/package/@claucondor/sdk"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#00EF8B] text-[#0A1628] font-mono text-sm font-semibold hover:opacity-90 transition-opacity shadow-[0_2px_16px_color-mix(in_oklch,#00EF8B_30%,transparent)]"
               >
-                npm i @openjanus/sdk
+                npm i @claucondor/sdk
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
               <a
-                href="https://github.com/openjanus"
+                href="https://github.com/claucondor"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-white/12 bg-white/5 text-sm font-medium text-foreground/70 hover:text-foreground hover:bg-white/8 transition-colors"

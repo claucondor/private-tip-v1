@@ -6,13 +6,13 @@
 /// Body: { amount: string, blinding: string }  (decimal wei strings)
 /// Response: { x: string, y: string }           (BabyJubJub point, decimal strings)
 ///
-/// Uses buildAmountDiscloseProof from @openjanus/sdk/crypto (which internally
+/// Uses buildAmountDiscloseProof from @claucondor/sdk/crypto (which internally
 /// uses computeCommitmentV05) and returns only the commitment field.
 /// A mismatch between this result and the on-chain commitment means the
 /// reconstructed state cannot open the on-chain commitment and unwrap WILL revert.
 
 import { NextRequest, NextResponse } from "next/server";
-import { buildAmountDiscloseProof } from "@openjanus/sdk/crypto";
+import { buildAmountDiscloseProof } from "@claucondor/sdk/crypto";
 import path from "path";
 
 export const runtime = "nodejs";
@@ -20,7 +20,7 @@ export const runtime = "nodejs";
 const SDK_ROOT = path.resolve(
   process.cwd(),
   "node_modules",
-  "@openjanus",
+  "@claucondor",
   "sdk",
   "circuits",
   "v0.5.1"

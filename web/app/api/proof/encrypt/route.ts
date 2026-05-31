@@ -1,6 +1,6 @@
 /// API route for v0.3 amount-disclose proof generation.
 ///
-/// Server-side endpoint because @openjanus/sdk/crypto uses Node.js APIs (fs, path)
+/// Server-side endpoint because @claucondor/sdk/crypto uses Node.js APIs (fs, path)
 /// for reading circuit artifacts (.wasm, .zkey) and generating Groth16 proofs via snarkjs.
 ///
 /// Used for the wrap path (proving that a Pedersen commitment binds to a public
@@ -25,17 +25,21 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   buildAmountDiscloseProof,
   generateBlinding,
-} from "@openjanus/sdk/crypto";
+} from "@claucondor/sdk/crypto";
 import path from "path";
 
-// v0.3 SDK bundles circuit artifacts under node_modules/@openjanus/sdk/circuits/v0.3.
+// v0.5.1 SDK ships circuit artifacts under node_modules/@claucondor/sdk/circuits/v0.5.1.
+// Bumped from v0.3 → v0.5.1 in sync with the SDK 0.5.1 publish (pot18 ceremony,
+// 128-bit range, Pedersen(256)). The SDK's computeCommitmentV05 produces commits
+// that ONLY match the v0.5.1 wasm — using v0.3 wasm here causes a witness
+// assertion failure at line 55 of amount_disclose.circom.
 const SDK_ROOT = path.resolve(
   process.cwd(),
   "node_modules",
-  "@openjanus",
+  "@claucondor",
   "sdk",
   "circuits",
-  "v0.3"
+  "v0.5.1"
 );
 const AMOUNT_WASM = path.join(SDK_ROOT, "amount_disclose.wasm");
 const AMOUNT_ZKEY = path.join(SDK_ROOT, "amount_disclose_final.zkey");
