@@ -15,6 +15,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Key, RefreshCw, AlertTriangle, Menu, X } from "lucide-react";
 import { flowConfig } from "@/lib/fcl-config";
 import ConnectWallet from "@/components/ConnectWallet";
+import MainnetCountdown from "@/components/MainnetCountdown";
 // Copy of /flow.json bundled inside web/ so Vercel's build root (web/) can resolve it.
 // Keep web/flow.json in sync with /flow.json when contracts/aliases change.
 import flowJSON from "../flow.json";
@@ -433,14 +434,8 @@ export default function ClientLayout({
       flowJson={flowJSON}
       colorMode="system"
     >
-      {/* Testnet banner — gold accent */}
-      <div className="sticky top-0 z-50 w-full border-b border-[#D4AF37]/40 bg-[#D4AF37]/10 dark:bg-[#D4AF37]/8 px-4 py-1.5 text-center text-xs font-medium text-amber-800 dark:text-[#D4AF37]">
-        <span className="font-mono">⬡</span>{" "}
-        <span className="hidden sm:inline">Testnet Mode — </span>
-        No real FLOW is used. For demonstration only.
-        <span className="hidden sm:inline"> · Audit in progress — not for production.</span>
-        <span className="sm:hidden"> · Audit in progress.</span>
-      </div>
+      {/* Mainnet countdown + faucet CTA (replaces standalone testnet banner) */}
+      <MainnetCountdown />
 
       {/* Nav bar — Fraunces wordmark */}
       <nav className="sticky top-7 z-40 w-full border-b border-white/8 bg-[#0A1628]/90 backdrop-blur supports-[backdrop-filter]:bg-[#0A1628]/75">
@@ -475,6 +470,8 @@ export default function ClientLayout({
               <NavLink href="/send">Send</NavLink>
               <NavLink href="/tips">Tips</NavLink>
               <NavLink href="/claim">Withdraw</NavLink>
+              <NavLink href="/status">Status</NavLink>
+              <NavLink href="/faucet">Faucet</NavLink>
               <NavLink href="/learn" highlight>Learn</NavLink>
             </div>
           </div>
@@ -499,7 +496,7 @@ export default function ClientLayout({
       {/* Footer */}
       <footer className="w-full border-t border-white/8 bg-[#0A1628]/60 px-4 py-4 text-[11px] text-foreground/50">
         <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span className="font-mono">Privacy, not anonymity.</span>
+          <span className="font-mono">Consent-required privacy.</span>
           <div className="flex items-center gap-3">
             <a
               href="https://github.com/claucondor/private-tip"
@@ -510,7 +507,7 @@ export default function ClientLayout({
               GitHub
             </a>
             <span className="text-foreground/30">·</span>
-            <span className="font-mono text-foreground/40">v0.5.5</span>
+            <span className="font-mono text-foreground/40">v0.5.6</span>
             <span className="text-foreground/30">·</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
               testnet
@@ -565,11 +562,13 @@ function MobileNav() {
   if (!open) return null;
 
   const links: { href: string; label: string; highlight?: boolean }[] = [
-    { href: "/wrap",  label: "Wrap" },
-    { href: "/send",  label: "Send" },
-    { href: "/tips",  label: "Tips" },
-    { href: "/claim", label: "Withdraw" },
-    { href: "/learn", label: "Learn", highlight: true },
+    { href: "/wrap",   label: "Wrap" },
+    { href: "/send",   label: "Send" },
+    { href: "/tips",   label: "Tips" },
+    { href: "/claim",  label: "Withdraw" },
+    { href: "/status", label: "Status" },
+    { href: "/faucet", label: "Faucet" },
+    { href: "/learn",  label: "Learn", highlight: true },
   ];
 
   return (

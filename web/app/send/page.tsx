@@ -502,7 +502,7 @@ export default function SendTipPage() {
             <p className="text-[10px] text-[#00EF8B] mt-1">✓ Your memo + amount get encrypted just for the recipient.</p>
           )}
           {recipientMemoOk === false && (
-            <p className="text-[10px] text-amber-400/70 mt-1">Recipient hasn&apos;t enabled their private inbox yet. Send is blocked — they wouldn&apos;t be able to claim the tip.</p>
+            <InviteRecipientCard recipient={recipient} />
           )}
           {recipientMemoOk === null && (
             <p className="text-[10px] text-foreground/30 mt-1">Every tip carries an encrypted note — recipient needs it to read the memo and claim the funds.</p>
@@ -664,6 +664,82 @@ function PasteShieldedStateForm({
       >
         Save (session only)
       </motion.button>
+    </div>
+  );
+}
+
+// ─── Invite-recipient share card (shown when recipient has no MemoKey) ────────
+
+function InviteRecipientCard({ recipient }: { recipient: string }) {
+  const baseUrl =
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://privatetip.condordev.xyz";
+  const inviteUrl = `${baseUrl}/wrap`;
+  const msg = `Hey — I want to send you a private tip on PrivateTip (consent-required privacy on Flow). Activate your private wallet in 1 tx: ${inviteUrl}`;
+
+  const copyMsg = () => {
+    navigator.clipboard.writeText(msg);
+    toast.success("Invite message copied", {
+      description: "Paste it to the recipient to unblock the tip.",
+    });
+  };
+
+  const encodedMsg = encodeURIComponent(msg);
+  const encodedUrl = encodeURIComponent(inviteUrl);
+
+  const shareLinks = [
+    {
+      label: "Twitter",
+      href: `https://twitter.com/intent/tweet?text=${encodedMsg}`,
+    },
+    {
+      label: "Telegram",
+      href: `https://t.me/share/url?url=${encodedUrl}&text=${encodedMsg}`,
+    },
+    { label: "WhatsApp", href: `https://wa.me/?text=${encodedMsg}` },
+    {
+      label: "Email",
+      href: `mailto:?subject=Private%20tip%20invitation&body=${encodedMsg}`,
+    },
+  ];
+
+  return (
+    <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-950/10 p-3 text-xs space-y-2">
+      <p className="text-amber-300/90 leading-relaxed">
+        <strong>Recipient hasn&apos;t activated their private inbox.</strong>{" "}
+        This is{" "}
+        <span className="text-amber-200">consent-required privacy</span> by
+        design — invite them to set up first.
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          onClick={copyMsg}
+          type="button"
+          className="px-2 py-1 rounded border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 transition-colors text-[10px]"
+        >
+          Copy invite
+        </button>
+        {shareLinks.map((s) => (
+          <a
+            key={s.label}
+            href={s.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-2 py-1 rounded border border-white/15 bg-white/5 text-foreground/70 hover:bg-white/10 transition-colors text-[10px]"
+          >
+            {s.label}
+          </a>
+        ))}
+        {isValidFlowAddress(recipient) && (
+          <Link
+            href={`/status?addr=${encodeURIComponent(recipient)}`}
+            className="px-2 py-1 rounded border border-[#D4AF37]/30 bg-[#D4AF37]/5 text-[#D4AF37] hover:bg-[#D4AF37]/15 transition-colors text-[10px]"
+          >
+            Recheck status →
+          </Link>
+        )}
+      </div>
     </div>
   );
 }
