@@ -69,9 +69,12 @@ async function faucetAuthz(account: FclAccount): Promise<FclAccount> {
   };
 }
 
+// Explicit testnet contract addresses — FCL string imports require flow.json
+// resolution which doesn't happen in this standalone route. Hardcoding the
+// testnet aliases is safe since the faucet is testnet-only by design.
 const TRANSFER_FLOW_TX = `
-import "FungibleToken"
-import "FlowToken"
+import FungibleToken from 0x9a0766d93b6608b7
+import FlowToken from 0x7e60df042a9c0868
 
 transaction(amount: UFix64, to: Address) {
   let sentVault: @{FungibleToken.Vault}
