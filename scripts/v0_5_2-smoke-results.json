@@ -25,7 +25,7 @@
         "duration_ms": 1499,
         "tx_hashes": [],
         "assertions_passed": 0,
-        "details": "resetSlot FAIL: \n\u274c Command Error: signer account: [openjanus-flow] doesn't exists in configuration\n"
+        "details": "resetSlot FAIL: \n❌ Command Error: signer account: [openjanus-flow] doesn't exists in configuration\n"
       }
     }
   },
@@ -64,6 +64,25 @@
         ],
         "assertions_passed": 9,
         "details": "resetAlice+Bob OK; setup_memo_key: PrivateTip.MemoKey type mismatch (known migration gap, skipped); wrap 5 FLOW OK with 106B snapshot; shieldedTransfer 2 FLOW to Bob OK with 107B residual snapshot; unwrap 2 FLOW to Bob vault OK with 88B snapshot; memo privacy checks pass (Bob decrypts, attacker rejected); all 3 snapshot blobs non-empty; Alice=3 FLOW shielded, Bob=0 shielded +~2 in vault"
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-30T17:08:34.689Z",
+    "sdk_version": "0.5.2",
+    "scripts": {
+      "v0_5_2-recovery-smoke": {
+        "status": "PASS",
+        "duration_ms": 178989,
+        "tx_hashes": [
+          "a2072adba1968d241427636e1c1d2f2c16f56939a9849d4fb0ef4b58de5ea777",
+          "bf92512924cf3a8b3745fe92dcc8ff8a55f6ca7c5ad23fd736e332044766567e",
+          "095719be46f4b53ca4009e62f45480a875febc4cf5f37929446332d06c2619ce",
+          "c2b359f4855f2724a35c2dc6cc03b9eac5c00b01876077a37d5b37f3d28ed565",
+          "0b0f12a42a28612c3d8fd2081e0f4820c010ee88ae9217f8ca82bbebad697105"
+        ],
+        "assertions_passed": 11,
+        "details": "resetSlot OK: a2072adba1968d241427636e1c1d2f2c16f56939a9849d4fb0ef4b58de5ea777; setup_memo_key OK: bf92512924cf3a8b3745fe92dcc8ff8a55f6ca7c5ad23fd736e332044766567e; wrap OK: 095719be46f4b53ca4009e62f45480a875febc4cf5f37929446332d06c2619ce; send OK: c2b359f4855f2724a35c2dc6cc03b9eac5c00b01876077a37d5b37f3d28ed565; Pedersen validation passed; unwrap-recovered OK: 0b0f12a42a28612c3d8fd2081e0f4820c010ee88ae9217f8ca82bbebad697105"
       }
     }
   }

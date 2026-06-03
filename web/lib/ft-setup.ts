@@ -106,7 +106,7 @@ import FungibleToken from ${cfg.fungibleTokenAddress}
 import ${cfg.contractName} from ${cfg.contractAddress}
 
 transaction {
-  prepare(signer: auth(SaveValue, Capabilities, IssueStorageCapabilityController, PublishCapability) &Account) {
+  prepare(signer: auth(BorrowValue, SaveValue, IssueStorageCapabilityController, PublishCapability) &Account) {
     // Idempotent — skip if already set up
     if signer.storage.borrow<&${cfg.contractName}.Vault>(from: ${cfg.vaultStoragePath}) != nil {
       return

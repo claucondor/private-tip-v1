@@ -302,11 +302,19 @@ function FaucetPageInner() {
         <div className="flex flex-wrap gap-2">
           {(["flow", "mockusdc", "mockft"] as TokenId[]).map((token) => {
             const s = getState(token);
+            const blockedByVaultSetup = token === "mockft" && hasMockFTVault !== true;
+            const isDisabled = s.status === "submitting" || s.status === "success" || blockedByVaultSetup;
+            const label = s.status === "success"
+              ? "Sent!"
+              : blockedByVaultSetup
+                ? "Setup first ↑"
+                : info?.tokens[token]?.amount ?? token;
             return (
               <button
                 key={token}
                 onClick={() => handleClaim(token)}
-                disabled={s.status === "submitting" || s.status === "success"}
+                disabled={isDisabled}
+                title={blockedByVaultSetup ? "Setup the MockFT receiver vault above first" : undefined}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-white/15 bg-white/5 text-xs text-foreground/70 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {s.status === "submitting" ? (
@@ -314,12 +322,12 @@ function FaucetPageInner() {
                 ) : (
                   <TokenBadge id={token} />
                 )}
-                {s.status === "success" ? "Sent!" : info?.tokens[token]?.amount ?? token}
+                {label}
               </button>
             );
           })}
         </div>
-        <p className="text-[10px] text-foreground/30 mt-2">Each token has its own 24h cooldown per IP.</p>
+        <p className="text-[10px] text-foreground/30 mt-2">Each token has its own 24h cooldown per IP. MockFT requires a one-time vault setup.</p>
       </div>
 
       {/* Next step CTA */}
