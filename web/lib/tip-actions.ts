@@ -221,14 +221,14 @@ export async function getTokenBalance(addr: string, tokenId: TokenId): Promise<b
 
 /**
  * Smart-setup transaction (v0.6 compatible).
- * Creates COA if missing, publishes MemoKey at JanusFlow registry path.
- * The MemoKey is shared — publishing once covers all tokens.
  *
- * For EVM tokens (flow/wflow/mockusdc): also calls publishMemoKey on the
- * shared MemoKeyRegistry via EVM tx. Pass `evmPrivkey` to enable this step.
+ * 1. Creates COA at /storage/evm if missing, publishes capability at /public/evm.
+ * 2. Publishes MemoKey to Cadence storage (JanusFlow path) for mockft adapter.
+ * 3. Calls MemoKeyRegistry.publishMemoKey(x, y) on EVM via COA cross-VM call.
+ *    This is the critical step for v0.6: all 4 EVM Janus adapters resolve the
+ *    recipient key from MemoKeyRegistry (not Cadence storage).
  *
- * For Cadence FT (mockft): JanusFT reads from JanusFlow Cadence MemoKey,
- * same as v0.5.x. The FCL tx below covers this.
+ * MEMO_REGISTRY: 0x05D104962ff087441f26BA11A1E1C3b9E091D663 (Flow EVM testnet)
  */
 export const TX_SMART_SETUP = `
 import EVM from 0x8c5303eaa26202d6
@@ -247,7 +247,8 @@ transaction(
             signer.capabilities.publish(coaCap, at: /public/evm)
         }
 
-        // 2. MemoKey (JanusFlow.MemoKey) — replace any existing resource.
+        // 2. MemoKey (JanusFlow.MemoKey) — replace any existing Cadence resource.
+        //    Required for mockft adapter which reads from Cadence storage path.
         let memoStoragePath = JanusFlow.memoKeyStoragePath()
         let memoPublicPath  = JanusFlow.memoKeyPublicPath()
 
@@ -260,6 +261,37 @@ transaction(
         signer.storage.save(<-key, to: memoStoragePath)
         let memoCap = signer.capabilities.storage.issue<&{JanusFlow.MemoKeyPublic}>(memoStoragePath)
         signer.capabilities.publish(memoCap, at: memoPublicPath)
+
+        // 3. EVM MemoKeyRegistry — cross-VM publish via COA.
+        //    msg.sender in EVM = user's COA address.
+        //    All 4 EVM Janus adapters (flow/wflow/mockusdc/ft) resolve recipient
+        //    keys from this registry. Without this step shielded transfers revert.
+        let coa = signer.storage
+            .borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+            ?? panic("No COA at /storage/evm — COA creation above should have succeeded")
+
+        let memoRegistryAddr = EVM.addressFromString("0x05D104962ff087441f26BA11A1E1C3b9E091D663")
+
+        // ABI-encode publishMemoKey(uint256,uint256) — selector 0x6370796a
+        let calldata = EVM.encodeABIWithSignature(
+            "publishMemoKey(uint256,uint256)",
+            [memoPubkeyX, memoPubkeyY]
+        )
+
+        let result = coa.call(
+            to: memoRegistryAddr,
+            data: calldata,
+            gasLimit: 200000,
+            value: EVM.Balance(attoflow: 0)
+        )
+
+        assert(
+            result.status == EVM.Status.successful,
+            message: "MemoKeyRegistry.publishMemoKey reverted — errorCode: "
+                .concat(result.errorCode.toString())
+                .concat(" ")
+                .concat(result.errorMessage)
+        )
     }
 }
 `;

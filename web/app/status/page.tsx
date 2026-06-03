@@ -93,28 +93,24 @@ export default function StatusPage() {
     setActivationStep("idle");
     setActivationError(null);
     try {
-      const { getRecipientMemoPubkey, recipientHasCoa, getCoaEvmAddress } =
+      const { getRecipientMemoPubkey, getCoaEvmAddress } =
         await import("@/lib/tip-actions");
 
-      const [memoPub, hasCoa] = await Promise.all([
+      // Use getCoaEvmAddress as the canonical COA check — it resolves the EVM
+      // address from /public/evm cap. Non-empty string means COA exists.
+      // Run both checks in parallel.
+      const [memoPub, coaAddress] = await Promise.all([
         getRecipientMemoPubkey(addr).catch(() => null),
-        recipientHasCoa(addr).catch(() => false),
+        getCoaEvmAddress(addr).catch(() => null),
       ]);
 
-      let coaAddress: string | null = null;
-      if (hasCoa) {
-        try {
-          coaAddress = await getCoaEvmAddress(addr);
-        } catch {
-          // non-fatal
-        }
-      }
+      const hasCoa = coaAddress !== null && coaAddress !== "" && coaAddress !== "0x";
 
       setResult({
         accountExists: true, // if either check ran without "account not found", account exists
         hasCoa,
         hasMemoKey: memoPub !== null,
-        coaAddress,
+        coaAddress: hasCoa ? coaAddress : null,
         error: null,
       });
     } catch (err) {
@@ -319,7 +315,7 @@ export default function StatusPage() {
             <StatusRow
               ok={result.hasMemoKey}
               label="MemoKey published"
-              hint="BabyJubJub pubkey at /public/openjanusMemoKey — required to encrypt tips"
+              hint="BabyJubJub pubkey in EVM MemoKeyRegistry — required to encrypt tips"
             />
           </div>
 
