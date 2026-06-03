@@ -768,6 +768,12 @@ export interface LegacyWrapParams {
   memoKeypair?: BabyJubKeypair;
   evmSigner?: ethers.Wallet;
   tokenId?: TokenId;
+  /**
+   * For native (FLOW) and erc20 (mUSDC) variants: the user's COA EVM address.
+   * Required for the wrapViaCoa FCL path — used to look up the registered MemoKey.
+   * If omitted for those variants, wrapViaCoa will throw a clear error.
+   */
+  coaEvmAddr?: string;
 }
 
 export interface LegacyWrapResult {
@@ -778,15 +784,51 @@ export interface LegacyWrapResult {
 
 /**
  * Wrap via SDK v0.6. Returns a minimal result for backward compat with wrap page.
+ *
+ * For native (FLOW) and erc20 (mUSDC) variants:
+ *   Uses adapter.wrapViaCoa() — dispatches a Cadence tx via FCL so the user's
+ *   COA (not a derived EOA) is msg.sender in JanusFlow/JanusERC20. The COA is
+ *   the identity that has the MemoKey registered, so wrap() won't revert.
+ *
+ * For cadence-ft (MockFT) variant:
+ *   Uses adapter.wrap() as before — JanusFTAdapter already calls FCL internally.
+ *
+ * The EVMSigner-based wrapAction() path is preserved for non-FCL consumers.
+ *
  * Pages should call latestSnapshot after wrap to get fresh state.
  */
 export async function wrapActionLegacy(params: LegacyWrapParams): Promise<LegacyWrapResult> {
-  const { amountWei, memoKeypair, evmSigner, tokenId = "flow" } = params;
+  const { amountWei, memoKeypair, evmSigner, tokenId = "flow", coaEvmAddr } = params;
 
   if (!memoKeypair) {
     throw new Error("wrapAction: memoKeypair required for v0.6 SDK");
   }
 
+  const entry = TOKEN_REGISTRY[tokenId];
+
+  if (entry.variant === "native" || entry.variant === "erc20") {
+    // FCL/COA path: user signs one Cadence tx in Flow Wallet.
+    // The COA EVM address must be supplied so we can look up the MemoKey.
+    if (!coaEvmAddr) {
+      throw new Error(
+        `wrapActionLegacy: coaEvmAddr is required for ${tokenId} (variant=${entry.variant}). Pass the user's COA hex address.`
+      );
+    }
+    const adapter = sdk.token(tokenId);
+    // Type assertion: both JanusFlowAdapter and JanusERC20Adapter have wrapViaCoa.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (adapter as any).wrapViaCoa({
+      grossAmount: amountWei,
+      coaEvmAddr,
+    });
+    return {
+      txId: result.txHash,
+      blinding: 0n,  // caller should re-scan to get fresh blinding
+      commitment: { x: 0n, y: 1n },
+    };
+  }
+
+  // cadence-ft (MockFT): adapter.wrap calls FCL internally — no EVMSigner needed.
   const result = await wrapAction({
     tokenId,
     grossAmountRaw: amountWei,
@@ -796,7 +838,7 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
 
   return {
     txId: result.txHash,
-    blinding: 0n,  // caller should re-scan to get fresh blinding
+    blinding: 0n,
     commitment: { x: 0n, y: 1n },
   };
 }

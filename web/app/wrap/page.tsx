@@ -402,27 +402,19 @@ function WrapPageInner() {
         memoKeypair = { privkey, pubkey };
       } catch { /* non-fatal — SDK will handle or skip snapshot */ }
 
-      // For EVM tokens (native/erc20), we need an ethers.Wallet signer.
-      // For cadence-ft (mockft), JanusFTAdapter uses FCL internally — signer is ignored.
-      let evmSigner;
-      if (tokenVariant === "native" || tokenVariant === "erc20") {
-        try {
-          const { createSigner } = await import("@/lib/tip-actions");
-          // Derive a deterministic EVM private key from the FCL wallet signature
-          const { deriveMemoKeyFromWallet } = await import("@/lib/memo-key-derive");
-          const kp = await deriveMemoKeyFromWallet();
-          // Use the raw privkey as hex for EVM signer
-          const hexPrivkey = "0x" + kp.privkey.toString(16).padStart(64, "0");
-          evmSigner = await createSigner(hexPrivkey);
-        } catch { /* signer derivation failed — wrap will throw with clear error */ }
-      }
+      // native (FLOW) and erc20 (mUSDC): use wrapViaCoa — one Cadence tx signed by
+      // Flow Wallet so the user's COA is msg.sender (the identity with the MemoKey).
+      // cadence-ft (MockFT): JanusFTAdapter uses FCL internally — no signer needed.
+      // The derived EOA path is intentionally removed for native/erc20 — that EOA
+      // has no MemoKey registered and causes "signer has no registered memoKey" reverts.
 
       const result = await wrapAction({
         amountUFix64: formatTokenAmount(amountWei, selectedToken, 8),
         amountWei,
         source: tokenVariant === "native" ? (source === "auto" ? (vaultBalanceWei >= amountWei ? "vault" : "coa") : source) : undefined,
         memoKeypair,
-        evmSigner,
+        // coaEvmAddr required for native/erc20 wrapViaCoa path
+        coaEvmAddr: (tokenVariant === "native" || tokenVariant === "erc20") ? (coaHex ?? undefined) : undefined,
         tokenId: selectedToken,
       });
 
