@@ -7,7 +7,6 @@ import { SUPPORTED_TOKENS, type TokenId } from "@/lib/tokens";
 
 const TOKEN_ICONS: Record<TokenId, string> = {
   flow:     "⬡",
-  wflow:    "↻",
   mockusdc: "$",
   mockft:   "T",
 };

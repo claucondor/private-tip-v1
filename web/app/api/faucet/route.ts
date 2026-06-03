@@ -11,7 +11,6 @@
 ///   flow     → 1.0 FLOW (via Cadence FCL tx)
 ///   mockusdc → 10 mUSDC (via ERC20 transfer from faucet EVM wallet)
 ///   mockft   → 10 MockFT (via Cadence FCL tx from faucet vault)
-///   wflow    → 1.0 WFLOW (wrapped FLOW from faucet wallet)
 
 import * as fcl from "@onflow/fcl";
 import { ec as EC } from "elliptic";
@@ -112,22 +111,22 @@ transaction(amount: UFix64, to: Address) {
 `;
 
 // MockFT transfer from faucet Cadence vault to recipient.
-// The deployed MockFT contract is at JanusFT's cadenceAddress on testnet.
+// The deployed MockFT contract is at testnet address 0x7599043aea001283.
 // v0.6 canonical address from SDK TOKEN_REGISTRY.mockft.cadenceAddress.
 const MOCKFT_CADENCE_ADDR = "0x7599043aea001283";
-const MOCKFT_CONTRACT = "JanusMockFT";
+const MOCKFT_CONTRACT = "MockFT";
 
 const TRANSFER_MOCKFT_TX = `
 import FungibleToken from 0x9a0766d93b6608b7
-import JanusMockFT from ${MOCKFT_CADENCE_ADDR}
+import MockFT from ${MOCKFT_CADENCE_ADDR}
 
 transaction(amount: UFix64, to: Address) {
   let sentVault: @{FungibleToken.Vault}
 
   prepare(signer: auth(BorrowValue) &Account) {
     let vault = signer.storage
-      .borrow<auth(FungibleToken.Withdraw) &JanusMockFT.Vault>(
-        from: /storage/janusMockFTVault
+      .borrow<auth(FungibleToken.Withdraw) &MockFT.Vault>(
+        from: /storage/mockFTVault
       ) ?? panic("Faucet MockFT vault not found")
     self.sentVault <- vault.withdraw(amount: amount)
   }
@@ -135,8 +134,8 @@ transaction(amount: UFix64, to: Address) {
   execute {
     let recipient = getAccount(to)
     let receiver = recipient.capabilities
-      .borrow<&{FungibleToken.Receiver}>(/public/janusMockFTReceiver)
-      ?? panic("Recipient has no JanusMockFT receiver capability")
+      .borrow<&{FungibleToken.Receiver}>(/public/mockFTReceiver)
+      ?? panic("Recipient has no MockFT receiver capability")
     receiver.deposit(from: <-self.sentVault)
   }
 }
@@ -147,9 +146,9 @@ transaction(amount: UFix64, to: Address) {
 const FLOW_EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 const EVM_CHAIN_ID = 545;
 
-// mUSDC proxy address from SDK TOKEN_REGISTRY.mockusdc.underlying (the ERC20 token itself).
+// mUSDC ERC20 address on Flow EVM testnet (canonical from janus-erc20-v0.4 deployment).
 // Faucet sends underlying mUSDC directly (not the shielded proxy).
-const MOCK_USDC_ADDR = "0x94F4bF3e8E8Bce6d5aCdc960B14c60d6Fe22B5";  // TOKEN_REGISTRY.mockusdc.underlying
+const MOCK_USDC_ADDR = "0x8405E8831737aE72204c271581b7d4fAD9f622bE";
 
 const ERC20_TRANSFER_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
@@ -162,7 +161,6 @@ const TOKEN_AMOUNTS: Record<string, { display: string; cadenceUFix64?: string; w
   flow:     { display: "1.0 FLOW",    cadenceUFix64: "1.00000000" },
   mockusdc: { display: "10 mUSDC",    weiAmount: 10n * 10n ** 6n },     // 6 decimals
   mockft:   { display: "10 MockFT",   cadenceUFix64: "10.00000000" },
-  wflow:    { display: "1.0 FLOW",    cadenceUFix64: "1.00000000" },     // send FLOW for testnet (user wraps themselves)
 };
 
 // ─── Request handler ─────────────────────────────────────────────────────────
@@ -200,9 +198,9 @@ export async function POST(req: Request) {
     );
   }
 
-  if (!["flow", "mockusdc", "mockft", "wflow"].includes(token)) {
+  if (!["flow", "mockusdc", "mockft"].includes(token)) {
     return Response.json(
-      { error: "Invalid token — must be flow|mockusdc|mockft|wflow" },
+      { error: "Invalid token — must be flow|mockusdc|mockft" },
       { status: 400 }
     );
   }
@@ -230,8 +228,8 @@ export async function POST(req: Request) {
   lastClaim.set(rlKey, now);
 
   try {
-    // -- FLOW / WFLOW (send FLOW via Cadence) ----------------------------------
-    if (token === "flow" || token === "wflow") {
+    // -- FLOW (send FLOW via Cadence) -----------------------------------------
+    if (token === "flow") {
       const txId = await fcl.mutate({
         cadence: TRANSFER_FLOW_TX,
         args: (
@@ -250,7 +248,6 @@ export async function POST(req: Request) {
         token,
         recipient: address,
         explorerUrl: `https://testnet.flowscan.io/tx/${txId}`,
-        note: token === "wflow" ? "Received FLOW — wrap it to WFLOW on the Wrap page." : undefined,
       });
     }
 
@@ -339,7 +336,6 @@ export async function GET() {
       flow:     { amount: TOKEN_AMOUNTS.flow.display,     cooldownHours: 24 },
       mockusdc: { amount: TOKEN_AMOUNTS.mockusdc.display, cooldownHours: 24, requiresCOA: true },
       mockft:   { amount: TOKEN_AMOUNTS.mockft.display,   cooldownHours: 24 },
-      wflow:    { amount: TOKEN_AMOUNTS.wflow.display,    cooldownHours: 24, note: "Sends FLOW — wrap to WFLOW on Wrap page" },
     },
   });
 }

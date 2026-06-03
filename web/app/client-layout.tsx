@@ -136,7 +136,7 @@ function RecoveryBanner() {
       // v0.6: recover per-token via SDK adapter latestSnapshot.
       const { saveShieldedState } = await import("@/lib/store");
       let anyRecovered = false;
-      for (const tokenId of ["flow", "wflow", "mockusdc"] as const) {
+      for (const tokenId of ["flow", "mockusdc"] as const) {
         try {
           const snap = await recoverShieldedState(coaHex, privkey, tokenId);
           if (snap) {
@@ -403,7 +403,7 @@ function MemoKeyStatusBanner() {
       animate={{ y: 0, opacity: 1 }}
       exit={{ y: -8, opacity: 0 }}
       transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-      className="sticky top-[calc(theme(spacing.7)+1px)] z-40 w-full border-b border-[#B45309]/40 bg-[#0A1628]/95 px-4 py-2 text-xs backdrop-blur"
+      className="sticky top-[calc(theme(spacing.7)+theme(spacing.14)+1px)] z-40 w-full border-b border-[#B45309]/40 bg-[#0A1628]/95 px-4 py-2 text-xs backdrop-blur"
     >
       <div className="max-w-5xl mx-auto flex items-center justify-between gap-3">
         <span className="flex items-center gap-2 text-amber-200 min-w-0">

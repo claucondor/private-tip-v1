@@ -7,7 +7,6 @@ import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
 
 export const SUPPORTED_TOKENS = [
   { id: "flow"     as const, label: "FLOW",    symbol: "FLOW",    decimals: 18 },
-  { id: "wflow"    as const, label: "WFLOW",   symbol: "WFLOW",   decimals: 18 },
   { id: "mockusdc" as const, label: "mUSDC",   symbol: "mUSDC",   decimals: 6  },
   { id: "mockft"   as const, label: "MockFT",  symbol: "MockFT",  decimals: 8  },
 ] as const;
