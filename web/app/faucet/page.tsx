@@ -7,10 +7,11 @@ import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useFlowCurrentUser } from "@onflow/react-sdk";
-import { Droplet, ExternalLink, ArrowRight, Wallet, Loader2 } from "lucide-react";
+import { Droplet, ExternalLink, ArrowRight, Wallet, Loader2, Wrench } from "lucide-react";
 import { toast } from "sonner";
 import { TokenSelector, TokenBadge } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
+import { FT_CONFIGS, checkReceiverCapability, signSetupTx } from "@/lib/ft-setup";
 
 type ClaimState =
   | { status: "idle" }
@@ -48,6 +49,10 @@ function FaucetPageInner() {
   const [states, setStates] = useState<Partial<Record<TokenId, ClaimState>>>({});
   const [info, setInfo] = useState<FaucetInfo | null>(null);
 
+  // MockFT vault state: null = unknown/checking, true = ready, false = needs setup
+  const [hasMockFTVault, setHasMockFTVault] = useState<boolean | null>(null);
+  const [isSettingUpVault, setIsSettingUpVault] = useState(false);
+
   useEffect(() => {
     if (userAddress && !recipient) setRecipient(userAddress);
   }, [userAddress, recipient]);
@@ -59,10 +64,51 @@ function FaucetPageInner() {
       .catch(() => setInfo({ enabled: false, address: null, cooldownHours: 24, tokens: {} }));
   }, []);
 
+  // Re-check MockFT vault whenever the wallet address changes or mockft is selected.
+  const recheckMockFTVault = useCallback(async (addr: string) => {
+    setHasMockFTVault(null);
+    try {
+      const ready = await checkReceiverCapability(addr, FT_CONFIGS.mockft);
+      setHasMockFTVault(ready);
+    } catch {
+      // If the check fails (e.g. script error), assume not set up.
+      setHasMockFTVault(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedToken === "mockft" && recipient && /^0x[a-fA-F0-9]{16}$/.test(recipient)) {
+      recheckMockFTVault(recipient);
+    } else if (selectedToken !== "mockft") {
+      setHasMockFTVault(null);
+    }
+  }, [selectedToken, recipient, recheckMockFTVault]);
+
   const getState = (token: TokenId): ClaimState =>
     states[token] ?? { status: "idle" };
   const setState = (token: TokenId, s: ClaimState) =>
     setStates((prev) => ({ ...prev, [token]: s }));
+
+  const handleSetupVault = useCallback(async () => {
+    if (!userAddress) {
+      toast.error("Connect your wallet first");
+      return;
+    }
+    setIsSettingUpVault(true);
+    try {
+      const { txId } = await signSetupTx(FT_CONFIGS.mockft);
+      toast.success("MockFT receiver set up ✓", {
+        description: `tx: ${txId.slice(0, 12)}…`,
+      });
+      // Re-check state — should now be true.
+      await recheckMockFTVault(userAddress);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Setup failed";
+      toast.error(msg);
+    } finally {
+      setIsSettingUpVault(false);
+    }
+  }, [userAddress, recheckMockFTVault]);
 
   const handleClaim = useCallback(async (token: TokenId) => {
     if (!isValidFlowAddress(recipient)) {
@@ -164,10 +210,51 @@ function FaucetPageInner() {
           </div>
         )}
 
+        {/* MockFT vault setup notice + buttons */}
+        {selectedToken === "mockft" && (
+          <div className="text-xs text-foreground/50 bg-amber-950/20 border border-amber-500/20 rounded px-3 py-2">
+            MockFT is a custom token — Cadence requires you to create the receiver vault
+            before depositing. One-time setup.
+          </div>
+        )}
+
+        {/* Setup vault button — shown when MockFT selected and vault not yet set up */}
+        {selectedToken === "mockft" && hasMockFTVault === false && (
+          <button
+            onClick={handleSetupVault}
+            disabled={isSettingUpVault || !userAddress}
+            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-amber-500/50 bg-amber-500/10 text-amber-300 font-medium hover:bg-amber-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isSettingUpVault ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Setting up…
+              </>
+            ) : (
+              <>
+                <Wrench className="w-4 h-4" />
+                Setup MockFT receiver
+              </>
+            )}
+          </button>
+        )}
+
+        {/* Vault checking spinner */}
+        {selectedToken === "mockft" && hasMockFTVault === null && recipient && (
+          <div className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-white/10 bg-white/5 text-foreground/40 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Checking MockFT vault…
+          </div>
+        )}
+
         {/* Claim button */}
         <button
           onClick={() => handleClaim(selectedToken)}
-          disabled={isSubmitting || !recipient}
+          disabled={
+            isSubmitting ||
+            !recipient ||
+            (selectedToken === "mockft" && hasMockFTVault !== true)
+          }
           className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-[#00EF8B]/50 bg-[#00EF8B]/10 text-[#00EF8B] font-medium hover:bg-[#00EF8B]/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {isSubmitting ? (
