@@ -187,6 +187,7 @@ function ClaimPageInner() {
         oldBlinding: BigInt(shielded.blinding),
         memoKeypair,
         tokenId: selectedToken,
+        coaEvmAddr: coaHex,
       });
 
       const newState: ShieldedState = {

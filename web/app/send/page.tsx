@@ -244,6 +244,12 @@ export default function SendTipPage() {
         memoKeypair = { privkey, pubkey };
       } catch { /* non-fatal */ }
 
+      // Resolve sender's own COA address for the ViaCoa path (native/erc20 variants).
+      let senderCoaEvmAddr: string | undefined;
+      try {
+        senderCoaEvmAddr = await getCoaEvmAddress(userAddress);
+      } catch { /* non-fatal — adapter will throw clearly if missing */ }
+
       const result = await sendShieldedTipAction({
         recipientFlowAddr: recipient,
         recipientCoaHex,
@@ -254,6 +260,7 @@ export default function SendTipPage() {
         recipientMemoPubkey,
         tokenId: selectedToken,
         memoKeypair,
+        senderCoaEvmAddr,
       });
 
       const newState: ShieldedState = {

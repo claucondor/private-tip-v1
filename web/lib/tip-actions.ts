@@ -25,6 +25,7 @@ import {
   type TxResult,
   computeNetWrap,
   computeWrapFee,
+  generateBlinding,
 } from "@claucondor/sdk";
 import {
   getCoaEvmAddress as sdkGetCoaEvmAddress,
@@ -404,6 +405,11 @@ export interface SendActionParams {
   memo?: string;
   evmSigner?: ethers.Wallet;
   memoKeypair: BabyJubKeypair;
+  /**
+   * Sender's COA EVM hex address — required for native/erc20 variants
+   * so shieldedTransferViaCoa can look up the sender's registered MemoKey.
+   */
+  coaEvmAddr?: string;
 }
 
 export interface SendActionResult {
@@ -411,7 +417,7 @@ export interface SendActionResult {
 }
 
 export async function sendShieldedAction(params: SendActionParams): Promise<SendActionResult> {
-  const { tokenId, recipientAddr, amount, currentBalance, currentBlinding, memo, evmSigner } = params;
+  const { tokenId, recipientAddr, amount, currentBalance, currentBlinding, memo, evmSigner, coaEvmAddr } = params;
 
   if (amount > currentBalance) {
     throw new Error(
@@ -419,9 +425,59 @@ export async function sendShieldedAction(params: SendActionParams): Promise<Send
     );
   }
 
+  const entry = TOKEN_REGISTRY[tokenId];
   const adapter = sdk.token(tokenId);
-  const signer = evmSigner ?? (null as unknown as ethers.Wallet);
 
+  if (entry.variant === "native" || entry.variant === "erc20") {
+    // FCL/COA path: user signs Cadence tx in Flow Wallet.
+    if (!coaEvmAddr) {
+      throw new Error(
+        `sendShieldedAction: coaEvmAddr is required for ${tokenId} (variant=${entry.variant}).`
+      );
+    }
+
+    // Generate fresh blindings client-side.
+    const transferBlinding = generateBlinding();
+    const newBlinding = generateBlinding();
+
+    // Build proof server-side.
+    const proofResponse = await fetch("/api/proof/shielded-transfer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        oldBalance: currentBalance.toString(),
+        oldBlinding: currentBlinding.toString(),
+        transferAmount: amount.toString(),
+        transferBlinding: transferBlinding.toString(),
+        newBlinding: newBlinding.toString(),
+      }),
+    });
+    if (!proofResponse.ok) {
+      const errBody = await proofResponse.json().catch(() => ({ error: proofResponse.statusText }));
+      throw new Error(`sendShieldedAction: proof generation failed: ${errBody.error}`);
+    }
+    const proofData = await proofResponse.json();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (adapter as any).shieldedTransferViaCoa({
+      recipient: recipientAddr,
+      amount,
+      currentBalance,
+      currentBlinding,
+      memo,
+      coaEvmAddr,
+      prebuiltProof: {
+        proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
+        transferBlinding,
+        newBlinding,
+      },
+    });
+    return { txHash: result.txHash };
+  }
+
+  // cadence-ft (MockFT): adapter calls FCL internally — no EVMSigner / ViaCoa needed.
+  const signer = evmSigner ?? (null as unknown as ethers.Wallet);
   const result = await adapter.shieldedTransfer(
     {
       recipient: recipientAddr,
@@ -446,6 +502,12 @@ export interface UnwrapActionParams {
   currentBlinding: bigint;
   evmSigner?: ethers.Wallet;
   memoKeypair: BabyJubKeypair;
+  /**
+   * Sender's COA EVM hex address — required for native/erc20 variants.
+   * The COA is msg.sender in JanusFlow.unwrap, so the MemoKey must be
+   * registered under this address. Also used as the proof builder's context.
+   */
+  coaEvmAddr?: string;
 }
 
 export interface UnwrapActionResult {
@@ -454,7 +516,7 @@ export interface UnwrapActionResult {
 }
 
 export async function unwrapAction(params: UnwrapActionParams): Promise<UnwrapActionResult> {
-  const { tokenId, claimedAmount, recipient, currentBalance, currentBlinding, evmSigner } = params;
+  const { tokenId, claimedAmount, recipient, currentBalance, currentBlinding, evmSigner, coaEvmAddr } = params;
 
   if (claimedAmount > currentBalance) {
     throw new Error(
@@ -462,9 +524,60 @@ export async function unwrapAction(params: UnwrapActionParams): Promise<UnwrapAc
     );
   }
 
+  const entry = TOKEN_REGISTRY[tokenId];
   const adapter = sdk.token(tokenId);
-  const signer = evmSigner ?? (null as unknown as ethers.Wallet);
 
+  if (entry.variant === "native" || entry.variant === "erc20") {
+    // FCL/COA path.
+    if (!coaEvmAddr) {
+      throw new Error(
+        `unwrapAction: coaEvmAddr is required for ${tokenId} (variant=${entry.variant}).`
+      );
+    }
+
+    // Generate fresh blindings client-side.
+    const transferBlinding = generateBlinding();
+    const newBlinding = generateBlinding();
+
+    // Build both proofs server-side.
+    const proofResponse = await fetch("/api/proof/unwrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        claimedAmount: claimedAmount.toString(),
+        currentBalance: currentBalance.toString(),
+        currentBlinding: currentBlinding.toString(),
+        transferBlinding: transferBlinding.toString(),
+        newBlinding: newBlinding.toString(),
+      }),
+    });
+    if (!proofResponse.ok) {
+      const errBody = await proofResponse.json().catch(() => ({ error: proofResponse.statusText }));
+      throw new Error(`unwrapAction: proof generation failed: ${errBody.error}`);
+    }
+    const proofData = await proofResponse.json();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (adapter as any).unwrapViaCoa({
+      claimedAmount,
+      recipient,
+      currentBalance,
+      currentBlinding,
+      coaEvmAddr,
+      prebuiltProofs: {
+        amountProof: proofData.amountProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
+        amountPublicInputs: proofData.amountPublicInputs.map(BigInt) as [bigint,bigint,bigint],
+        transferProof: proofData.transferProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        transferPublicInputs: proofData.transferPublicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
+        newBlinding,
+      },
+    });
+    return { txHash: result.txHash, netToRecipient: result.netToRecipient };
+  }
+
+  // cadence-ft (MockFT): adapter calls FCL internally.
+  const signer = evmSigner ?? (null as unknown as ethers.Wallet);
   const result = await adapter.unwrap(
     {
       claimedAmount,
@@ -686,6 +799,11 @@ export interface SendShieldedTipParams {
   tokenId?: TokenId;
   evmSigner?: ethers.Wallet;
   memoKeypair?: BabyJubKeypair;
+  /**
+   * Sender's own COA EVM hex address — required for native/erc20 variants
+   * so the shieldedTransferViaCoa path can find the sender's MemoKey.
+   */
+  senderCoaEvmAddr?: string;
 }
 
 export interface SendShieldedTipResult {
@@ -734,6 +852,18 @@ export async function sendShieldedTipAction(
   // Cadence FT (mockft): use Cadence Flow address.
   const recipientAddr = entry.variant === "cadence-ft" ? recipientFlowAddr : recipientCoaHex;
 
+  // Resolve sender's COA address for the ViaCoa path (native/erc20 variants).
+  let senderCoaEvmAddr: string | undefined;
+  if (entry.variant === "native" || entry.variant === "erc20") {
+    try {
+      // params doesn't carry senderFlowAddr explicitly; derive from FCL current user below.
+      // We use recipientCoaHex as a proxy for the pattern — but we need the SENDER's COA.
+      // The send page already has the sender's userAddress. Pass it via a new optional field.
+      // If not provided, fall back to undefined and let the adapter throw a clear error.
+      senderCoaEvmAddr = (params as typeof params & { senderCoaEvmAddr?: string }).senderCoaEvmAddr;
+    } catch { /* non-fatal — adapter will throw if missing */ }
+  }
+
   const result = await sendShieldedAction({
     tokenId,
     recipientAddr,
@@ -743,6 +873,7 @@ export async function sendShieldedTipAction(
     memo,
     evmSigner,
     memoKeypair: memoKeypair ?? { privkey: 0n, pubkey: { x: 0n, y: 1n } },
+    coaEvmAddr: senderCoaEvmAddr,
   });
 
   // v0.6: SDK doesn't return newBlinding directly. We can reconstruct it
@@ -814,12 +945,42 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
         `wrapActionLegacy: coaEvmAddr is required for ${tokenId} (variant=${entry.variant}). Pass the user's COA hex address.`
       );
     }
+
+    // Compute netAmount for proof: feeBps from adapter, then net = gross - fee.
     const adapter = sdk.token(tokenId);
+    const bps = await adapter.feeBps();
+    const fee = bps === 0 ? 0n : (amountWei * BigInt(bps)) / 10000n;
+    const netAmount = amountWei - fee;
+
+    // Generate blinding client-side (crypto.getRandomValues, browser-safe).
+    const blinding = generateBlinding();
+
+    // Build proof server-side (wasm/zkey file I/O requires Node.js).
+    const proofResponse = await fetch("/api/proof/wrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amount: netAmount.toString(),
+        blinding: blinding.toString(),
+      }),
+    });
+    if (!proofResponse.ok) {
+      const errBody = await proofResponse.json().catch(() => ({ error: proofResponse.statusText }));
+      throw new Error(`wrapActionLegacy: proof generation failed: ${errBody.error}`);
+    }
+    const proofData = await proofResponse.json();
+
     // Type assertion: both JanusFlowAdapter and JanusERC20Adapter have wrapViaCoa.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await (adapter as any).wrapViaCoa({
       grossAmount: amountWei,
       coaEvmAddr,
+      prebuiltProof: {
+        proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
+        blinding,
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint],
+      },
     });
     return {
       txId: result.txHash,
@@ -853,6 +1014,11 @@ export interface LegacyUnwrapParams {
   memoKeypair?: BabyJubKeypair;
   evmSigner?: ethers.Wallet;
   tokenId?: TokenId;
+  /**
+   * Caller's COA EVM hex address — required for native/erc20 variants.
+   * The claim page already has this as coaHex. Pass it here.
+   */
+  coaEvmAddr?: string;
 }
 
 export interface LegacyUnwrapResult {
@@ -863,7 +1029,7 @@ export interface LegacyUnwrapResult {
 }
 
 export async function unwrapActionLegacy(params: LegacyUnwrapParams): Promise<LegacyUnwrapResult> {
-  const { claimedAmountWei, recipientEvmHex, oldBalanceWei, oldBlinding, evmSigner, memoKeypair, tokenId = "flow" } = params;
+  const { claimedAmountWei, recipientEvmHex, oldBalanceWei, oldBlinding, evmSigner, memoKeypair, tokenId = "flow", coaEvmAddr } = params;
 
   if (!memoKeypair) {
     throw new Error("unwrapAction: memoKeypair required for v0.6 SDK");
@@ -880,6 +1046,7 @@ export async function unwrapActionLegacy(params: LegacyUnwrapParams): Promise<Le
     currentBlinding: oldBlinding,
     evmSigner,
     memoKeypair,
+    coaEvmAddr,
   });
 
   return {
