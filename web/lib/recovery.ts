@@ -44,7 +44,7 @@ export const decryptSnapshot = recovery.decryptSnapshot;
 export const validatePedersenCommit = recovery.validatePedersenCommit;
 
 const EVM_RPC = "https://testnet.evm.nodes.onflow.org";
-const JANUS_FLOW_EVM = "0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078";
+const JANUS_FLOW_EVM = "0x2458ae2d26797c2ffa3B4f6612Bdc4aDf22b7156";
 
 /**
  * Reconstruct shielded state from chain using the v0.5.2 inline-snapshot model.
@@ -70,12 +70,16 @@ export async function recoverShieldedStateFromChain(
 ): Promise<RecoveredShieldedState | null> {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
 
+  console.log("[RECOVERY DEBUG] starting for COA:", myCoaEvmAddr);
+
   // 1. Scan EVM *WithSnapshot events.
   const rawSnapshots = await recovery.scanJanusFlowSnapshots(
     myCoaEvmAddr,
     provider,
     { janusFlowAddr: JANUS_FLOW_EVM }
   );
+  console.log("[RECOVERY DEBUG] raw snapshots scanned:", rawSnapshots.length);
+  console.log("[RECOVERY DEBUG] raw snapshot timestamps:", rawSnapshots.map(r => r.timestamp));
 
   if (rawSnapshots.length === 0) {
     // No snapshot events at all. Check if the chain even has a commitment;
@@ -112,7 +116,13 @@ export async function recoverShieldedStateFromChain(
         timestamp: raw.timestamp,
         txHash: raw.txHash,
       });
+    } else {
+      console.log("[RECOVERY DEBUG] snapshot at ts", raw.timestamp, "FAILED to decrypt");
     }
+  }
+  console.log("[RECOVERY DEBUG] decrypted self-snapshots:", snapshots.length, "of", rawSnapshots.length);
+  for (const s of snapshots) {
+    console.log("[RECOVERY DEBUG]   snapshot: balance=", s.balance.toString(), "blinding=", s.blinding.toString(), "timestamp=", s.timestamp);
   }
 
   // 3. Fetch incoming PrivateTip tips that may have arrived after the last snapshot.
@@ -120,6 +130,10 @@ export async function recoverShieldedStateFromChain(
     myFlowAddr,
     myMemoPrivkey
   );
+  console.log("[RECOVERY DEBUG] incoming deltas:", incomingDeltas.length);
+  for (const d of incomingDeltas) {
+    console.log("[RECOVERY DEBUG]   delta: amount=", d.amount.toString(), "blinding=", d.blinding.toString(), "timestamp=", d.timestamp);
+  }
 
   // 4. Read on-chain commitment for validation.
   const onChainCommit = await recovery.readJanusFlowCommitment(
@@ -139,6 +153,9 @@ export async function recoverShieldedStateFromChain(
       "The MemoKey may have been rotated. Try re-deriving via setup."
     );
   }
+
+  console.log("[RECOVERY DEBUG] on-chain commit: x=", onChainCommit.x.toString(16), "y=", onChainCommit.y.toString(16));
+  console.log("[RECOVERY DEBUG] calling reconstructFromSnapshots...");
 
   return await recovery.reconstructFromSnapshots({
     snapshots,

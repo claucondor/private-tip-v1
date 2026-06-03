@@ -10,7 +10,7 @@
 ///   - Shielded-state persistence (sessionStorage)
 ///
 /// v0.5.2 contracts:
-///   JanusFlow EVM proxy:           0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078
+///   JanusFlow EVM proxy:           0x2458ae2d26797c2ffa3B4f6612Bdc4aDf22b7156
 ///   JanusFlow EVM impl:            0x9b454866100f985C28718Fe7d04Eedfa740e1c00
 ///   JanusFlow Cadence router:      0x5dcbeb41055ec57e
 ///   PrivateTip Cadence router:     0xb9ac529c14a4c5a1
@@ -381,7 +381,7 @@ transaction(
         var yi: Int = 0
         while yi < 32 { yEncoded.insert(at: 0, UInt8(yVal & 0xFF)); yVal = yVal >> 8; yi = yi + 1 }
         calldata = calldata.concat(yEncoded)
-        let janusFlowEVM = EVM.addressFromString("0x09A3DCa868EcC39360fDe4E22046eCfcbA5b4078")
+        let janusFlowEVM = EVM.addressFromString("0x2458ae2d26797c2ffa3B4f6612Bdc4aDf22b7156")
         let evmResult = coa.call(
             to: janusFlowEVM, data: calldata,
             gasLimit: 200_000, value: EVM.Balance(attoflow: 0)
