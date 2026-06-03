@@ -208,17 +208,22 @@ export default function PortfolioPage() {
     }
   }, [userAddress, setRow]);
 
-  // Load everything on connect.
+  // Load everything on connect. Deliberately omits `loadingAll` from deps —
+  // it's set INSIDE load() and would create a re-entry loop where the
+  // cleanup function cancels the in-flight load before balances populate.
   useEffect(() => {
-    if (!userAddress || loadingAll) return;
+    if (!userAddress) return;
     let cancelled = false;
     async function load() {
       setLoadingAll(true);
       try {
+        console.log("[portfolio] load start", { userAddress });
         const coa = await getCoaEvmAddress(userAddress!);
+        console.log("[portfolio] coa resolved", { coa });
         if (cancelled) return;
         setCoaAddr(coa);
         await fetchPublicBalances(userAddress!, coa);
+        console.log("[portfolio] fetchPublicBalances done");
       } catch (err) {
         console.error("[portfolio] load failed:", err);
         toast.error("Failed to load portfolio", {
@@ -230,7 +235,8 @@ export default function PortfolioPage() {
     }
     void load();
     return () => { cancelled = true; };
-  }, [userAddress, fetchPublicBalances, loadingAll]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userAddress, fetchPublicBalances]);
 
   const handleRefresh = useCallback(async () => {
     if (!userAddress || !coaAddr) return;
