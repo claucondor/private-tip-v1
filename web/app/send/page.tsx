@@ -35,8 +35,12 @@ import {
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   getRecipientMemoPubkey,
+  getOrDeriveMemoPrivkey,
   type Point,
 } from "@/lib/tip-actions";
+import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveTokenShieldedState } from "@/lib/store";
+import { TokenSelector } from "@/components/TokenSelector";
+import type { TokenId } from "@/lib/tokens";
 import { ShieldedNoteEncrypt } from "@/components/animations/ShieldedNoteEncrypt";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -48,19 +52,14 @@ interface ShieldedState {
   blinding: string;
 }
 
-function shieldedKey(addr: string): string {
-  return `openjanus:shielded:${addr.toLowerCase()}`;
+function loadShieldedState(addr: string, tokenId: TokenId = "flow"): ShieldedState | null {
+  const s = loadTokenShieldedState(addr, tokenId);
+  if (!s) return null;
+  return { balanceWei: s.balanceRaw, blinding: s.blinding };
 }
 
-function loadShieldedState(addr: string): ShieldedState | null {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(shieldedKey(addr));
-  return raw ? (JSON.parse(raw) as ShieldedState) : null;
-}
-
-function saveShieldedState(addr: string, state: ShieldedState): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+function saveShieldedState(addr: string, state: ShieldedState, tokenId: TokenId = "flow"): void {
+  saveTokenShieldedState(addr, tokenId, { balanceRaw: state.balanceWei, blinding: state.blinding });
 }
 
 // --- Types ------------------------------------------------------------------
@@ -91,6 +90,9 @@ export default function SendTipPage() {
   const userAddress = user?.addr ?? null;
 
   const addSentTip = useAppStore((s) => s.addSentTip);
+
+  // v0.6: token selector
+  const [selectedToken, setSelectedToken] = useState<TokenId>("flow");
 
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
@@ -149,7 +151,7 @@ export default function SendTipPage() {
 
   useEffect(() => {
     if (!userAddress) return;
-    const s = loadShieldedState(userAddress);
+    const s = loadShieldedState(userAddress, selectedToken);
     if (!s) {
       setSendState({ status: "needs_wrap", error: null, txId: null, newCommit: null });
     } else {
@@ -233,15 +235,14 @@ export default function SendTipPage() {
     try {
       setSendState({ status: "submitting", error: null, txId: null, newCommit: null });
 
-      // v0.5.6: fetch own pubkey BEFORE calling sendShieldedTipAction so the
-      // sender's post-send residual snapshot can be encrypted internally (after
-      // proof gen, when transferBlinding is known) and embedded in the
-      // ShieldedTransferWithSnapshot event for cross-device recovery.
-      let selfMemoPubkey: { x: bigint; y: bigint } | undefined;
+      // v0.6: get memoKeypair for snapshot encryption.
+      let memoKeypair;
       try {
-        const pk = await getRecipientMemoPubkey(userAddress);
-        if (pk) selfMemoPubkey = pk;
-      } catch { /* non-fatal — send proceeds, recovery just won't have this snap */ }
+        const privkey = await getOrDeriveMemoPrivkey(userAddress);
+        const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
+        const pubkey = await pubkeyFromPrivkey(privkey);
+        memoKeypair = { privkey, pubkey };
+      } catch { /* non-fatal */ }
 
       const result = await sendShieldedTipAction({
         recipientFlowAddr: recipient,
@@ -251,14 +252,15 @@ export default function SendTipPage() {
         oldBlinding: BigInt(shielded.blinding),
         memo: memo || undefined,
         recipientMemoPubkey,
-        selfMemoPubkey,
+        tokenId: selectedToken,
+        memoKeypair,
       });
 
       const newState: ShieldedState = {
         balanceWei: result.newBalanceWei.toString(),
         blinding: result.newBlinding.toString(),
       };
-      saveShieldedState(userAddress, newState);
+      saveShieldedState(userAddress, newState, selectedToken);
       setShielded(newState);
 
       addSentTip({
@@ -426,6 +428,21 @@ export default function SendTipPage() {
         transition={{ duration: 0.4, ease: EASE, delay: 0.08 }}
         className="rounded-xl border border-[#6B46C1]/20 janus-purple-glow bg-[#0D1E38]/80 p-6 space-y-4"
       >
+        {/* Token selector */}
+        <TokenSelector
+          value={selectedToken}
+          onChange={(id) => {
+            setSelectedToken(id);
+            if (userAddress) {
+              const s = loadShieldedState(userAddress, id);
+              if (!s) setSendState({ status: "needs_wrap", error: null, txId: null, newCommit: null });
+              else { setShielded(s); setSendState({ status: "idle", error: null, txId: null, newCommit: null }); }
+            }
+          }}
+          disabled={isSubmitting || sendState.status === "success"}
+          label="Token to send"
+        />
+
         <div>
           <label className="text-xs font-medium text-foreground/50 mb-1 block">Recipient (Flow address)</label>
           <input

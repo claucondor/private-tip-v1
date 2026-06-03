@@ -4,7 +4,8 @@
 
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { useFlowCurrentUser } from "@onflow/react-sdk";
 import { motion } from "framer-motion";
 import {
@@ -23,34 +24,20 @@ import { toast } from "sonner";
 import {
   getCoaEvmAddress,
   getCommitment,
-  unwrapAction,
+  unwrapActionLegacy as unwrapAction,
   parseFlowToWei,
   formatWeiToFlow,
   formatPoint,
   getRecipientMemoPubkey,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
+  fetchFeeBps,
+  getOrDeriveMemoPrivkey,
   type Point,
 } from "@/lib/tip-actions";
-// Fee helpers — inline to avoid SDK rebuild dependency
-function computeNetUnwrap(claimedWei: bigint, feeBps: number): bigint {
-  if (feeBps === 0) return claimedWei;
-  return claimedWei - (claimedWei * BigInt(feeBps)) / 10000n;
-}
-function computeUnwrapFee(claimedWei: bigint, feeBps: number): bigint {
-  if (feeBps === 0) return 0n;
-  return (claimedWei * BigInt(feeBps)) / 10000n;
-}
-async function fetchFeeBps(contractAddress: string): Promise<number> {
-  try {
-    const { JsonRpcProvider, Interface } = await import("ethers");
-    const provider = new JsonRpcProvider("https://testnet.evm.nodes.onflow.org");
-    const iface = new Interface(["function feeBps() view returns (uint16)"]);
-    const result = await provider.call({ to: contractAddress, data: iface.encodeFunctionData("feeBps") });
-    const [bps] = iface.decodeFunctionResult("feeBps", result);
-    return Number(bps);
-  } catch { return 10; } // default 0.1%
-}
+import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveTokenShieldedState } from "@/lib/store";
+import { TokenSelector } from "@/components/TokenSelector";
+import type { TokenId } from "@/lib/tokens";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -60,19 +47,14 @@ interface ShieldedState {
   blinding: string;
 }
 
-function shieldedKey(addr: string): string {
-  return `openjanus:shielded:${addr.toLowerCase()}`;
+function loadShieldedState(addr: string, tokenId: TokenId = "flow"): ShieldedState | null {
+  const s = loadTokenShieldedState(addr, tokenId);
+  if (!s) return null;
+  return { balanceWei: s.balanceRaw, blinding: s.blinding };
 }
 
-function loadShieldedState(addr: string): ShieldedState | null {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(shieldedKey(addr));
-  return raw ? (JSON.parse(raw) as ShieldedState) : null;
-}
-
-function saveShieldedState(addr: string, state: ShieldedState): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+function saveShieldedState(addr: string, state: ShieldedState, tokenId: TokenId = "flow"): void {
+  saveTokenShieldedState(addr, tokenId, { balanceRaw: state.balanceWei, blinding: state.blinding });
 }
 
 type ClaimStatus =
@@ -91,10 +73,14 @@ interface ClaimState {
   unwrappedFlow: string | null;
 }
 
-export default function ClaimPage() {
+function ClaimPageInner() {
   const { user, authenticate } = useFlowCurrentUser();
   const isLoggedIn = !!user?.loggedIn && !!user?.addr;
   const userAddress = user?.addr ?? null;
+
+  const searchParams = useSearchParams();
+  const initialToken = (searchParams.get("token") ?? "flow") as TokenId;
+  const [selectedToken, setSelectedToken] = useState<TokenId>(initialToken);
 
   const [shielded, setShielded] = useState<ShieldedState | null>(null);
   const [coaHex, setCoaHex] = useState<string | null>(null);
@@ -126,7 +112,7 @@ export default function ClaimPage() {
         if (cancelled) return;
         setChainCommit(c);
 
-        const s = loadShieldedState(userAddress);
+        const s = loadShieldedState(userAddress, selectedToken);
         if (!s) {
           setClaimState({ status: "needs_state", error: null, txId: null, unwrappedFlow: null });
         } else {
@@ -135,7 +121,7 @@ export default function ClaimPage() {
         }
 
         // Read fee rate from chain (non-fatal)
-        const bps = await fetchFeeBps(JANUS_FLOW_EVM);
+        const bps = await fetchFeeBps(selectedToken);
         if (!cancelled) setFeeBps(bps);
       } catch (err) {
         if (!cancelled) {
@@ -185,29 +171,29 @@ export default function ClaimPage() {
     try {
       setClaimState({ status: "submitting", error: null, txId: null, unwrappedFlow: null });
 
-      // v0.5.6: fetch own pubkey BEFORE calling unwrapAction so the snapshot
-      // can be encrypted internally (after proof gen, when newBlinding is known)
-      // and embedded in the UnwrapWithSnapshot event.
-      let selfMemoPubkey: { x: bigint; y: bigint } | undefined;
+      // v0.6: get memoKeypair for snapshot encryption.
+      let memoKeypair;
       try {
-        const pk = await getRecipientMemoPubkey(userAddress);
-        if (pk) selfMemoPubkey = pk;
-      } catch { /* non-fatal — unwrap proceeds, recovery just won't have this snap */ }
+        const privkey = await getOrDeriveMemoPrivkey(userAddress);
+        const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
+        const pubkey = await pubkeyFromPrivkey(privkey);
+        memoKeypair = { privkey, pubkey };
+      } catch { /* non-fatal */ }
 
       const result = await unwrapAction({
         claimedAmountWei: amountWei,
         recipientEvmHex: coaHex,
         oldBalanceWei: oldBalance,
         oldBlinding: BigInt(shielded.blinding),
-        toCadenceVault: true,
-        selfMemoPubkey,
+        memoKeypair,
+        tokenId: selectedToken,
       });
 
       const newState: ShieldedState = {
         balanceWei: result.newBalanceWei.toString(),
         blinding: result.newBlinding.toString(),
       };
-      saveShieldedState(userAddress, newState);
+      saveShieldedState(userAddress, newState, selectedToken);
       setShielded(newState);
 
       const c = await getCommitment(coaHex);
@@ -226,7 +212,8 @@ export default function ClaimPage() {
         txId: null, unwrappedFlow: null,
       });
     }
-  }, [userAddress, shielded, coaHex, amountFlow]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userAddress, shielded, coaHex, amountFlow, selectedToken]);
 
   const isSubmitting =
     claimState.status === "building_proof" || claimState.status === "submitting";
@@ -351,8 +338,16 @@ export default function ClaimPage() {
           transition={{ duration: 0.4, ease: EASE, delay: 0.1 }}
           className="rounded-xl border border-[#B45309]/25 janus-copper-glow bg-[#0D1E38]/80 p-6 space-y-4 mb-6"
         >
+          {/* Token selector */}
+          <TokenSelector
+            value={selectedToken}
+            onChange={(id) => { setSelectedToken(id); setShielded(loadShieldedState(userAddress ?? "", id)); }}
+            disabled={isSubmitting}
+            label="Token to unwrap"
+          />
+
           <div>
-            <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount to unwrap (FLOW)</label>
+            <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount to unwrap</label>
             <input
               type="text"
               value={amountFlow}
@@ -366,8 +361,8 @@ export default function ClaimPage() {
               try {
                 const claimedWei = parseFlowToWei(amountFlow);
                 if (claimedWei > 0n) {
-                  const netWei  = computeNetUnwrap(claimedWei, feeBps);
-                  const feeWei  = computeUnwrapFee(claimedWei, feeBps);
+                  const feeWei = feeBps === 0 ? 0n : (claimedWei * BigInt(feeBps)) / 10000n;
+                  const netWei  = claimedWei - feeWei;
                   const feePct  = feeBps / 100;
                   return (
                     <p className="text-[10px] text-foreground/40 mt-1">
@@ -469,6 +464,14 @@ export default function ClaimPage() {
         <p>PrivateTip: <span className="font-mono break-all">{PRIVATE_TIP_CADENCE}</span></p>
       </div>
     </div>
+  );
+}
+
+export default function ClaimPage() {
+  return (
+    <Suspense fallback={<div className="max-w-lg mx-auto px-4 py-12" />}>
+      <ClaimPageInner />
+    </Suspense>
   );
 }
 

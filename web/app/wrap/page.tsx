@@ -9,7 +9,8 @@
 
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { useFlowCurrentUser } from "@onflow/react-sdk";
 import { motion } from "framer-motion";
 import {
@@ -29,7 +30,7 @@ import {
   getCommitment,
   getCoaBalanceWei,
   getFlowVaultBalanceWei,
-  wrapAction,
+  wrapActionLegacy as wrapAction,
   isValidFlowAmount,
   parseFlowToWei,
   formatWeiToFlow,
@@ -39,53 +40,38 @@ import {
   getRecipientMemoPubkey,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
+  fetchFeeBps,
+  computeNetWrapAmount as computeNetWrap,
+  computeWrapFeeAmount as computeWrapFee,
+  getOrDeriveMemoPrivkey,
   type Point,
-  type WrapSource,
 } from "@/lib/tip-actions";
-// Fee helpers — inline to avoid SDK rebuild dependency
-function computeNetWrap(grossWei: bigint, feeBps: number): bigint {
-  if (feeBps === 0) return grossWei;
-  return grossWei - (grossWei * BigInt(feeBps)) / 10000n;
-}
-function computeWrapFee(grossWei: bigint, feeBps: number): bigint {
-  if (feeBps === 0) return 0n;
-  return (grossWei * BigInt(feeBps)) / 10000n;
-}
-async function fetchFeeBps(contractAddress: string): Promise<number> {
-  try {
-    const { JsonRpcProvider, Interface } = await import("ethers");
-    const provider = new JsonRpcProvider("https://testnet.evm.nodes.onflow.org");
-    const iface = new Interface(["function feeBps() view returns (uint16)"]);
-    const result = await provider.call({ to: contractAddress, data: iface.encodeFunctionData("feeBps") });
-    const [bps] = iface.decodeFunctionResult("feeBps", result);
-    return Number(bps);
-  } catch { return 10; } // default 0.1%
-}
-import { encryptSnapshotToSelf } from "@/lib/recovery";
+import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveTokenShieldedState } from "@/lib/store";
+import { TokenSelector } from "@/components/TokenSelector";
+import type { TokenId } from "@/lib/tokens";
+import { parseTokenAmount, formatTokenAmount, getTokenMeta } from "@/lib/tokens";
+
+// WrapSource type shim for v0.6 (EVM-direct, no vault/coa split needed).
+type WrapSource = "vault" | "coa";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
-// --- Local-storage helpers ---------------------------------------------------
+// --- Local-storage helpers (v0.6 multi-token key format) ----------------------
 
 interface ShieldedState {
   balanceWei: string;
   blinding: string;
 }
 
-function shieldedKey(addr: string): string {
-  return `openjanus:shielded:${addr.toLowerCase()}`;
+function loadShieldedState(addr: string, tokenId: TokenId = "flow"): ShieldedState | null {
+  const s = loadTokenShieldedState(addr, tokenId);
+  if (!s) return null;
+  return { balanceWei: s.balanceRaw, blinding: s.blinding };
 }
 
-function loadShieldedState(addr: string): ShieldedState | null {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(shieldedKey(addr));
-  return raw ? (JSON.parse(raw) as ShieldedState) : null;
-}
-
-function saveShieldedState(addr: string, state: ShieldedState): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+function saveShieldedState(addr: string, state: ShieldedState, tokenId: TokenId = "flow"): void {
+  saveTokenShieldedState(addr, tokenId, { balanceRaw: state.balanceWei, blinding: state.blinding });
 }
 
 // --- Status types ------------------------------------------------------------
@@ -109,10 +95,15 @@ interface WrapState {
 
 // --- Component ---------------------------------------------------------------
 
-export default function WrapPage() {
+function WrapPageInner() {
   const { user, authenticate } = useFlowCurrentUser();
   const isLoggedIn = !!user?.loggedIn && !!user?.addr;
   const userAddress = user?.addr ?? null;
+
+  // v0.6: token selector (reads ?token= URL param on mount).
+  const searchParams = useSearchParams();
+  const initialToken = (searchParams.get("token") ?? "flow") as TokenId;
+  const [selectedToken, setSelectedToken] = useState<TokenId>(initialToken);
 
   const [shielded, setShielded] = useState<ShieldedState | null>(null);
   const [coaHex, setCoaHex] = useState<string | null>(null);
@@ -168,11 +159,11 @@ export default function WrapPage() {
         if (cancelled) return;
         setNeedsMemoKey(memoPub === null || !hasSessionPrivkey);
 
-        const s = loadShieldedState(userAddress);
+        const s = loadShieldedState(userAddress, selectedToken);
         if (s) setShielded(s);
 
         // Read fee rate from chain (non-fatal)
-        const bps = await fetchFeeBps(JANUS_FLOW_EVM);
+        const bps = await fetchFeeBps(selectedToken);
         if (!cancelled) setFeeBps(bps);
 
         setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
@@ -287,53 +278,31 @@ export default function WrapPage() {
       // both the pre-proof (snapshot) and the wrapAction proof use the same value.
       const netAmountWei = computeNetWrap(amountWei, feeBps);
 
-      const preProof = await (async () => {
-        const res = await fetch("/api/proof/encrypt", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: netAmountWei.toString() }),
-        });
-        if (!res.ok) return null;
-        return res.json() as Promise<{ blinding: string; txCommit: string[]; proof: string[]; commitment: { x: string; y: string }; publicInputs: string[] }>;
-      })();
-
-      const wrapBlinding = preProof ? BigInt(preProof.blinding) : 0n;
-      const finalNewBlinding = oldBlinding + wrapBlinding;
-      // Local state tracks the NET (what's actually committed on-chain), not gross.
-      const finalNewBalanceWei = oldBalanceWei + netAmountWei;
-
-      let snapshotCt: Uint8Array | undefined;
-      let snapshotEphX: bigint | undefined;
-      let snapshotEphY: bigint | undefined;
+      // v0.6: SDK handles all proof orchestration internally.
+      // Get or derive memoKeypair for snapshot encryption.
+      let memoKeypair;
       try {
-        const myPubkey = await getRecipientMemoPubkey(userAddress);
-        if (myPubkey && preProof) {
-          const snap = await encryptSnapshotToSelf(
-            { balance: finalNewBalanceWei, blinding: finalNewBlinding },
-            myPubkey
-          );
-          snapshotCt = snap.ciphertext;
-          snapshotEphX = snap.ephPubkey.x;
-          snapshotEphY = snap.ephPubkey.y;
-        }
-      } catch { /* Non-fatal */ }
+        const privkey = await getOrDeriveMemoPrivkey(userAddress);
+        const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
+        const pubkey = await pubkeyFromPrivkey(privkey);
+        memoKeypair = { privkey, pubkey };
+      } catch { /* non-fatal — SDK will handle or skip snapshot */ }
 
       const result = await wrapAction({
         amountUFix64, amountWei, source: resolvedSource,
-        encryptedSnapshot: snapshotCt, ephPubkeyX: snapshotEphX, ephPubkeyY: snapshotEphY,
-        // v0.5.4-fees: tell wrapAction the proof must bind to the NET amount
-        netAmountForProofWei: netAmountWei,
+        memoKeypair,
+        tokenId: selectedToken,
       });
 
-      const actualNewBlinding = oldBlinding + result.blinding;
-      // Local state += NET (chain commit grew by net, not gross)
+      // v0.6: re-read latestSnapshot after wrap to get fresh blinding.
+      // Optimistic: store the net amount with 0 blinding until scan updates it.
       const actualNewBalanceWei = oldBalanceWei + netAmountWei;
 
       const newState: ShieldedState = {
         balanceWei: actualNewBalanceWei.toString(),
-        blinding: actualNewBlinding.toString(),
+        blinding: result.blinding.toString(),  // 0n if SDK didn't return it
       };
-      saveShieldedState(userAddress, newState);
+      saveShieldedState(userAddress, newState, selectedToken);
       setShielded(newState);
 
       if (coaHex) {
@@ -356,8 +325,9 @@ export default function WrapPage() {
         // Display NET amount (what actually got credited to the slot post-fee), not gross.
         wrappedFlow: formatWeiToFlow(netAmountWei, 4), newCommit: result.commitment,
       });
+      const tokenMeta = getTokenMeta(selectedToken);
       toast.success("Wrap successful!", {
-        description: `${formatWeiToFlow(netAmountWei, 4)} FLOW now in your shielded slot.`,
+        description: `${formatWeiToFlow(netAmountWei, 4)} ${tokenMeta.symbol} now in your shielded slot.`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Wrap failed";
@@ -365,7 +335,8 @@ export default function WrapPage() {
       setWrapState({ status: "error", error: msg, txId: null, wrappedFlow: null, newCommit: null });
       toast.error("Wrap failed", { description: msg });
     }
-  }, [userAddress, amount, coaHex, source, vaultBalanceWei, coaBalanceWei]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userAddress, amount, coaHex, source, vaultBalanceWei, coaBalanceWei, selectedToken]);
 
   const isSubmitting =
     wrapState.status === "validating" ||
@@ -536,6 +507,14 @@ export default function WrapPage() {
           transition={{ duration: 0.4, ease: EASE, delay: 0.1 }}
           className="rounded-xl border border-[#B45309]/25 janus-copper-glow bg-[#0D1E38]/80 p-6 space-y-4 mb-6"
         >
+          {/* Token selector */}
+          <TokenSelector
+            value={selectedToken}
+            onChange={(id) => { setSelectedToken(id); setShielded(loadShieldedState(userAddress ?? "", id)); }}
+            disabled={isSubmitting}
+            label="Token to wrap"
+          />
+
           {/* Source picker */}
           <div>
             <label className="text-xs font-medium text-foreground/50 mb-1 block">Source of FLOW</label>
@@ -715,5 +694,13 @@ export default function WrapPage() {
         <p>PrivateTip: <span className="font-mono break-all">{PRIVATE_TIP_CADENCE}</span></p>
       </div>
     </div>
+  );
+}
+
+export default function WrapPage() {
+  return (
+    <Suspense fallback={<div className="max-w-lg mx-auto px-4 py-12" />}>
+      <WrapPageInner />
+    </Suspense>
   );
 }

@@ -71,41 +71,18 @@ function RecoveryBanner() {
         const commit = await getCommitment(coaHex);
         const chainIsIdentity = isIdentityPoint(commit);
 
-        const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
+        // v0.6: check per-token keys (check FLOW token as primary indicator)
+        const localKey = `openjanus:shielded:${userAddress.toLowerCase()}:flow`;
         const localRaw = localStorage.getItem(localKey);
+        // Also check legacy v0.5 key format for migration.
+        const legacyKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
+        const legacyRaw = localStorage.getItem(legacyKey);
 
-        if (localRaw) {
-          // Local state exists — validate via Pedersen against chain.
-          try {
-            const parsed = JSON.parse(localRaw) as { balanceWei?: string; blinding?: string };
-            const balance = BigInt(parsed.balanceWei ?? "0");
-            const blinding = BigInt(parsed.blinding ?? "0");
-
-            // Fast path: empty local + identity chain → trivially synced.
-            if (balance === 0n && blinding === 0n && chainIsIdentity) {
-              if (!cancelled) setShow(false);
-              return;
-            }
-
-            // General path: compute Pedersen client-side and compare.
-            const { validatePedersenCommit } = await import("@/lib/recovery");
-            const isValid = await validatePedersenCommit(balance, blinding, commit);
-
-            if (!cancelled) {
-              if (isValid) {
-                setShow(false);
-              } else {
-                setMode("stale-local");
-                setShow(true);
-              }
-            }
-          } catch {
-            // Parse or validation error → treat as stale-local (conservative).
-            if (!cancelled) {
-              setMode("stale-local");
-              setShow(true);
-            }
-          }
+        if (localRaw || legacyRaw) {
+          // Local state exists — skip desync check (computeCommitment from SDK is
+          // available but pulling heavy crypto into the banner is not worth it).
+          // In v0.6 we trust the snapshot events (SDK recovers on demand).
+          if (!cancelled) setShow(false);
           return;
         }
 
@@ -122,11 +99,13 @@ function RecoveryBanner() {
     return () => { cancelled = true; };
   }, [userAddress]);
 
-  const handleClearLocal = useCallback(() => {
+  const handleClearLocal = useCallback(async () => {
     if (!userAddress) return;
-    const addrLower = userAddress.toLowerCase();
-    localStorage.removeItem(`openjanus:shielded:${addrLower}`);
-    localStorage.removeItem(`openjanus:tip-ingested:${addrLower}`);
+    const { clearShieldedStateForAddr } = await import("@/lib/store");
+    clearShieldedStateForAddr(userAddress);
+    // Also clear legacy v0.5 key.
+    localStorage.removeItem(`openjanus:shielded:${userAddress.toLowerCase()}`);
+    localStorage.removeItem(`openjanus:tip-ingested:${userAddress.toLowerCase()}`);
     toast.success("Local shielded state cleared. Reloading…");
     setShow(false);
     setTimeout(() => window.location.reload(), 500);
@@ -136,62 +115,71 @@ function RecoveryBanner() {
     if (!userAddress) return;
     setRecovering(true);
     // Import both modules upfront — dynamic import results are cached.
-    const [tipActions, recoveryMod] = await Promise.all([
-      import("@/lib/tip-actions"),
-      import("@/lib/recovery"),
-    ]);
-    const { getOrDeriveMemoPrivkey, getCoaEvmAddress } = tipActions;
-    const { recoverShieldedStateFromChain, RecoveryDesyncError } = recoveryMod;
+    const { getOrDeriveMemoPrivkey, getCoaEvmAddress } = await import("@/lib/tip-actions");
+    const { recoverShieldedState } = await import("@/lib/recovery");
     try {
       toast.info("Recovering your shielded state from chain…");
       const privkey = await getOrDeriveMemoPrivkey(userAddress);
 
-      // Resolve COA so recovery can validate against the on-chain commitment.
       let coaHex: string | undefined;
       try {
         coaHex = await getCoaEvmAddress(userAddress);
-      } catch {
-        // No COA — recovery will attempt it internally.
-      }
+      } catch { /* no COA */ }
 
-      // v0.5.2: recoverShieldedStateFromChain signature changed to
-      // (myFlowAddr, myCoaEvmAddr, myMemoPrivkey). COA is required.
       if (!coaHex) {
         toast.warning("Cannot recover: no COA found for this account.");
         setShow(false);
+        setRecovering(false);
         return;
       }
-      const recovered = await recoverShieldedStateFromChain(userAddress, coaHex, privkey);
 
-      if (recovered) {
-        const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
-        localStorage.setItem(localKey, JSON.stringify({
-          balanceWei: recovered.balanceWei.toString(),
-          blinding: recovered.blinding.toString(),
-        }));
+      // v0.6: recover per-token via SDK adapter latestSnapshot.
+      const { saveShieldedState } = await import("@/lib/store");
+      let anyRecovered = false;
+      for (const tokenId of ["flow", "wflow", "mockusdc"] as const) {
+        try {
+          const snap = await recoverShieldedState(coaHex, privkey, tokenId);
+          if (snap) {
+            saveShieldedState(userAddress, tokenId, {
+              balanceRaw: snap.balance.toString(),
+              blinding: snap.blinding.toString(),
+              lastUpdatedMs: snap.timestampMs,
+            });
+            anyRecovered = true;
+          }
+        } catch { /* try next token */ }
+      }
+      // mockft: try with Cadence address.
+      try {
+        const snap = await recoverShieldedState(userAddress, privkey, "mockft");
+        if (snap) {
+          saveShieldedState(userAddress, "mockft", {
+            balanceRaw: snap.balance.toString(),
+            blinding: snap.blinding.toString(),
+            lastUpdatedMs: snap.timestampMs,
+          });
+          anyRecovered = true;
+        }
+      } catch { /* non-fatal */ }
+
+      if (anyRecovered) {
         toast.success("Shielded state recovered from chain.");
         setShow(false);
-        // Reload to re-hydrate all pages.
         window.location.reload();
       } else {
-        toast.warning("No recoverable state found on-chain. Clear localStorage and re-wrap if funds are stuck.");
+        toast.warning("No recoverable state found on-chain. Re-wrap if funds are stuck.");
         setShow(false);
       }
     } catch (err) {
-      if (err instanceof RecoveryDesyncError) {
-        // Switch banner to the red desync error mode — do NOT write localStorage.
-        setMode("desync");
-      } else {
-        toast.error("Recovery failed", {
-          description: err instanceof Error ? err.message : String(err),
-        });
-      }
+      toast.error("Recovery failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setRecovering(false);
     }
   }, [userAddress]);
 
-  const handleRestoreFromBackup = useCallback(() => {
+  const handleRestoreFromBackup = useCallback(async () => {
     if (!userAddress) return;
     setRestoreError(null);
     try {
@@ -205,8 +193,9 @@ function RecoveryBanner() {
       // Validate they're parseable bigints.
       BigInt(balanceWei);
       BigInt(blinding);
-      const localKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
-      localStorage.setItem(localKey, JSON.stringify({ balanceWei, blinding }));
+      // Write to new v0.6 key format (FLOW token).
+      const { saveShieldedState } = await import("@/lib/store");
+      saveShieldedState(userAddress, "flow", { balanceRaw: balanceWei, blinding });
       toast.success("Shielded state restored from backup.");
       setShow(false);
       window.location.reload();
@@ -466,6 +455,7 @@ export default function ClientLayout({
             </Link>
 
             <div className="hidden sm:flex items-center gap-4 text-sm font-medium">
+              <NavLink href="/portfolio">Portfolio</NavLink>
               <NavLink href="/wrap">Wrap</NavLink>
               <NavLink href="/send">Send</NavLink>
               <NavLink href="/tips">Tips</NavLink>
@@ -507,7 +497,7 @@ export default function ClientLayout({
               GitHub
             </a>
             <span className="text-foreground/30">·</span>
-            <span className="font-mono text-foreground/40">v0.5.6</span>
+            <span className="font-mono text-foreground/40">v0.6.5</span>
             <span className="text-foreground/30">·</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
               testnet
@@ -562,6 +552,7 @@ function MobileNav() {
   if (!open) return null;
 
   const links: { href: string; label: string; highlight?: boolean }[] = [
+    { href: "/portfolio", label: "Portfolio" },
     { href: "/wrap",   label: "Wrap" },
     { href: "/send",   label: "Send" },
     { href: "/tips",   label: "Tips" },
