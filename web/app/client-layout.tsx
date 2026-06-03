@@ -352,18 +352,21 @@ function RecoveryBanner() {
   );
 }
 
-/// Global MemoKey status banner
+type MemoKeyBannerMode = "not_on_chain" | "session_missing";
+
+/// Global MemoKey status banner — distinguishes first-time activation from
+/// session unlock (key cleared on tab close, re-derived from wallet each session).
 function MemoKeyStatusBanner() {
   const { user } = useFlowCurrentUser();
   const pathname = usePathname();
   const isLoggedIn = !!user?.loggedIn && !!user?.addr;
   const userAddress = user?.addr ?? null;
 
-  const [needsSetup, setNeedsSetup] = useState(false);
+  const [bannerMode, setBannerMode] = useState<MemoKeyBannerMode | null>(null);
 
   useEffect(() => {
     if (!userAddress) {
-      setNeedsSetup(false);
+      setBannerMode(null);
       return;
     }
     let cancelled = false;
@@ -371,19 +374,28 @@ function MemoKeyStatusBanner() {
       const { getRecipientMemoPubkey } = await import("@/lib/tip-actions");
       const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
       const [onChainPub, sessionPriv] = await Promise.all([
-        getRecipientMemoPubkey(userAddress),
+        getRecipientMemoPubkey(userAddress).catch(() => null),
         Promise.resolve(getCachedMemoPrivkey(userAddress)),
       ]);
       if (cancelled) return;
-      setNeedsSetup(onChainPub === null || sessionPriv === null);
+      if (onChainPub === null) {
+        setBannerMode("not_on_chain");
+      } else if (sessionPriv === null) {
+        setBannerMode("session_missing");
+      } else {
+        setBannerMode(null);
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, [userAddress, pathname]);
 
-  if (!isLoggedIn || !needsSetup) return null;
-  if (pathname === "/wrap") return null;
+  if (!isLoggedIn || bannerMode === null) return null;
+  // Don't show on /wrap (has its own activation UI) or /status (activation happens there)
+  if (pathname === "/wrap" || pathname === "/status") return null;
+
+  const isNotOnChain = bannerMode === "not_on_chain";
 
   return (
     <motion.div
@@ -397,15 +409,24 @@ function MemoKeyStatusBanner() {
         <span className="flex items-center gap-2 text-amber-200 min-w-0">
           <Key className="w-3.5 h-3.5 shrink-0 text-[#B45309]" />
           <span className="truncate sm:whitespace-normal">
-            <strong>Your private inbox isn&apos;t active yet.</strong> Enable
-            it to send, receive, and withdraw — takes one wallet signature.
+            {isNotOnChain ? (
+              <>
+                <strong>Your private inbox isn&apos;t activated.</strong>{" "}
+                Activate to receive tips — takes 2 steps.
+              </>
+            ) : (
+              <>
+                <strong>Unlock your private inbox for this session.</strong>{" "}
+                Your key re-derives from your wallet — same key, never stored.
+              </>
+            )}
           </span>
         </span>
         <Link
-          href="/wrap"
+          href="/status"
           className="shrink-0 inline-flex items-center px-3 py-1 rounded border border-[#B45309]/50 bg-[#B45309]/10 text-amber-200 font-medium hover:bg-[#B45309]/20 transition-colors"
         >
-          Set up now
+          {isNotOnChain ? "Activate" : "Unlock"}
         </Link>
       </div>
     </motion.div>

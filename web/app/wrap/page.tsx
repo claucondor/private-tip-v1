@@ -404,6 +404,12 @@ function WrapPageInner() {
           >
             {settingUpCoa ? "Setting up..." : "Setup Wallet for Shielded Transfers"}
           </motion.button>
+          <Link
+            href="/status"
+            className="mt-3 text-xs text-foreground/40 hover:text-foreground/70 transition-colors"
+          >
+            Or activate without wrapping →
+          </Link>
         </div>
       </div>
     );

@@ -19,6 +19,7 @@ import {
   Wallet,
   RefreshCw,
   AlertTriangle,
+  Key,
 } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -27,6 +28,7 @@ import { SUPPORTED_TOKENS, type TokenId, formatTokenAmount } from "@/lib/tokens"
 import {
   getCoaEvmAddress,
   getOrDeriveMemoPrivkey,
+  getRecipientMemoPubkey,
 } from "@/lib/tip-actions";
 import { sdk } from "@claucondor/sdk";
 import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
@@ -56,6 +58,13 @@ const initialRows = (): TokenPortfolioRow[] =>
     error: null,
   }));
 
+type PortfolioPageState =
+  | "loading"          // initial load
+  | "needs_wallet"     // wallet not connected
+  | "needs_activation" // wallet connected, no memokey on chain
+  | "needs_unlock"     // wallet connected, memokey on chain, no session privkey
+  | "ready";           // everything available
+
 export default function PortfolioPage() {
   const { user, authenticate } = useFlowCurrentUser();
   const isLoggedIn = !!user?.loggedIn && !!user?.addr;
@@ -64,6 +73,10 @@ export default function PortfolioPage() {
   const [rows, setRows] = useState<TokenPortfolioRow[]>(initialRows());
   const [loadingAll, setLoadingAll] = useState(false);
   const [coaAddr, setCoaAddr] = useState<string | null>(null);
+
+  // Page-level state machine
+  const [pageState, setPageState] = useState<PortfolioPageState>("loading");
+  const [unlocking, setUnlocking] = useState(false);
 
   // Update a single row.
   const setRow = useCallback(
@@ -83,6 +96,54 @@ export default function PortfolioPage() {
       shieldedState: loadShieldedState(userAddress, r.tokenId),
     }));
     setRows(updated);
+  }, [userAddress]);
+
+  // Determine page state: needs_wallet / needs_activation / needs_unlock / ready
+  useEffect(() => {
+    if (!isLoggedIn || !userAddress) {
+      setPageState("needs_wallet");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setPageState("loading");
+      try {
+        const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+        const sessionKey = getCachedMemoPrivkey(userAddress);
+        if (sessionKey !== null) {
+          if (!cancelled) setPageState("ready");
+          return;
+        }
+        // No session key — check on-chain
+        const onChainPub = await getRecipientMemoPubkey(userAddress).catch(() => null);
+        if (cancelled) return;
+        if (onChainPub === null) {
+          setPageState("needs_activation");
+        } else {
+          setPageState("needs_unlock");
+        }
+      } catch {
+        // Fall through to ready — don't block portfolio on check failure
+        if (!cancelled) setPageState("ready");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isLoggedIn, userAddress]);
+
+  const handleUnlock = useCallback(async () => {
+    if (!userAddress) return;
+    setUnlocking(true);
+    try {
+      await getOrDeriveMemoPrivkey(userAddress);
+      toast.success("Private inbox unlocked");
+      setPageState("ready");
+    } catch (err) {
+      toast.error("Unlock failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setUnlocking(false);
+    }
   }, [userAddress]);
 
   // Fetch public balances for all tokens.
@@ -173,7 +234,9 @@ export default function PortfolioPage() {
     toast.success("Portfolio refreshed");
   }, [userAddress, coaAddr, fetchPublicBalances, refreshShieldedState]);
 
-  if (!isLoggedIn) {
+  // --- State machine renders ---
+
+  if (pageState === "needs_wallet" || (!isLoggedIn && pageState === "loading")) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-12">
         <div className="mb-8">
@@ -199,6 +262,96 @@ export default function PortfolioPage() {
       </div>
     );
   }
+
+  if (pageState === "loading") {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-12 flex flex-col items-center justify-center py-24">
+        <Loader2 className="w-8 h-8 animate-spin text-[#00EF8B]/50 mb-4" />
+        <p className="text-sm text-foreground/40">Checking your account…</p>
+      </div>
+    );
+  }
+
+  if (pageState === "needs_activation") {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-12">
+        <div className="mb-8">
+          <div className="inline-flex items-center gap-2 mb-3 px-2 py-1 rounded-full border border-[#00EF8B]/30 bg-[#00EF8B]/5 text-[10px] uppercase tracking-wider text-[#00EF8B] font-mono">
+            <Shield className="w-3 h-3" />
+            Portfolio
+          </div>
+          <h1 className="text-4xl font-bold tracking-tight" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+            Private Portfolio
+          </h1>
+        </div>
+        <div className="rounded-xl border border-[#D4AF37]/30 bg-[#D4AF37]/5 p-8 text-center">
+          <div className="w-14 h-14 rounded-2xl bg-[#D4AF37]/12 border border-[#D4AF37]/30 flex items-center justify-center mx-auto mb-5">
+            <Key className="w-7 h-7 text-[#D4AF37]" />
+          </div>
+          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+            Activate your account first
+          </h2>
+          <p className="text-sm text-foreground/60 mb-6 max-w-sm mx-auto">
+            Your account hasn&apos;t published a MemoKey yet. Activate to enable
+            shielded balances and private tips.
+          </p>
+          <Link
+            href="/status"
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-[#D4AF37]/50 bg-[#D4AF37]/10 text-amber-200 font-medium hover:bg-[#D4AF37]/20 transition-colors"
+          >
+            Activate your account
+            <ArrowRight className="w-4 h-4" />
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (pageState === "needs_unlock") {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-12">
+        <div className="mb-8">
+          <div className="inline-flex items-center gap-2 mb-3 px-2 py-1 rounded-full border border-[#00EF8B]/30 bg-[#00EF8B]/5 text-[10px] uppercase tracking-wider text-[#00EF8B] font-mono">
+            <Shield className="w-3 h-3" />
+            Portfolio
+          </div>
+          <h1 className="text-4xl font-bold tracking-tight" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+            Private Portfolio
+          </h1>
+        </div>
+        <div className="rounded-xl border border-[#D4AF37]/30 bg-[#D4AF37]/5 p-8 text-center">
+          <div className="w-14 h-14 rounded-2xl bg-[#D4AF37]/12 border border-[#D4AF37]/30 flex items-center justify-center mx-auto mb-5">
+            <Lock className="w-7 h-7 text-[#D4AF37]" />
+          </div>
+          <h2 className="text-xl font-bold mb-2" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
+            Unlock your private balances
+          </h2>
+          <p className="text-sm text-foreground/60 mb-2 max-w-sm mx-auto">
+            Your private key is not in session memory — it was cleared when you closed the tab.
+          </p>
+          <p className="text-xs text-foreground/40 mb-6 max-w-sm mx-auto">
+            One wallet signature re-derives the <strong className="text-foreground/60">same key</strong> from
+            your wallet — deterministic, not a new key. Your public key stays on-chain permanently.
+          </p>
+          <motion.button
+            onClick={handleUnlock}
+            disabled={unlocking}
+            whileHover={!unlocking ? { scale: 1.02, y: -1 } : {}}
+            whileTap={{ scale: 0.98 }}
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-[#D4AF37]/50 bg-[#D4AF37]/10 text-amber-200 font-medium hover:bg-[#D4AF37]/20 transition-colors disabled:opacity-50"
+          >
+            {unlocking ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> Waiting for wallet signature…</>
+            ) : (
+              <><Key className="w-4 h-4" /> Unlock with wallet signature (1 click)</>
+            )}
+          </motion.button>
+        </div>
+      </div>
+    );
+  }
+
+  // pageState === "ready" — fall through to main portfolio UI
 
   const totalShieldedDisplay = rows.reduce((acc, r) => {
     if (!r.shieldedState) return acc;
