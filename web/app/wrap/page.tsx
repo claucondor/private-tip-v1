@@ -413,8 +413,10 @@ function WrapPageInner() {
         amountWei,
         source: tokenVariant === "native" ? (source === "auto" ? (vaultBalanceWei >= amountWei ? "vault" : "coa") : source) : undefined,
         memoKeypair,
-        // coaEvmAddr required for native/erc20 wrapViaCoa path
-        coaEvmAddr: (tokenVariant === "native" || tokenVariant === "erc20") ? (coaHex ?? undefined) : undefined,
+        // coaEvmAddr required for all variants (wrapViaCoa path)
+        coaEvmAddr: coaHex ?? undefined,
+        // userCadenceAddr required for cadence-ft wrapViaCoa path
+        userCadenceAddr: tokenVariant === "cadence-ft" ? (userAddress ?? undefined) : undefined,
         tokenId: selectedToken,
       });
 

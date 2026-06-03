@@ -188,6 +188,7 @@ function ClaimPageInner() {
         memoKeypair,
         tokenId: selectedToken,
         coaEvmAddr: coaHex,
+        userCadenceAddr: userAddress ?? undefined,
       });
 
       const newState: ShieldedState = {

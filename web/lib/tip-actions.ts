@@ -406,10 +406,15 @@ export interface SendActionParams {
   evmSigner?: ethers.Wallet;
   memoKeypair: BabyJubKeypair;
   /**
-   * Sender's COA EVM hex address — required for native/erc20 variants
+   * Sender's COA EVM hex address — required for all variants
    * so shieldedTransferViaCoa can look up the sender's registered MemoKey.
    */
   coaEvmAddr?: string;
+  /**
+   * For cadence-ft variant: the sender's Flow wallet (Cadence) address.
+   * Required for shieldedTransferViaCoa — passed as the FCL signer address arg.
+   */
+  userCadenceAddr?: string;
 }
 
 export interface SendActionResult {
@@ -417,7 +422,7 @@ export interface SendActionResult {
 }
 
 export async function sendShieldedAction(params: SendActionParams): Promise<SendActionResult> {
-  const { tokenId, recipientAddr, amount, currentBalance, currentBlinding, memo, evmSigner, coaEvmAddr } = params;
+  const { tokenId, recipientAddr, amount, currentBalance, currentBlinding, memo, evmSigner, coaEvmAddr, userCadenceAddr } = params;
 
   if (amount > currentBalance) {
     throw new Error(
@@ -476,7 +481,59 @@ export async function sendShieldedAction(params: SendActionParams): Promise<Send
     return { txHash: result.txHash };
   }
 
-  // cadence-ft (MockFT): adapter calls FCL internally — no EVMSigner / ViaCoa needed.
+  // cadence-ft (MockFT): use shieldedTransferViaCoa with server-side proof (browser-safe).
+  if (entry.variant === "cadence-ft") {
+    if (!coaEvmAddr) {
+      throw new Error(
+        `sendShieldedAction: coaEvmAddr is required for ${tokenId} (variant=cadence-ft). Pass the sender's COA EVM address.`
+      );
+    }
+    if (!userCadenceAddr) {
+      throw new Error(
+        `sendShieldedAction: userCadenceAddr is required for ${tokenId} (variant=cadence-ft). Pass the sender's Flow wallet address.`
+      );
+    }
+
+    const transferBlinding = generateBlinding();
+    const newBlinding = generateBlinding();
+
+    const proofResponse = await fetch("/api/proof/shielded-transfer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        oldBalance: currentBalance.toString(),
+        oldBlinding: currentBlinding.toString(),
+        transferAmount: amount.toString(),
+        transferBlinding: transferBlinding.toString(),
+        newBlinding: newBlinding.toString(),
+      }),
+    });
+    if (!proofResponse.ok) {
+      const errBody = await proofResponse.json().catch(() => ({ error: proofResponse.statusText }));
+      throw new Error(`sendShieldedAction (cadence-ft): proof generation failed: ${errBody.error}`);
+    }
+    const proofData = await proofResponse.json();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (adapter as any).shieldedTransferViaCoa({
+      recipient: recipientAddr,
+      amount,
+      currentBalance,
+      currentBlinding,
+      memo,
+      coaEvmAddr,
+      userCadenceAddr,
+      prebuiltProof: {
+        proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
+        transferBlinding,
+        newBlinding,
+      },
+    });
+    return { txHash: result.txHash };
+  }
+
+  // Fallback (Node.js / non-browser callers): adapter calls FCL internally.
   const signer = evmSigner ?? (null as unknown as ethers.Wallet);
   const result = await adapter.shieldedTransfer(
     {
@@ -503,11 +560,15 @@ export interface UnwrapActionParams {
   evmSigner?: ethers.Wallet;
   memoKeypair: BabyJubKeypair;
   /**
-   * Sender's COA EVM hex address — required for native/erc20 variants.
-   * The COA is msg.sender in JanusFlow.unwrap, so the MemoKey must be
-   * registered under this address. Also used as the proof builder's context.
+   * User's COA EVM hex address — required for all variants.
+   * Used to look up the registered MemoKey.
    */
   coaEvmAddr?: string;
+  /**
+   * For cadence-ft variant: the user's Flow wallet (Cadence) address.
+   * Required for unwrapViaCoa — passed as the FCL signer address arg.
+   */
+  userCadenceAddr?: string;
 }
 
 export interface UnwrapActionResult {
@@ -516,7 +577,7 @@ export interface UnwrapActionResult {
 }
 
 export async function unwrapAction(params: UnwrapActionParams): Promise<UnwrapActionResult> {
-  const { tokenId, claimedAmount, recipient, currentBalance, currentBlinding, evmSigner, coaEvmAddr } = params;
+  const { tokenId, claimedAmount, recipient, currentBalance, currentBlinding, evmSigner, coaEvmAddr, userCadenceAddr } = params;
 
   if (claimedAmount > currentBalance) {
     throw new Error(
@@ -576,7 +637,60 @@ export async function unwrapAction(params: UnwrapActionParams): Promise<UnwrapAc
     return { txHash: result.txHash, netToRecipient: result.netToRecipient };
   }
 
-  // cadence-ft (MockFT): adapter calls FCL internally.
+  // cadence-ft (MockFT): use unwrapViaCoa with server-side proof (browser-safe).
+  if (entry.variant === "cadence-ft") {
+    if (!coaEvmAddr) {
+      throw new Error(
+        `unwrapAction: coaEvmAddr is required for ${tokenId} (variant=cadence-ft). Pass the user's COA EVM address.`
+      );
+    }
+    if (!userCadenceAddr) {
+      throw new Error(
+        `unwrapAction: userCadenceAddr is required for ${tokenId} (variant=cadence-ft). Pass the user's Flow wallet address.`
+      );
+    }
+
+    const transferBlinding = generateBlinding();
+    const newBlinding = generateBlinding();
+
+    const proofResponse = await fetch("/api/proof/unwrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        claimedAmount: claimedAmount.toString(),
+        currentBalance: currentBalance.toString(),
+        currentBlinding: currentBlinding.toString(),
+        transferBlinding: transferBlinding.toString(),
+        newBlinding: newBlinding.toString(),
+      }),
+    });
+    if (!proofResponse.ok) {
+      const errBody = await proofResponse.json().catch(() => ({ error: proofResponse.statusText }));
+      throw new Error(`unwrapAction (cadence-ft): proof generation failed: ${errBody.error}`);
+    }
+    const proofData = await proofResponse.json();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (adapter as any).unwrapViaCoa({
+      claimedAmount,
+      recipient,
+      currentBalance,
+      currentBlinding,
+      coaEvmAddr,
+      userCadenceAddr,
+      prebuiltProofs: {
+        amountProof: proofData.amountProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
+        amountPublicInputs: proofData.amountPublicInputs.map(BigInt) as [bigint,bigint,bigint],
+        transferProof: proofData.transferProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        transferPublicInputs: proofData.transferPublicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
+        newBlinding,
+      },
+    });
+    return { txHash: result.txHash, netToRecipient: result.netToRecipient };
+  }
+
+  // Fallback (Node.js / non-browser callers): adapter calls FCL internally.
   const signer = evmSigner ?? (null as unknown as ethers.Wallet);
   const result = await adapter.unwrap(
     {
@@ -800,10 +914,15 @@ export interface SendShieldedTipParams {
   evmSigner?: ethers.Wallet;
   memoKeypair?: BabyJubKeypair;
   /**
-   * Sender's own COA EVM hex address — required for native/erc20 variants
+   * Sender's own COA EVM hex address — required for all variants
    * so the shieldedTransferViaCoa path can find the sender's MemoKey.
    */
   senderCoaEvmAddr?: string;
+  /**
+   * For cadence-ft variant: the sender's Flow wallet (Cadence) address.
+   * Required for shieldedTransferViaCoa — passed as FCL signer address arg.
+   */
+  userCadenceAddr?: string;
 }
 
 export interface SendShieldedTipResult {
@@ -852,17 +971,9 @@ export async function sendShieldedTipAction(
   // Cadence FT (mockft): use Cadence Flow address.
   const recipientAddr = entry.variant === "cadence-ft" ? recipientFlowAddr : recipientCoaHex;
 
-  // Resolve sender's COA address for the ViaCoa path (native/erc20 variants).
-  let senderCoaEvmAddr: string | undefined;
-  if (entry.variant === "native" || entry.variant === "erc20") {
-    try {
-      // params doesn't carry senderFlowAddr explicitly; derive from FCL current user below.
-      // We use recipientCoaHex as a proxy for the pattern — but we need the SENDER's COA.
-      // The send page already has the sender's userAddress. Pass it via a new optional field.
-      // If not provided, fall back to undefined and let the adapter throw a clear error.
-      senderCoaEvmAddr = (params as typeof params & { senderCoaEvmAddr?: string }).senderCoaEvmAddr;
-    } catch { /* non-fatal — adapter will throw if missing */ }
-  }
+  // Resolve sender's COA address for the ViaCoa path (all variants).
+  const senderCoaEvmAddr = params.senderCoaEvmAddr;
+  const userCadenceAddrForSend = params.userCadenceAddr;
 
   const result = await sendShieldedAction({
     tokenId,
@@ -874,6 +985,7 @@ export async function sendShieldedTipAction(
     evmSigner,
     memoKeypair: memoKeypair ?? { privkey: 0n, pubkey: { x: 0n, y: 1n } },
     coaEvmAddr: senderCoaEvmAddr,
+    userCadenceAddr: userCadenceAddrForSend,
   });
 
   // v0.6: SDK doesn't return newBlinding directly. We can reconstruct it
@@ -900,11 +1012,15 @@ export interface LegacyWrapParams {
   evmSigner?: ethers.Wallet;
   tokenId?: TokenId;
   /**
-   * For native (FLOW) and erc20 (mUSDC) variants: the user's COA EVM address.
+   * For all variants: the user's COA EVM address.
    * Required for the wrapViaCoa FCL path — used to look up the registered MemoKey.
-   * If omitted for those variants, wrapViaCoa will throw a clear error.
    */
   coaEvmAddr?: string;
+  /**
+   * For cadence-ft variant: the user's Flow wallet (Cadence) address.
+   * Required for wrapViaCoa — passed as the FCL signer address arg.
+   */
+  userCadenceAddr?: string;
 }
 
 export interface LegacyWrapResult {
@@ -929,7 +1045,7 @@ export interface LegacyWrapResult {
  * Pages should call latestSnapshot after wrap to get fresh state.
  */
 export async function wrapActionLegacy(params: LegacyWrapParams): Promise<LegacyWrapResult> {
-  const { amountWei, memoKeypair, evmSigner, tokenId = "flow", coaEvmAddr } = params;
+  const { amountWei, memoKeypair, evmSigner, tokenId = "flow", coaEvmAddr, userCadenceAddr } = params;
 
   if (!memoKeypair) {
     throw new Error("wrapAction: memoKeypair required for v0.6 SDK");
@@ -989,7 +1105,60 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
     };
   }
 
-  // cadence-ft (MockFT): adapter.wrap calls FCL internally — no EVMSigner needed.
+  // cadence-ft (MockFT): use wrapViaCoa with server-side proof (browser-safe).
+  if (entry.variant === "cadence-ft") {
+    if (!coaEvmAddr) {
+      throw new Error(
+        `wrapActionLegacy: coaEvmAddr is required for ${tokenId} (variant=cadence-ft). Pass the user's COA EVM hex address.`
+      );
+    }
+    if (!userCadenceAddr) {
+      throw new Error(
+        `wrapActionLegacy: userCadenceAddr is required for ${tokenId} (variant=cadence-ft). Pass the user's Flow wallet address.`
+      );
+    }
+
+    const adapter = sdk.token(tokenId);
+    const bps = await adapter.feeBps();
+    const fee = bps === 0 ? 0n : (amountWei * BigInt(bps)) / 10000n;
+    const netAmount = amountWei - fee;
+
+    const blinding = generateBlinding();
+
+    const proofResponse = await fetch("/api/proof/wrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amount: netAmount.toString(),
+        blinding: blinding.toString(),
+      }),
+    });
+    if (!proofResponse.ok) {
+      const errBody = await proofResponse.json().catch(() => ({ error: proofResponse.statusText }));
+      throw new Error(`wrapActionLegacy (cadence-ft): proof generation failed: ${errBody.error}`);
+    }
+    const proofData = await proofResponse.json();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (adapter as any).wrapViaCoa({
+      grossAmount: amountWei,
+      coaEvmAddr,
+      userCadenceAddr,
+      prebuiltProof: {
+        proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
+        blinding,
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint],
+      },
+    });
+    return {
+      txId: result.txHash,
+      blinding: 0n,
+      commitment: { x: 0n, y: 1n },
+    };
+  }
+
+  // Fallback (Node.js / non-browser callers): adapter.wrap calls FCL internally.
   const result = await wrapAction({
     tokenId,
     grossAmountRaw: amountWei,
@@ -1015,10 +1184,15 @@ export interface LegacyUnwrapParams {
   evmSigner?: ethers.Wallet;
   tokenId?: TokenId;
   /**
-   * Caller's COA EVM hex address — required for native/erc20 variants.
+   * Caller's COA EVM hex address — required for all variants.
    * The claim page already has this as coaHex. Pass it here.
    */
   coaEvmAddr?: string;
+  /**
+   * For cadence-ft variant: the user's Flow wallet (Cadence) address.
+   * Required for unwrapViaCoa. Pass userAddress from the claim page.
+   */
+  userCadenceAddr?: string;
 }
 
 export interface LegacyUnwrapResult {
@@ -1029,14 +1203,15 @@ export interface LegacyUnwrapResult {
 }
 
 export async function unwrapActionLegacy(params: LegacyUnwrapParams): Promise<LegacyUnwrapResult> {
-  const { claimedAmountWei, recipientEvmHex, oldBalanceWei, oldBlinding, evmSigner, memoKeypair, tokenId = "flow", coaEvmAddr } = params;
+  const { claimedAmountWei, recipientEvmHex, oldBalanceWei, oldBlinding, evmSigner, memoKeypair, tokenId = "flow", coaEvmAddr, userCadenceAddr } = params;
 
   if (!memoKeypair) {
     throw new Error("unwrapAction: memoKeypair required for v0.6 SDK");
   }
 
   const entry = TOKEN_REGISTRY[tokenId];
-  const recipient = entry.variant === "cadence-ft" ? recipientEvmHex : recipientEvmHex;
+  // For cadence-ft, recipient is a Cadence address (caller should pass userAddress, not coaHex).
+  const recipient = entry.variant === "cadence-ft" ? (userCadenceAddr ?? recipientEvmHex) : recipientEvmHex;
 
   const result = await unwrapAction({
     tokenId,
@@ -1047,6 +1222,7 @@ export async function unwrapActionLegacy(params: LegacyUnwrapParams): Promise<Le
     evmSigner,
     memoKeypair,
     coaEvmAddr,
+    userCadenceAddr,
   });
 
   return {

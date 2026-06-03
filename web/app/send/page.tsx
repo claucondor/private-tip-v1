@@ -261,6 +261,7 @@ export default function SendTipPage() {
         tokenId: selectedToken,
         memoKeypair,
         senderCoaEvmAddr,
+        userCadenceAddr: userAddress ?? undefined,
       });
 
       const newState: ShieldedState = {
