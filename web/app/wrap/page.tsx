@@ -1,11 +1,14 @@
-/// Wrap page — v0.3 + Janus dark theme redesign.
+/// Wrap page — v0.6.5 multi-token.
 ///
-/// Boundary semantics (matches /unwrap and /send):
+/// The token selector drives the ENTIRE UI:
+///   - FLOW (native):     Vault/COA source picker shown; decimals=18
+///   - mUSDC (erc20):     Source picker hidden; COA-only; decimals=6
+///   - MockFT (cadence-ft): Source picker hidden; vault-only; decimals=8
+///
+/// Boundary semantics:
 ///   - wrap()              : msg.value VISIBLE | commitment opaque   (boundary in)
 ///   - shieldedTransfer()  : amount HIDDEN on calldata/events/storage (full shielded)
 ///   - unwrap()            : claimedAmount + recipient VISIBLE        (boundary out)
-///
-/// IMPORTANT — functionality unchanged. Only visual layer updated.
 
 "use client";
 
@@ -32,9 +35,6 @@ import {
   getFlowVaultBalanceWei,
   wrapActionLegacy as wrapAction,
   isValidFlowAmount,
-  parseFlowToWei,
-  formatWeiToFlow,
-  formatWeiToFlowUFix64,
   formatPoint,
   isIdentityPoint,
   getRecipientMemoPubkey,
@@ -50,6 +50,7 @@ import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveT
 import { TokenSelector } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
 import { parseTokenAmount, formatTokenAmount, getTokenMeta } from "@/lib/tokens";
+import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
 
 // WrapSource type shim for v0.6 (EVM-direct, no vault/coa split needed).
 type WrapSource = "vault" | "coa";
@@ -89,7 +90,7 @@ interface WrapState {
   status: WrapStatus;
   error: string | null;
   txId: string | null;
-  wrappedFlow: string | null;
+  wrappedAmount: string | null;
   newCommit: Point | null;
 }
 
@@ -108,15 +109,21 @@ function WrapPageInner() {
   const [shielded, setShielded] = useState<ShieldedState | null>(null);
   const [coaHex, setCoaHex] = useState<string | null>(null);
   const [chainCommit, setChainCommit] = useState<Point | null>(null);
+  // FLOW: both vault and COA balances
   const [vaultBalanceWei, setVaultBalanceWei] = useState<bigint>(BigInt(0));
   const [coaBalanceWei, setCoaBalanceWei] = useState<bigint>(BigInt(0));
+  // mUSDC: COA ERC20 balance (6 decimals)
+  const [coaERC20BalanceWei, setCoaERC20BalanceWei] = useState<bigint>(BigInt(0));
+  // MockFT: Cadence vault balance (8 decimals)
+  const [ftVaultBalanceWei, setFTVaultBalanceWei] = useState<bigint>(BigInt(0));
+
   const [source, setSource] = useState<"auto" | WrapSource>("auto");
   const [amount, setAmount] = useState("1");
   const [wrapState, setWrapState] = useState<WrapState>({
     status: "loading",
     error: null,
     txId: null,
-    wrappedFlow: null,
+    wrappedAmount: null,
     newCommit: null,
   });
 
@@ -126,6 +133,43 @@ function WrapPageInner() {
   const [settingUpCoa, setSettingUpCoa] = useState(false);
   const [showPreAnimation, setShowPreAnimation] = useState(false);
   const [showPostAnimation, setShowPostAnimation] = useState(false);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+
+  const tokenMeta = getTokenMeta(selectedToken);
+  const tokenVariant = TOKEN_REGISTRY[selectedToken].variant;
+
+  // -- Balance loader per token -----------------------------------------------
+
+  const loadBalances = useCallback(async (tokenId: TokenId, addr: string, coa: string) => {
+    setBalanceLoading(true);
+    try {
+      const entry = TOKEN_REGISTRY[tokenId];
+      if (entry.variant === "native") {
+        // FLOW: vault (Cadence) + COA EVM native balance
+        const [vaultWei, coaWei] = await Promise.all([
+          getFlowVaultBalanceWei(addr),
+          getCoaBalanceWei(addr),
+        ]);
+        setVaultBalanceWei(vaultWei);
+        setCoaBalanceWei(coaWei);
+      } else if (entry.variant === "erc20") {
+        // mUSDC: ERC20 balance of the COA address
+        const { sdk } = await import("@claucondor/sdk");
+        const bal = await sdk.token(tokenId).getBalance(coa);
+        setCoaERC20BalanceWei(bal);
+      } else if (entry.variant === "cadence-ft") {
+        // MockFT: Cadence vault balance (UFix64 → 10^8 scale)
+        const { sdk } = await import("@claucondor/sdk");
+        const bal = await sdk.token(tokenId).getBalance(addr);
+        setFTVaultBalanceWei(bal);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error("Failed to load balance", { description: msg });
+    } finally {
+      setBalanceLoading(false);
+    }
+  }, []);
 
   // -- Initial load -----------------------------------------------------------
 
@@ -140,21 +184,15 @@ function WrapPageInner() {
         setCoaHex(coa);
         setNeedsCoaSetup(false);
 
-        const c = await getCommitment(coa);
+        const c = await getCommitment(coa, selectedToken === "mockft" ? "mockft" : "flow");
         if (cancelled) return;
         setChainCommit(c);
 
-        const [vaultWei, coaWei] = await Promise.all([
-          getFlowVaultBalanceWei(userAddress),
-          getCoaBalanceWei(userAddress),
-        ]);
-        if (cancelled) return;
-        setVaultBalanceWei(vaultWei);
-        setCoaBalanceWei(coaWei);
+        // Load balances for selected token
+        await loadBalances(selectedToken, userAddress, coa);
 
-        const { getRecipientMemoPubkey } = await import("@/lib/tip-actions");
-        const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
         const memoPub = await getRecipientMemoPubkey(userAddress);
+        const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
         const hasSessionPrivkey = getCachedMemoPrivkey(userAddress) !== null;
         if (cancelled) return;
         setNeedsMemoKey(memoPub === null || !hasSessionPrivkey);
@@ -166,24 +204,51 @@ function WrapPageInner() {
         const bps = await fetchFeeBps(selectedToken);
         if (!cancelled) setFeeBps(bps);
 
-        setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
+        setWrapState({ status: "idle", error: null, txId: null, wrappedAmount: null, newCommit: null });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes("No COA at /public/evm") || msg.includes("No COA")) {
           if (!cancelled) {
             setNeedsCoaSetup(true);
-            setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
+            setWrapState({ status: "idle", error: null, txId: null, wrappedAmount: null, newCommit: null });
           }
           return;
         }
         if (!cancelled) {
-          setWrapState({ status: "error", error: msg, txId: null, wrappedFlow: null, newCommit: null });
+          setWrapState({ status: "error", error: msg, txId: null, wrappedAmount: null, newCommit: null });
+          toast.error("Failed to initialize", { description: msg });
         }
       }
     })();
 
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userAddress]);
+
+  // -- Re-load when token changes (after initial load) ----------------------
+
+  useEffect(() => {
+    if (!userAddress || !coaHex) return;
+    if (wrapState.status === "loading") return; // still in initial load
+
+    // Reset shielded balance for new token
+    const s = loadShieldedState(userAddress, selectedToken);
+    setShielded(s);
+
+    // Fetch fee for new token
+    fetchFeeBps(selectedToken)
+      .then((bps) => setFeeBps(bps))
+      .catch(() => {}); // non-fatal
+
+    // Fetch on-chain commitment for new token
+    getCommitment(coaHex, selectedToken)
+      .then((c) => setChainCommit(c))
+      .catch(() => {}); // non-fatal
+
+    // Load balances for new token
+    loadBalances(selectedToken, userAddress, coaHex);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedToken]);
 
   // -- Smart setup handler ----------------------------------------------------
 
@@ -211,6 +276,33 @@ function WrapPageInner() {
     }
   }, [userAddress]);
 
+  // -- Pre-flight check -------------------------------------------------------
+
+  const getInsufficientReason = useCallback((): string | null => {
+    if (!amount || !isValidFlowAmount(amount)) return null;
+    try {
+      const amountWei = parseTokenAmount(amount, selectedToken);
+      if (amountWei <= 0n) return null;
+
+      if (tokenVariant === "native") {
+        if (source === "auto") {
+          if (vaultBalanceWei < amountWei && coaBalanceWei < amountWei) {
+            return `Insufficient FLOW: vault ${formatTokenAmount(vaultBalanceWei, "flow", 4)} / COA ${formatTokenAmount(coaBalanceWei, "flow", 4)}`;
+          }
+        } else if (source === "vault") {
+          if (vaultBalanceWei < amountWei) return `Insufficient FLOW in vault (have ${formatTokenAmount(vaultBalanceWei, "flow", 4)})`;
+        } else if (source === "coa") {
+          if (coaBalanceWei < amountWei) return `Insufficient FLOW in COA (have ${formatTokenAmount(coaBalanceWei, "flow", 4)})`;
+        }
+      } else if (tokenVariant === "erc20") {
+        if (coaERC20BalanceWei < amountWei) return `Insufficient ${tokenMeta.symbol} in COA (have ${formatTokenAmount(coaERC20BalanceWei, selectedToken, 4)})`;
+      } else if (tokenVariant === "cadence-ft") {
+        if (ftVaultBalanceWei < amountWei) return `Insufficient ${tokenMeta.symbol} in vault (have ${formatTokenAmount(ftVaultBalanceWei, selectedToken, 4)})`;
+      }
+    } catch { /* invalid amount */ }
+    return null;
+  }, [amount, selectedToken, tokenVariant, source, vaultBalanceWei, coaBalanceWei, coaERC20BalanceWei, ftVaultBalanceWei, tokenMeta.symbol]);
+
   // -- Wrap handler -----------------------------------------------------------
 
   const handleWrap = useCallback(async () => {
@@ -219,66 +311,88 @@ function WrapPageInner() {
     // Show pre-animation at the moment the user clicks wrap
     setShowPreAnimation(true);
 
-    setWrapState({ status: "validating", error: null, txId: null, wrappedFlow: null, newCommit: null });
+    setWrapState({ status: "validating", error: null, txId: null, wrappedAmount: null, newCommit: null });
 
     if (!isValidFlowAmount(amount)) {
-      setWrapState({ status: "error", error: "Invalid amount.", txId: null, wrappedFlow: null, newCommit: null });
+      setWrapState({ status: "error", error: "Invalid amount.", txId: null, wrappedAmount: null, newCommit: null });
+      setShowPreAnimation(false);
       return;
     }
 
     let amountWei: bigint;
     try {
-      amountWei = parseFlowToWei(amount);
+      amountWei = parseTokenAmount(amount, selectedToken);
       if (amountWei <= BigInt(0)) throw new Error("Amount must be > 0");
     } catch (err) {
-      setWrapState({ status: "error", error: err instanceof Error ? err.message : "Invalid amount", txId: null, wrappedFlow: null, newCommit: null });
+      setWrapState({ status: "error", error: err instanceof Error ? err.message : "Invalid amount", txId: null, wrappedAmount: null, newCommit: null });
+      setShowPreAnimation(false);
       return;
     }
 
-    const amountUFix64 = formatWeiToFlowUFix64(amountWei);
-
-    let resolvedSource: WrapSource;
-    if (source === "auto") {
-      if (vaultBalanceWei >= amountWei) {
-        resolvedSource = "vault";
-      } else if (coaBalanceWei >= amountWei) {
-        resolvedSource = "coa";
+    // Pre-flight balance check per variant
+    if (tokenVariant === "native") {
+      let resolvedSource: WrapSource;
+      if (source === "auto") {
+        if (vaultBalanceWei >= amountWei) {
+          resolvedSource = "vault";
+        } else if (coaBalanceWei >= amountWei) {
+          resolvedSource = "coa";
+        } else {
+          setWrapState({
+            status: "error",
+            error: `Insufficient FLOW: vault has ${formatTokenAmount(vaultBalanceWei, "flow", 4)}, COA has ${formatTokenAmount(coaBalanceWei, "flow", 4)}, need ${amount}.`,
+            txId: null, wrappedAmount: null, newCommit: null,
+          });
+          setShowPreAnimation(false);
+          return;
+        }
       } else {
+        resolvedSource = source;
+        const available = resolvedSource === "vault" ? vaultBalanceWei : coaBalanceWei;
+        if (available < amountWei) {
+          setWrapState({
+            status: "error",
+            error: `Selected source (${resolvedSource}) has only ${formatTokenAmount(available, "flow", 4)} FLOW, need ${amount}.`,
+            txId: null, wrappedAmount: null, newCommit: null,
+          });
+          setShowPreAnimation(false);
+          return;
+        }
+      }
+    } else if (tokenVariant === "erc20") {
+      if (coaERC20BalanceWei < amountWei) {
         setWrapState({
           status: "error",
-          error: `Insufficient FLOW: vault has ${formatWeiToFlow(vaultBalanceWei, 4)}, COA has ${formatWeiToFlow(coaBalanceWei, 4)}, need ${amount}.`,
-          txId: null, wrappedFlow: null, newCommit: null,
+          error: `Insufficient ${tokenMeta.symbol}: COA has ${formatTokenAmount(coaERC20BalanceWei, selectedToken, 4)}, need ${amount}.`,
+          txId: null, wrappedAmount: null, newCommit: null,
         });
+        setShowPreAnimation(false);
         return;
       }
-    } else {
-      resolvedSource = source;
-      const available = resolvedSource === "vault" ? vaultBalanceWei : coaBalanceWei;
-      if (available < amountWei) {
+    } else if (tokenVariant === "cadence-ft") {
+      if (ftVaultBalanceWei < amountWei) {
         setWrapState({
           status: "error",
-          error: `Selected source (${resolvedSource}) has only ${formatWeiToFlow(available, 4)} FLOW, need ${amount}.`,
-          txId: null, wrappedFlow: null, newCommit: null,
+          error: `Insufficient ${tokenMeta.symbol}: vault has ${formatTokenAmount(ftVaultBalanceWei, selectedToken, 4)}, need ${amount}.`,
+          txId: null, wrappedAmount: null, newCommit: null,
         });
+        setShowPreAnimation(false);
         return;
       }
     }
 
-    setWrapState({ status: "building_proof", error: null, txId: null, wrappedFlow: null, newCommit: null });
+    setWrapState({ status: "building_proof", error: null, txId: null, wrappedAmount: null, newCommit: null });
 
     try {
-      setWrapState({ status: "submitting", error: null, txId: null, wrappedFlow: null, newCommit: null });
+      setWrapState({ status: "submitting", error: null, txId: null, wrappedAmount: null, newCommit: null });
 
-      const existing = loadShieldedState(userAddress);
+      const existing = loadShieldedState(userAddress, selectedToken);
       const oldBalanceWei = existing ? BigInt(existing.balanceWei) : BigInt(0);
-      const oldBlinding = existing ? BigInt(existing.blinding) : BigInt(0);
 
       // v0.5.4-fees: contract takes a 0.1% fee on msg.value. The proof MUST bind
-      // to the NET amount (msg.value - fee), not the gross. Compute net here so
-      // both the pre-proof (snapshot) and the wrapAction proof use the same value.
+      // to the NET amount (msg.value - fee), not the gross.
       const netAmountWei = computeNetWrap(amountWei, feeBps);
 
-      // v0.6: SDK handles all proof orchestration internally.
       // Get or derive memoKeypair for snapshot encryption.
       let memoKeypair;
       try {
@@ -288,60 +402,81 @@ function WrapPageInner() {
         memoKeypair = { privkey, pubkey };
       } catch { /* non-fatal — SDK will handle or skip snapshot */ }
 
+      // For EVM tokens (native/erc20), we need an ethers.Wallet signer.
+      // For cadence-ft (mockft), JanusFTAdapter uses FCL internally — signer is ignored.
+      let evmSigner;
+      if (tokenVariant === "native" || tokenVariant === "erc20") {
+        try {
+          const { createSigner } = await import("@/lib/tip-actions");
+          // Derive a deterministic EVM private key from the FCL wallet signature
+          const { deriveMemoKeyFromWallet } = await import("@/lib/memo-key-derive");
+          const kp = await deriveMemoKeyFromWallet();
+          // Use the raw privkey as hex for EVM signer
+          const hexPrivkey = "0x" + kp.privkey.toString(16).padStart(64, "0");
+          evmSigner = await createSigner(hexPrivkey);
+        } catch { /* signer derivation failed — wrap will throw with clear error */ }
+      }
+
       const result = await wrapAction({
-        amountUFix64, amountWei, source: resolvedSource,
+        amountUFix64: formatTokenAmount(amountWei, selectedToken, 8),
+        amountWei,
+        source: tokenVariant === "native" ? (source === "auto" ? (vaultBalanceWei >= amountWei ? "vault" : "coa") : source) : undefined,
         memoKeypair,
+        evmSigner,
         tokenId: selectedToken,
       });
 
-      // v0.6: re-read latestSnapshot after wrap to get fresh blinding.
-      // Optimistic: store the net amount with 0 blinding until scan updates it.
+      // Optimistic: store net amount with returned blinding.
       const actualNewBalanceWei = oldBalanceWei + netAmountWei;
 
       const newState: ShieldedState = {
         balanceWei: actualNewBalanceWei.toString(),
-        blinding: result.blinding.toString(),  // 0n if SDK didn't return it
+        blinding: result.blinding.toString(),
       };
       saveShieldedState(userAddress, newState, selectedToken);
       setShielded(newState);
 
+      // Refresh commitment on-chain
       if (coaHex) {
-        try { const c = await getCommitment(coaHex); setChainCommit(c); } catch { /* non-fatal */ }
+        try {
+          const commitAddr = tokenVariant === "cadence-ft" ? userAddress : coaHex;
+          const c = await getCommitment(commitAddr, selectedToken);
+          setChainCommit(c);
+        } catch { /* non-fatal */ }
       }
-      try {
-        const [vaultWei, coaWei] = await Promise.all([
-          getFlowVaultBalanceWei(userAddress),
-          getCoaBalanceWei(userAddress),
-        ]);
-        setVaultBalanceWei(vaultWei);
-        setCoaBalanceWei(coaWei);
-      } catch { /* non-fatal */ }
+
+      // Refresh balances
+      if (coaHex) {
+        loadBalances(selectedToken, userAddress, coaHex).catch(() => {});
+      }
 
       setShowPreAnimation(false);
       setShowPostAnimation(true);
 
       setWrapState({
         status: "success", error: null, txId: result.txId,
-        // Display NET amount (what actually got credited to the slot post-fee), not gross.
-        wrappedFlow: formatWeiToFlow(netAmountWei, 4), newCommit: result.commitment,
+        wrappedAmount: formatTokenAmount(netAmountWei, selectedToken, 4),
+        newCommit: result.commitment,
       });
-      const tokenMeta = getTokenMeta(selectedToken);
       toast.success("Wrap successful!", {
-        description: `${formatWeiToFlow(netAmountWei, 4)} ${tokenMeta.symbol} now in your shielded slot.`,
+        description: `${formatTokenAmount(netAmountWei, selectedToken, 4)} ${tokenMeta.symbol} now in your shielded slot.`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Wrap failed";
       setShowPreAnimation(false);
-      setWrapState({ status: "error", error: msg, txId: null, wrappedFlow: null, newCommit: null });
+      setWrapState({ status: "error", error: msg, txId: null, wrappedAmount: null, newCommit: null });
       toast.error("Wrap failed", { description: msg });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userAddress, amount, coaHex, source, vaultBalanceWei, coaBalanceWei, selectedToken]);
+  }, [userAddress, amount, coaHex, source, vaultBalanceWei, coaBalanceWei, coaERC20BalanceWei, ftVaultBalanceWei, selectedToken, tokenVariant, tokenMeta, feeBps]);
 
   const isSubmitting =
     wrapState.status === "validating" ||
     wrapState.status === "building_proof" ||
     wrapState.status === "submitting";
+
+  const insufficientReason = getInsufficientReason();
+  const wrapDisabled = isSubmitting || !amount || !!insufficientReason;
 
   // -- Unauthenticated -------------------------------------------------------
 
@@ -358,7 +493,7 @@ function WrapPageInner() {
             <Coins className="w-8 h-8 text-[#B45309]" />
           </div>
           <h2 className="text-xl font-bold mb-2 text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Connect Your Wallet</h2>
-          <p className="text-sm text-foreground/50 mb-6 max-w-sm">Connect your wallet to wrap FLOW into your shielded slot.</p>
+          <p className="text-sm text-foreground/50 mb-6 max-w-sm">Connect your wallet to wrap tokens into your shielded slot.</p>
           <motion.button
             onClick={() => authenticate()}
             whileHover={{ scale: 1.02, y: -1 }}
@@ -437,8 +572,8 @@ function WrapPageInner() {
           <Coins className="w-5 h-5 text-[#B45309]" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Add private FLOW</h1>
-          <p className="text-sm text-foreground/50">Cross the entry boundary — your FLOW moves into the private zone.</p>
+          <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Add private {tokenMeta.symbol}</h1>
+          <p className="text-sm text-foreground/50">Cross the entry boundary — your {tokenMeta.symbol} moves into the private zone.</p>
         </div>
       </motion.div>
 
@@ -465,7 +600,7 @@ function WrapPageInner() {
         </motion.div>
       )}
 
-      {/* Current balance card */}
+      {/* Current shielded balance card */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
@@ -475,10 +610,10 @@ function WrapPageInner() {
         <div className="flex items-start gap-3">
           <Shield className="w-6 h-6 text-[#00EF8B] shrink-0 mt-0.5" />
           <div className="flex-1">
-            <p className="text-xs font-medium text-foreground/70 mb-1">Your private balance</p>
+            <p className="text-xs font-medium text-foreground/70 mb-1">Your private balance ({tokenMeta.symbol})</p>
             {shielded ? (
               <p className="text-2xl font-bold text-[#00EF8B]" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
-                {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
+                {formatTokenAmount(BigInt(shielded.balanceWei), selectedToken, 4)} {tokenMeta.symbol}
               </p>
             ) : (
               <p className="text-sm text-foreground/40">Nothing here yet — your first wrap starts it.</p>
@@ -516,50 +651,93 @@ function WrapPageInner() {
           {/* Token selector */}
           <TokenSelector
             value={selectedToken}
-            onChange={(id) => { setSelectedToken(id); setShielded(loadShieldedState(userAddress ?? "", id)); }}
+            onChange={(id) => {
+              setSelectedToken(id);
+              setShielded(loadShieldedState(userAddress ?? "", id));
+            }}
             disabled={isSubmitting}
             label="Token to wrap"
           />
 
-          {/* Source picker */}
-          <div>
-            <label className="text-xs font-medium text-foreground/50 mb-1 block">Source of FLOW</label>
-            <div className="grid grid-cols-3 gap-2 mb-1">
-              {(["auto", "vault", "coa"] as const).map((s) => (
-                <motion.button
-                  key={s}
-                  type="button"
-                  onClick={() => setSource(s)}
-                  disabled={isSubmitting}
-                  whileHover={!isSubmitting && source !== s ? { scale: 1.02 } : {}}
-                  whileTap={{ scale: 0.98 }}
-                  className={`px-3 py-2 text-xs rounded-lg border transition-all ${
-                    source === s
-                      ? "bg-[#00EF8B]/15 text-[#00EF8B] border-[#00EF8B]/30"
-                      : "bg-white/3 border-white/10 text-foreground/50 hover:border-white/20 hover:text-foreground/70"
-                  }`}
-                >
-                  {s.charAt(0).toUpperCase() + s.slice(1)}
-                </motion.button>
-              ))}
+          {/* Source picker — FLOW only */}
+          {tokenVariant === "native" && (
+            <div>
+              <label className="text-xs font-medium text-foreground/50 mb-1 block">Source of FLOW</label>
+              <div className="grid grid-cols-3 gap-2 mb-1">
+                {(["auto", "vault", "coa"] as const).map((s) => (
+                  <motion.button
+                    key={s}
+                    type="button"
+                    onClick={() => setSource(s)}
+                    disabled={isSubmitting}
+                    whileHover={!isSubmitting && source !== s ? { scale: 1.02 } : {}}
+                    whileTap={{ scale: 0.98 }}
+                    className={`px-3 py-2 text-xs rounded-lg border transition-all ${
+                      source === s
+                        ? "bg-[#00EF8B]/15 text-[#00EF8B] border-[#00EF8B]/30"
+                        : "bg-white/3 border-white/10 text-foreground/50 hover:border-white/20 hover:text-foreground/70"
+                    }`}
+                  >
+                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                  </motion.button>
+                ))}
+              </div>
+              <div className="text-[10px] text-foreground/30 space-y-0.5">
+                <p>
+                  {balanceLoading ? (
+                    <span className="text-foreground/30">Loading balances…</span>
+                  ) : (
+                    <>
+                      Vault: <span className="font-mono text-foreground/50">{formatTokenAmount(vaultBalanceWei, "flow", 4)}</span> FLOW
+                      {" · "}
+                      COA: <span className="font-mono text-foreground/50">{formatTokenAmount(coaBalanceWei, "flow", 4)}</span> FLOW
+                    </>
+                  )}
+                </p>
+                <p>
+                  {source === "auto" && "Auto picks your main FLOW balance first; uses EVM balance if main is low."}
+                  {source === "vault" && "Pulls from your main Flow wallet balance."}
+                  {source === "coa" && "Pulls from your Flow-EVM balance in one transaction."}
+                  {" "}Privacy is the same either way.
+                </p>
+              </div>
             </div>
+          )}
+
+          {/* Read-only source info for non-FLOW tokens */}
+          {tokenVariant === "erc20" && (
             <div className="text-[10px] text-foreground/30 space-y-0.5">
               <p>
-                Vault: <span className="font-mono text-foreground/50">{formatWeiToFlow(vaultBalanceWei, 4)}</span> FLOW
+                Source: <span className="text-foreground/50">COA (EVM)</span>
                 {" · "}
-                COA: <span className="font-mono text-foreground/50">{formatWeiToFlow(coaBalanceWei, 4)}</span> FLOW
+                {balanceLoading ? (
+                  <span className="text-foreground/30">Loading…</span>
+                ) : (
+                  <>COA: <span className="font-mono text-foreground/50">{formatTokenAmount(coaERC20BalanceWei, selectedToken, 4)}</span> {tokenMeta.symbol}</>
+                )}
               </p>
-              <p>
-                {source === "auto" && "Auto picks your main FLOW balance first; uses EVM balance if main is low."}
-                {source === "vault" && "Pulls from your main Flow wallet balance."}
-                {source === "coa" && "Pulls from your Flow-EVM balance in one transaction."}
-                {" "}Privacy is the same either way.
-              </p>
+              <p>{tokenMeta.symbol} lives in your COA (EVM address). The SDK handles the approve+wrap in one flow.</p>
             </div>
-          </div>
+          )}
 
+          {tokenVariant === "cadence-ft" && (
+            <div className="text-[10px] text-foreground/30 space-y-0.5">
+              <p>
+                Source: <span className="text-foreground/50">Cadence vault</span>
+                {" · "}
+                {balanceLoading ? (
+                  <span className="text-foreground/30">Loading…</span>
+                ) : (
+                  <>Vault: <span className="font-mono text-foreground/50">{formatTokenAmount(ftVaultBalanceWei, selectedToken, 4)}</span> {tokenMeta.symbol}</>
+                )}
+              </p>
+              <p>{tokenMeta.symbol} is a Cadence FungibleToken. The SDK bridges it into the shielded EVM slot automatically.</p>
+            </div>
+          )}
+
+          {/* Amount input */}
           <div>
-            <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount to wrap (FLOW)</label>
+            <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount to wrap ({tokenMeta.symbol})</label>
             <input
               type="text"
               value={amount}
@@ -571,15 +749,15 @@ function WrapPageInner() {
             {/* Fee disclosure */}
             {(() => {
               try {
-                const grossWei = parseFlowToWei(amount);
+                const grossWei = parseTokenAmount(amount, selectedToken);
                 if (grossWei > 0n) {
                   const netWei  = computeNetWrap(grossWei, feeBps);
                   const feeWei  = computeWrapFee(grossWei, feeBps);
                   const feePct  = feeBps / 100;
                   return (
                     <p className="text-[10px] text-foreground/40 mt-1">
-                      Wrapping {amount} FLOW → <span className="text-[#00EF8B]/70">{formatWeiToFlow(netWei, 4)} FLOW</span> credited
-                      {" "}(<span className="text-foreground/50">{formatWeiToFlow(feeWei, 4)} FLOW fee, {feePct}%</span>)
+                      Wrapping {amount} {tokenMeta.symbol} → <span className="text-[#00EF8B]/70">{formatTokenAmount(netWei, selectedToken, 4)} {tokenMeta.symbol}</span> credited
+                      {" "}(<span className="text-foreground/50">{formatTokenAmount(feeWei, selectedToken, 4)} {tokenMeta.symbol} fee, {feePct}%</span>)
                     </p>
                   );
                 }
@@ -592,10 +770,15 @@ function WrapPageInner() {
             })()}
           </div>
 
+          {/* Insufficient balance warning */}
+          {insufficientReason && (
+            <p className="text-[10px] text-red-400/80">{insufficientReason}</p>
+          )}
+
           <motion.button
             onClick={handleWrap}
-            disabled={isSubmitting || !amount}
-            whileHover={!isSubmitting && !!amount ? { scale: 1.01, y: -1 } : {}}
+            disabled={wrapDisabled}
+            whileHover={!wrapDisabled ? { scale: 1.01, y: -1 } : {}}
             whileTap={{ scale: 0.99 }}
             className="janus-button-primary w-full py-3 rounded-xl text-base disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -609,7 +792,7 @@ function WrapPageInner() {
             ) : (
               <span className="flex items-center justify-center gap-2">
                 <Coins className="w-4 h-4" />
-                Wrap FLOW
+                Wrap {tokenMeta.symbol}
               </span>
             )}
           </motion.button>
@@ -634,7 +817,7 @@ function WrapPageInner() {
               <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
               <div>
                 <h3 className="text-lg font-bold mb-1 text-foreground">Wrap successful!</h3>
-                <p className="text-xs text-foreground/50">{wrapState.wrappedFlow} FLOW now in your shielded slot.</p>
+                <p className="text-xs text-foreground/50">{wrapState.wrappedAmount} {tokenMeta.symbol} now in your shielded slot.</p>
               </div>
             </div>
             {wrapState.newCommit && (
@@ -665,7 +848,7 @@ function WrapPageInner() {
                 whileHover={{ scale: 1.02, y: -1 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => {
-                  setWrapState({ status: "idle", error: null, txId: null, wrappedFlow: null, newCommit: null });
+                  setWrapState({ status: "idle", error: null, txId: null, wrappedAmount: null, newCommit: null });
                   setShowPostAnimation(false);
                 }}
                 className="px-4 py-2 rounded-lg border border-white/15 bg-white/5 text-foreground/70 text-sm font-medium hover:bg-white/10 transition-colors"
