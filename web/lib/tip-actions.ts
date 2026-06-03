@@ -165,6 +165,29 @@ export async function getRecipientMemoPubkey(
 }
 
 /**
+ * Get the recipient's MemoKey pubkey by a raw EVM address.
+ * Used for EVM-only recipients (MetaMask users) who published their key
+ * to MemoKeyRegistry directly without owning a Flow Cadence account.
+ * Returns null if no key published.
+ */
+export async function getMemoPubkeyByEvmAddr(
+  evmAddr: string,
+  tokenId: TokenId = "flow"
+): Promise<Point | null> {
+  try {
+    const entry = TOKEN_REGISTRY[tokenId];
+    if (entry.variant === "cadence-ft") {
+      // cadence-ft doesn't use the EVM MemoKeyRegistry — not supported for EVM-only recipients.
+      return null;
+    }
+    const adapter = sdk.token(tokenId);
+    return await adapter.getMemoKey(evmAddr);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check whether an account has BOTH a COA and a published MemoKey.
  */
 export async function recipientFullyConfigured(flowAddr: string): Promise<{

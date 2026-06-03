@@ -1,6 +1,10 @@
-/// Send Shielded Tip page — v0.3 + Janus dark theme redesign.
+/// Send Shielded Tip page — v0.7 multi-token + EVM-only recipient support.
 ///
-/// IMPORTANT — all business logic unchanged. Only visual layer updated.
+/// v0.7 changes:
+///   - Token selector drives the ENTIRE UI (balance, amount label, decimals, errors)
+///   - Recipient field accepts BOTH Flow (16 hex) AND EVM (40 hex) addresses
+///   - EVM-only recipients: their memokey is queried directly from MemoKeyRegistry
+///   - Shielded balance loads per selected token (not always FLOW)
 
 "use client";
 
@@ -35,15 +39,31 @@ import {
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   getRecipientMemoPubkey,
+  getMemoPubkeyByEvmAddr,
   getOrDeriveMemoPrivkey,
   type Point,
 } from "@/lib/tip-actions";
 import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveTokenShieldedState } from "@/lib/store";
 import { TokenSelector } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
+import { parseTokenAmount, formatTokenAmount, getTokenMeta } from "@/lib/tokens";
 import { ShieldedNoteEncrypt } from "@/components/animations/ShieldedNoteEncrypt";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
+
+// --- Recipient address helpers ------------------------------------------------
+
+function isFlowAddr(addr: string): boolean {
+  return /^0x[a-fA-F0-9]{16}$/.test(addr.trim());
+}
+
+function isEvmAddr(addr: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(addr.trim());
+}
+
+function isValidRecipient(addr: string): boolean {
+  return isFlowAddr(addr) || isEvmAddr(addr);
+}
 
 // --- Local-storage helpers ---------------------------------------------------
 
@@ -91,16 +111,19 @@ export default function SendTipPage() {
 
   const addSentTip = useAppStore((s) => s.addSentTip);
 
-  // v0.6: token selector
   const [selectedToken, setSelectedToken] = useState<TokenId>("flow");
+  const tokenMeta = getTokenMeta(selectedToken);
 
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [memo, setMemo] = useState("");
 
+  // Recipient resolution state
+  const [recipientEvmAddr, setRecipientEvmAddr] = useState<string | null>(null);
   const [recipientCoaOk, setRecipientCoaOk] = useState<boolean | null>(null);
   const [recipientCoaChecking, setRecipientCoaChecking] = useState(false);
   const [recipientMemoOk, setRecipientMemoOk] = useState<boolean | null>(null);
+  const [resolvedMemoPubkey, setResolvedMemoPubkey] = useState<Point | null>(null);
   const [coaWarningAcknowledged, setCoaWarningAcknowledged] = useState(false);
 
   const [shielded, setShielded] = useState<ShieldedState | null>(null);
@@ -113,52 +136,99 @@ export default function SendTipPage() {
 
   const [showEncryptAnim, setShowEncryptAnim] = useState(false);
 
-  // Debounced recipient-COA + MemoKey check
+  // Debounced recipient check — handles both Flow and EVM addresses
   useEffect(() => {
     setCoaWarningAcknowledged(false);
-    if (!isValidFlowAddress(recipient)) {
+    setRecipientEvmAddr(null);
+
+    if (!isValidRecipient(recipient)) {
       setRecipientCoaOk(null);
       setRecipientMemoOk(null);
+      setResolvedMemoPubkey(null);
       return;
     }
+
     let cancelled = false;
     setRecipientCoaChecking(true);
+
     const t = setTimeout(async () => {
       try {
-        const [coaOk, memoPub] = await Promise.all([
-          recipientHasCoa(recipient),
-          getRecipientMemoPubkey(recipient),
-        ]);
-        if (!cancelled) {
-          setRecipientCoaOk(coaOk);
-          setRecipientMemoOk(memoPub !== null);
+        if (isEvmAddr(recipient)) {
+          // EVM-only recipient: no COA lookup needed, query registry directly
+          const memoPub = await getMemoPubkeyByEvmAddr(recipient.trim(), selectedToken === "mockft" ? "flow" : selectedToken);
+          if (!cancelled) {
+            setRecipientEvmAddr(recipient.trim());
+            setRecipientCoaOk(true); // EVM addr IS the final addr, no COA needed
+            setRecipientMemoOk(memoPub !== null);
+            setResolvedMemoPubkey(memoPub);
+          }
+        } else {
+          // Flow address: check COA + memokey
+          const [coaOk, memoPub] = await Promise.all([
+            recipientHasCoa(recipient),
+            getRecipientMemoPubkey(recipient, selectedToken === "mockft" ? "flow" : selectedToken),
+          ]);
+          let resolvedCoa: string | null = null;
+          if (coaOk) {
+            try {
+              resolvedCoa = await getCoaEvmAddress(recipient);
+            } catch { /* non-fatal */ }
+          }
+          if (!cancelled) {
+            setRecipientEvmAddr(resolvedCoa);
+            setRecipientCoaOk(coaOk);
+            setRecipientMemoOk(memoPub !== null);
+            setResolvedMemoPubkey(memoPub);
+          }
         }
       } catch {
         if (!cancelled) {
           setRecipientCoaOk(false);
           setRecipientMemoOk(false);
+          setResolvedMemoPubkey(null);
         }
       } finally {
         if (!cancelled) setRecipientCoaChecking(false);
       }
     }, 400);
+
     return () => { cancelled = true; clearTimeout(t); };
-  }, [recipient]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recipient, selectedToken]);
 
   useEffect(() => {
     if (recipientMemoOk === false && memo.length > 0) setMemo("");
   }, [recipientMemoOk, memo]);
 
+  // Load shielded state for selected token on mount + token change
   useEffect(() => {
     if (!userAddress) return;
     const s = loadShieldedState(userAddress, selectedToken);
     if (!s) {
       setSendState({ status: "needs_wrap", error: null, txId: null, newCommit: null });
+      setShielded(null);
     } else {
       setShielded(s);
-      setSendState({ status: "idle", error: null, txId: null, newCommit: null });
+      setSendState((prev) =>
+        prev.status === "needs_wrap"
+          ? { status: "idle", error: null, txId: null, newCommit: null }
+          : prev
+      );
     }
-  }, [userAddress]);
+  }, [userAddress, selectedToken]);
+
+  // Insufficient balance check
+  const insufficientReason: string | null = (() => {
+    if (!shielded || !amount || !isValidFlowAmount(amount)) return null;
+    try {
+      const amountWei = parseTokenAmount(amount, selectedToken);
+      const balanceWei = BigInt(shielded.balanceWei);
+      if (amountWei > balanceWei) {
+        return `Insufficient shielded balance: have ${formatTokenAmount(balanceWei, selectedToken, 4)} ${tokenMeta.symbol}, need ${amount}.`;
+      }
+    } catch { /* invalid amount */ }
+    return null;
+  })();
 
   const handleSendTip = useCallback(async () => {
     if (!userAddress || !shielded) {
@@ -166,67 +236,100 @@ export default function SendTipPage() {
       return;
     }
 
-    // Show encryption animation at the moment of send
     setShowEncryptAnim(true);
-
     setSendState({ status: "validating", error: null, txId: null, newCommit: null });
 
-    if (!isValidFlowAddress(recipient)) {
-      setSendState({ status: "error", error: "Invalid recipient Flow address (must be 0x + 16 hex).", txId: null, newCommit: null });
-      return;
-    }
-    if (!isValidFlowAmount(amount)) {
-      setSendState({ status: "error", error: "Invalid amount.", txId: null, newCommit: null });
-      return;
-    }
-    if (recipient.toLowerCase() === userAddress.toLowerCase()) {
-      setSendState({ status: "error", error: "Cannot send a shielded tip to yourself (EVM contract forbids).", txId: null, newCommit: null });
-      return;
-    }
-
-    let coaOk = recipientCoaOk;
-    if (coaOk === null) {
-      coaOk = await recipientHasCoa(recipient);
-      setRecipientCoaOk(coaOk);
-    }
-    if (!coaOk && !coaWarningAcknowledged) {
+    // Validate recipient
+    const recipientTrimmed = recipient.trim();
+    if (!isFlowAddr(recipientTrimmed) && !isEvmAddr(recipientTrimmed)) {
       setSendState({
         status: "error",
-        error: "Recipient has no COA at /public/evm. They cannot unwrap this tip until they set one up. Acknowledge the warning below to proceed anyway.",
+        error: "Invalid recipient — expected Flow address (0x + 16 hex) or EVM address (0x + 40 hex).",
         txId: null, newCommit: null,
       });
+      setShowEncryptAnim(false);
       return;
     }
 
-    const amountWei = parseFlowToWei(amount);
+    if (!isValidFlowAmount(amount)) {
+      setSendState({ status: "error", error: "Invalid amount.", txId: null, newCommit: null });
+      setShowEncryptAnim(false);
+      return;
+    }
+
+    // Self-send check
+    if (isFlowAddr(recipientTrimmed) && recipientTrimmed.toLowerCase() === userAddress.toLowerCase()) {
+      setSendState({ status: "error", error: "Cannot send a shielded tip to yourself.", txId: null, newCommit: null });
+      setShowEncryptAnim(false);
+      return;
+    }
+
+    // Amount check against shielded balance
+    const amountWei = parseTokenAmount(amount, selectedToken);
     const oldBalanceWei = BigInt(shielded.balanceWei);
     if (amountWei > oldBalanceWei) {
       setSendState({
         status: "error",
-        error: `Insufficient shielded balance: have ${formatWeiToFlow(oldBalanceWei)} FLOW, need ${amount} FLOW.`,
+        error: `Insufficient shielded balance: have ${formatTokenAmount(oldBalanceWei, selectedToken, 4)} ${tokenMeta.symbol}, need ${amount}.`,
         txId: null, newCommit: null,
       });
+      setShowEncryptAnim(false);
       return;
+    }
+
+    // COA warning for Flow addresses without COA
+    if (isFlowAddr(recipientTrimmed)) {
+      let coaOk = recipientCoaOk;
+      if (coaOk === null) {
+        coaOk = await recipientHasCoa(recipientTrimmed);
+        setRecipientCoaOk(coaOk);
+      }
+      if (!coaOk && !coaWarningAcknowledged) {
+        setSendState({
+          status: "error",
+          error: "Recipient has no COA at /public/evm. They cannot unwrap this tip until they set one up. Acknowledge the warning below to proceed anyway.",
+          txId: null, newCommit: null,
+        });
+        setShowEncryptAnim(false);
+        return;
+      }
     }
 
     setSendState({ status: "resolving_coa", error: null, txId: null, newCommit: null });
 
-    let recipientCoaHex: string;
-    try {
-      recipientCoaHex = await getCoaEvmAddress(recipient);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "COA resolution failed";
-      setSendState({ status: "error", error: msg, txId: null, newCommit: null });
-      return;
+    // Resolve final recipient EVM address
+    let finalRecipientEvmHex: string;
+    if (isEvmAddr(recipientTrimmed)) {
+      finalRecipientEvmHex = recipientTrimmed;
+    } else {
+      // Flow address → resolve COA
+      try {
+        finalRecipientEvmHex = await getCoaEvmAddress(recipientTrimmed);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "COA resolution failed";
+        setSendState({ status: "error", error: msg, txId: null, newCommit: null });
+        setShowEncryptAnim(false);
+        return;
+      }
     }
 
-    const recipientMemoPubkey = await getRecipientMemoPubkey(recipient);
+    // MemoKey check — use already-resolved key or re-fetch
+    let recipientMemoPubkey = resolvedMemoPubkey;
+    if (!recipientMemoPubkey) {
+      if (isEvmAddr(recipientTrimmed)) {
+        recipientMemoPubkey = await getMemoPubkeyByEvmAddr(finalRecipientEvmHex, selectedToken === "mockft" ? "flow" : selectedToken);
+      } else {
+        recipientMemoPubkey = await getRecipientMemoPubkey(recipientTrimmed, selectedToken === "mockft" ? "flow" : selectedToken);
+      }
+    }
+
     if (!recipientMemoPubkey) {
       setSendState({
         status: "error",
-        error: "Recipient has no MemoKey published. Without it they cannot unwrap. Ask them to run setup (Wrap page) first.",
+        error: "Recipient hasn't activated their MemoKey — they need to /status first OR publish via MemoKeyRegistry.",
         txId: null, newCommit: null,
       });
+      setShowEncryptAnim(false);
       return;
     }
 
@@ -235,7 +338,7 @@ export default function SendTipPage() {
     try {
       setSendState({ status: "submitting", error: null, txId: null, newCommit: null });
 
-      // v0.6: get memoKeypair for snapshot encryption.
+      // Derive memoKeypair for snapshot encryption
       let memoKeypair;
       try {
         const privkey = await getOrDeriveMemoPrivkey(userAddress);
@@ -244,15 +347,15 @@ export default function SendTipPage() {
         memoKeypair = { privkey, pubkey };
       } catch { /* non-fatal */ }
 
-      // Resolve sender's own COA address for the ViaCoa path (native/erc20 variants).
+      // Resolve sender's own COA address
       let senderCoaEvmAddr: string | undefined;
       try {
         senderCoaEvmAddr = await getCoaEvmAddress(userAddress);
-      } catch { /* non-fatal — adapter will throw clearly if missing */ }
+      } catch { /* non-fatal */ }
 
       const result = await sendShieldedTipAction({
-        recipientFlowAddr: recipient,
-        recipientCoaHex,
+        recipientFlowAddr: isFlowAddr(recipientTrimmed) ? recipientTrimmed : finalRecipientEvmHex,
+        recipientCoaHex: finalRecipientEvmHex,
         transferAmountWei: amountWei,
         oldBalanceWei,
         oldBlinding: BigInt(shielded.blinding),
@@ -274,14 +377,14 @@ export default function SendTipPage() {
       addSentTip({
         tipID: Date.now(),
         sender: userAddress,
-        recipient,
+        recipient: recipientTrimmed,
         timestamp: new Date().toISOString(),
         memo: memo || null,
         claimed: false,
       });
 
       if (memo && memo.length > 0) {
-        saveSentMemo({ sender: userAddress, recipient, memo });
+        saveSentMemo({ sender: userAddress, recipient: recipientTrimmed, memo });
       }
 
       setSendState({ status: "success", error: null, txId: result.txId, newCommit: result.newCommit });
@@ -292,7 +395,7 @@ export default function SendTipPage() {
       setSendState({ status: "error", error: msg, txId: null, newCommit: null });
       toast.error("Send failed", { description: msg });
     }
-  }, [userAddress, shielded, recipient, amount, memo, addSentTip, recipientCoaOk, coaWarningAcknowledged]);
+  }, [userAddress, shielded, recipient, amount, memo, addSentTip, recipientCoaOk, coaWarningAcknowledged, resolvedMemoPubkey, selectedToken, tokenMeta]);
 
   const isSubmitting =
     sendState.status === "validating" ||
@@ -349,24 +452,25 @@ export default function SendTipPage() {
 
         <div className="rounded-xl border border-[#B45309]/20 bg-[#B45309]/5 p-6 space-y-4">
           <p className="text-sm text-amber-200/80">
-            <strong className="text-amber-200">Pre-condition:</strong> PrivateTip requires a pre-funded shielded slot. To send shielded tips you must first wrap N FLOW into your JanusFlow shielded slot.
+            <strong className="text-amber-200">Pre-condition:</strong> PrivateTip requires a pre-funded shielded slot for <strong className="text-amber-200">{tokenMeta.symbol}</strong>. Wrap some {tokenMeta.symbol} first.
           </p>
           <p className="text-xs text-amber-200/50">
-            The wrap is a one-time visible deposit (msg.value boundary). Subsequent tips draw down your shielded balance with amounts hidden by Pedersen commitments.
+            The wrap is a one-time visible deposit. Subsequent tips draw down your shielded balance with amounts hidden by Pedersen commitments.
           </p>
-          <Link href="/wrap">
+          <Link href={`/wrap?token=${selectedToken}`}>
             <motion.span
               whileHover={{ scale: 1.01, y: -1 }}
               whileTap={{ scale: 0.99 }}
               className="janus-button-primary w-full py-3 rounded-xl text-sm flex items-center justify-center cursor-pointer mt-2"
             >
-              Open Wrap page
+              Wrap {tokenMeta.symbol}
             </motion.span>
           </Link>
           <div className="border-t border-white/8 pt-4">
             <p className="text-xs text-foreground/30 mb-2">MVP shortcut: paste your current shielded state</p>
             <PasteShieldedStateForm
               addr={userAddress!}
+              tokenId={selectedToken}
               onSaved={(s) => {
                 setShielded(s);
                 setSendState({ status: "idle", error: null, txId: null, newCommit: null });
@@ -412,8 +516,10 @@ export default function SendTipPage() {
           <div className="flex items-start gap-3">
             <Shield className="w-5 h-5 text-[#00EF8B] shrink-0 mt-0.5" />
             <div className="text-xs flex-1">
-              <p className="font-medium text-foreground/70 mb-1">Your shielded balance (local-known)</p>
-              <p className="text-sm text-[#00EF8B] font-mono">{formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW</p>
+              <p className="font-medium text-foreground/70 mb-1">Your shielded {tokenMeta.symbol} balance (local-known)</p>
+              <p className="text-sm text-[#00EF8B] font-mono">
+                {formatTokenAmount(BigInt(shielded.balanceWei), selectedToken, 4)} {tokenMeta.symbol}
+              </p>
               <p className="text-[10px] text-foreground/30 mt-1">
                 (decryptable with your locally-stored blinding; on-chain only the Pedersen commit point is visible)
               </p>
@@ -441,42 +547,59 @@ export default function SendTipPage() {
           value={selectedToken}
           onChange={(id) => {
             setSelectedToken(id);
-            if (userAddress) {
-              const s = loadShieldedState(userAddress, id);
-              if (!s) setSendState({ status: "needs_wrap", error: null, txId: null, newCommit: null });
-              else { setShielded(s); setSendState({ status: "idle", error: null, txId: null, newCommit: null }); }
-            }
           }}
           disabled={isSubmitting || sendState.status === "success"}
           label="Token to send"
         />
 
+        {/* Recipient field */}
         <div>
-          <label className="text-xs font-medium text-foreground/50 mb-1 block">Recipient (Flow address)</label>
+          <label className="text-xs font-medium text-foreground/50 mb-1 block">Recipient (Flow or EVM address)</label>
           <input
             type="text"
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
-            placeholder="0x..."
+            placeholder="0x... (16 hex Flow, or 40 hex EVM)"
             className="janus-input font-mono"
             disabled={isSubmitting || sendState.status === "success"}
           />
-          {/* COA validator */}
-          {isValidFlowAddress(recipient) && (
+          <p className="text-[10px] text-foreground/30 mt-1">
+            Cadence wallets use Flow addresses (16 hex). MetaMask/EVM-only wallets use full 40-char EVM addresses. Both work if the recipient has activated MemoKey.
+          </p>
+
+          {/* Address type + validation feedback */}
+          {isValidRecipient(recipient) && (
             <div className="mt-2">
               {recipientCoaChecking && (
-                <p className="text-[10px] text-foreground/40">Checking recipient COA…</p>
+                <p className="text-[10px] text-foreground/40">Checking recipient…</p>
               )}
-              {!recipientCoaChecking && recipientCoaOk === true && (
+
+              {/* EVM-only recipient: no COA needed */}
+              {!recipientCoaChecking && isEvmAddr(recipient) && recipientMemoOk === true && (
+                <p className="text-[10px] text-[#00EF8B]">✓ EVM-only recipient — MemoKey found. Ready to receive.</p>
+              )}
+              {!recipientCoaChecking && isEvmAddr(recipient) && recipientMemoOk === false && (
+                <div className="rounded-lg border border-[#B45309]/30 bg-[#B45309]/8 p-2 mt-1">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                    <p className="text-[10px] text-amber-200/70">
+                      This EVM address has no MemoKey published. They need to publish via MemoKeyRegistry first.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Flow address recipient */}
+              {!recipientCoaChecking && isFlowAddr(recipient) && recipientCoaOk === true && recipientMemoOk === true && (
                 <p className="text-[10px] text-[#00EF8B]">✓ Recipient is ready to claim tips.</p>
               )}
-              {!recipientCoaChecking && recipientCoaOk === false && (
+              {!recipientCoaChecking && isFlowAddr(recipient) && recipientCoaOk === false && (
                 <div className="rounded-lg border border-[#B45309]/30 bg-[#B45309]/8 p-2 mt-1">
                   <div className="flex items-start gap-2">
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
                     <div className="text-[10px] text-amber-200/70 space-y-1">
                       <p className="font-medium text-amber-200">Recipient hasn&apos;t opened the app yet.</p>
-                      <p>They&apos;ll need to connect, click &quot;Enable&quot; and set up before they can claim. The FLOW waits privately for them.</p>
+                      <p>They&apos;ll need to connect, click &quot;Enable&quot; and set up before they can claim. The {tokenMeta.symbol} waits privately for them.</p>
                       <label className="flex items-center gap-1.5 mt-1 cursor-pointer">
                         <input
                           type="checkbox"
@@ -490,25 +613,34 @@ export default function SendTipPage() {
                   </div>
                 </div>
               )}
+              {!recipientCoaChecking && isFlowAddr(recipient) && recipientCoaOk === true && recipientMemoOk === false && (
+                <InviteRecipientCard recipient={recipient} />
+              )}
             </div>
           )}
         </div>
 
+        {/* Amount input */}
         <div>
-          <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount (FLOW)</label>
+          <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount ({tokenMeta.symbol})</label>
           <input
             type="text"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            placeholder="e.g. 1.5"
+            placeholder={`e.g. 1.5 ${tokenMeta.symbol}`}
             className="janus-input"
             disabled={isSubmitting || sendState.status === "success"}
           />
-          <p className="text-[10px] text-foreground/30 mt-1">
-            Amount HIDDEN on-chain. Recipient sees only their aggregated balance — never per-sender amounts.
-          </p>
+          {insufficientReason ? (
+            <p className="text-[10px] text-red-400/80 mt-1">{insufficientReason}</p>
+          ) : (
+            <p className="text-[10px] text-foreground/30 mt-1">
+              Amount HIDDEN on-chain. Recipient sees only their aggregated balance — never per-sender amounts.
+            </p>
+          )}
         </div>
 
+        {/* Memo */}
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-xs font-medium text-foreground/50 block">Memo (optional, max 280 chars)</label>
@@ -526,7 +658,7 @@ export default function SendTipPage() {
           {recipientMemoOk === true && (
             <p className="text-[10px] text-[#00EF8B] mt-1">✓ Your memo + amount get encrypted just for the recipient.</p>
           )}
-          {recipientMemoOk === false && (
+          {recipientMemoOk === false && !isEvmAddr(recipient) && (
             <InviteRecipientCard recipient={recipient} />
           )}
           {recipientMemoOk === null && (
@@ -536,8 +668,8 @@ export default function SendTipPage() {
 
         <motion.button
           onClick={handleSendTip}
-          disabled={isSubmitting || sendState.status === "success" || !shielded || recipientMemoOk === false}
-          whileHover={!isSubmitting && !!shielded && recipientMemoOk !== false ? { scale: 1.01, y: -1 } : {}}
+          disabled={isSubmitting || sendState.status === "success" || !shielded || recipientMemoOk === false || !!insufficientReason}
+          whileHover={!isSubmitting && !!shielded && recipientMemoOk !== false && !insufficientReason ? { scale: 1.01, y: -1 } : {}}
           whileTap={{ scale: 0.99 }}
           className="janus-button-primary w-full py-3 rounded-xl text-base disabled:opacity-50 disabled:cursor-not-allowed"
           style={{ background: !isSubmitting ? undefined : "#00EF8B" }}
@@ -546,14 +678,14 @@ export default function SendTipPage() {
             <span className="flex items-center justify-center gap-2">
               <Loader2 className="w-4 h-4 animate-spin" />
               {sendState.status === "validating" && "Validating…"}
-              {sendState.status === "resolving_coa" && "Resolving recipient COA…"}
+              {sendState.status === "resolving_coa" && "Resolving recipient address…"}
               {sendState.status === "building_proof" && "Generating Groth16 proof…"}
               {sendState.status === "submitting" && "Submitting…"}
             </span>
           ) : (
             <span className="flex items-center justify-center gap-2">
               <Shield className="w-4 h-4" />
-              Send Shielded Tip
+              Send Shielded {tokenMeta.symbol} Tip
             </span>
           )}
         </motion.button>
@@ -644,20 +776,23 @@ export default function SendTipPage() {
 
 function PasteShieldedStateForm({
   addr,
+  tokenId,
   onSaved,
 }: {
   addr: string;
+  tokenId: TokenId;
   onSaved: (s: ShieldedState) => void;
 }) {
-  const [balanceFlow, setBalanceFlow] = useState("");
+  const tokenMeta = getTokenMeta(tokenId);
+  const [balanceAmount, setBalanceAmount] = useState("");
   const [blinding, setBlinding] = useState("");
 
   const handleSave = () => {
     try {
-      const balanceWei = parseFlowToWei(balanceFlow).toString();
+      const balanceWei = parseTokenAmount(balanceAmount, tokenId).toString();
       const blindingDec = BigInt(blinding.trim()).toString();
       const s: ShieldedState = { balanceWei, blinding: blindingDec };
-      saveShieldedState(addr, s);
+      saveShieldedState(addr, s, tokenId);
       onSaved(s);
       toast.success("Shielded state saved (session only)");
     } catch (err) {
@@ -669,9 +804,9 @@ function PasteShieldedStateForm({
     <div className="space-y-2">
       <input
         type="text"
-        placeholder="Cleartext balance (FLOW, e.g. 5)"
-        value={balanceFlow}
-        onChange={(e) => setBalanceFlow(e.target.value)}
+        placeholder={`Cleartext balance (${tokenMeta.symbol})`}
+        value={balanceAmount}
+        onChange={(e) => setBalanceAmount(e.target.value)}
         className="janus-input font-mono text-xs"
       />
       <input
@@ -756,7 +891,7 @@ function InviteRecipientCard({ recipient }: { recipient: string }) {
             {s.label}
           </a>
         ))}
-        {isValidFlowAddress(recipient) && (
+        {isFlowAddr(recipient) && (
           <Link
             href={`/status?addr=${encodeURIComponent(recipient)}`}
             className="px-2 py-1 rounded border border-[#D4AF37]/30 bg-[#D4AF37]/5 text-[#D4AF37] hover:bg-[#D4AF37]/15 transition-colors text-[10px]"
