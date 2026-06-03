@@ -30,8 +30,7 @@ import {
   getOrDeriveMemoPrivkey,
   getRecipientMemoPubkey,
 } from "@/lib/tip-actions";
-import { sdk } from "@claucondor/sdk";
-import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
+import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei } from "@claucondor/sdk";
 import {
   loadShieldedState,
   type ShieldedTokenState,
@@ -151,14 +150,21 @@ export default function PortfolioPage() {
     for (const t of SUPPORTED_TOKENS) {
       setRow(t.id, { loading: true });
       try {
-        const adapter = sdk.token(t.id);
         const entry = TOKEN_REGISTRY[t.id];
-        // EVM tokens: use COA for getBalance (ERC20 balance of the wallet's EVM addr).
-        // Cadence FT: use Cadence addr.
-        const queryAddr = entry.variant === "cadence-ft" ? addr : coa;
-        const bal = await adapter.getBalance(queryAddr);
+        let bal: bigint;
+        if (entry.variant === "native") {
+          // FLOW lives in the Cadence vault, not the EVM COA balance.
+          bal = await getFlowVaultBalanceWei(addr);
+        } else if (entry.variant === "erc20") {
+          // ERC20 balance held by the COA on EVM.
+          bal = await sdk.token(t.id).getBalance(coa);
+        } else {
+          // cadence-ft: JanusFTAdapter.getBalance reads the Cadence FT vault.
+          bal = await sdk.token(t.id).getBalance(addr);
+        }
         setRow(t.id, { publicBalance: bal, loading: false });
       } catch (err) {
+        console.error(`[portfolio] fetchPublicBalances failed for ${t.id}:`, err);
         const msg = err instanceof Error ? err.message : "Failed";
         setRow(t.id, { loading: false, error: msg });
       }
@@ -213,8 +219,11 @@ export default function PortfolioPage() {
         if (cancelled) return;
         setCoaAddr(coa);
         await fetchPublicBalances(userAddress!, coa);
-      } catch {
-        // Non-fatal — user may not have a COA yet.
+      } catch (err) {
+        console.error("[portfolio] load failed:", err);
+        toast.error("Failed to load portfolio", {
+          description: err instanceof Error ? err.message : String(err),
+        });
       } finally {
         if (!cancelled) setLoadingAll(false);
       }
@@ -414,7 +423,17 @@ export default function PortfolioPage() {
                   <TokenBadge id={row.tokenId} />
                   <div>
                     <p className="text-sm font-semibold text-foreground">{token.label}</p>
-                    <p className="text-[10px] text-foreground/40">{token.decimals}-decimal EVM token</p>
+                    <p className="text-[10px] text-foreground/40">
+                      {(() => {
+                        const entry = TOKEN_REGISTRY[row.tokenId];
+                        switch (entry.variant) {
+                          case "native":     return `Native FLOW (Cadence) · ${token.decimals} decimals`;
+                          case "erc20":      return `ERC20 (EVM) · ${token.decimals} decimals`;
+                          case "cadence-ft": return `Cadence FT · ${token.decimals} decimals`;
+                          default:           return `${token.decimals} decimals`;
+                        }
+                      })()}
+                    </p>
                   </div>
                 </div>
                 {row.loading && <Loader2 className="w-4 h-4 animate-spin text-foreground/30" />}

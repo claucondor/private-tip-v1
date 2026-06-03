@@ -31,7 +31,9 @@ export const flowConfig: PrivateTipConfig = {
   appDetailTitle: "PrivateTip",
   appDetailDescription:
     "Confidential tipping on Flow — send and receive tips with hidden amounts",
-  appDetailUrl: "http://localhost:3000",
+  appDetailUrl: typeof window !== "undefined"
+    ? window.location.origin
+    : (process.env.NEXT_PUBLIC_APP_URL ?? "https://privatetip.condordev.xyz"),
   appDetailIcon: "https://lucide.dev/icons/gift",
 };
 
