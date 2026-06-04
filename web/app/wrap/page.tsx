@@ -184,7 +184,10 @@ function WrapPageInner() {
         setCoaHex(coa);
         setNeedsCoaSetup(false);
 
-        const c = await getCommitment(coa, selectedToken === "mockft" ? "mockft" : "flow");
+        // Cadence-ft tracks commitments by Cadence wallet address (16-char),
+        // not by COA EVM address (40-char) — JanusFT's CommitmentRegistry lives on the user's Cadence account.
+        const commitAddr = selectedToken === "mockft" ? userAddress : coa;
+        const c = await getCommitment(commitAddr, selectedToken === "mockft" ? "mockft" : "flow");
         if (cancelled) return;
         setChainCommit(c);
 
@@ -240,8 +243,10 @@ function WrapPageInner() {
       .then((bps) => setFeeBps(bps))
       .catch(() => {}); // non-fatal
 
-    // Fetch on-chain commitment for new token
-    getCommitment(coaHex, selectedToken)
+    // Fetch on-chain commitment for new token.
+    // Cadence-ft variant tracks commitments by Cadence wallet address.
+    const commitAddr = selectedToken === "mockft" ? userAddress : coaHex;
+    getCommitment(commitAddr, selectedToken)
       .then((c) => setChainCommit(c))
       .catch(() => {}); // non-fatal
 

@@ -108,7 +108,9 @@ function ClaimPageInner() {
         if (cancelled) return;
         setCoaHex(coa);
 
-        const c = await getCommitment(coa);
+        // Cadence-ft tracks commitments by Cadence wallet address; everything else by COA EVM.
+        const commitAddr = selectedToken === "mockft" ? userAddress : coa;
+        const c = await getCommitment(commitAddr, selectedToken);
         if (cancelled) return;
         setChainCommit(c);
 
@@ -198,7 +200,8 @@ function ClaimPageInner() {
       saveShieldedState(userAddress, newState, selectedToken);
       setShielded(newState);
 
-      const c = await getCommitment(coaHex);
+      const commitAddrPost = selectedToken === "mockft" ? userAddress : coaHex;
+      const c = await getCommitment(commitAddrPost, selectedToken);
       setChainCommit(c);
 
       setShowPreAnimation(false);
