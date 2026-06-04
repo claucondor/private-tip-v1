@@ -50,6 +50,20 @@ function RecoveryBanner() {
   //   - localStorage matches chain (or both empty) → no banner
   //   - localStorage empty + chain has state → blue "recover" banner
   //   - localStorage has state + chain mismatch → yellow "stale-local" banner
+  // Sweep stale shielded-state cache entries on every mount.
+  // Removes localStorage entries that were saved against a different
+  // (now-redeployed) contract proxy, preventing portfolio from showing
+  // ghost balances after a TOKEN_REGISTRY address change.
+  useEffect(() => {
+    (async () => {
+      const { sweepStaleShieldedCache } = await import("@/lib/store");
+      const removed = sweepStaleShieldedCache();
+      if (removed > 0) {
+        console.log(`[shielded-cache] swept ${removed} stale entries on mount`);
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     if (!userAddress) {
       setShow(false);
