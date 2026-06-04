@@ -85,14 +85,18 @@ function RecoveryBanner() {
         const commit = await getCommitment(coaHex);
         const chainIsIdentity = isIdentityPoint(commit);
 
-        // v0.6: check per-token keys (check FLOW token as primary indicator)
-        const localKey = `openjanus:shielded:${userAddress.toLowerCase()}:flow`;
-        const localRaw = localStorage.getItem(localKey);
-        // Also check legacy v0.5 key format for migration.
+        // v0.6.6: check the v2 cache (proxy-fingerprinted, multi-token).
+        // Reading raw localStorage with old keys misses the actually-saved entries
+        // and produces a false "no local state" banner while the portfolio is
+        // happily decrypting from the same store.
+        const { loadAllShieldedStates } = await import("@/lib/store");
+        const allLocal = loadAllShieldedStates(userAddress);
+        const hasAnyLocal = Object.keys(allLocal).length > 0;
+        // Also honor pre-v2 legacy key so users upgrading mid-session aren't nagged.
         const legacyKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
         const legacyRaw = localStorage.getItem(legacyKey);
 
-        if (localRaw || legacyRaw) {
+        if (hasAnyLocal || legacyRaw) {
           // Local state exists — skip desync check (computeCommitment from SDK is
           // available but pulling heavy crypto into the banner is not worth it).
           // In v0.6 we trust the snapshot events (SDK recovers on demand).
