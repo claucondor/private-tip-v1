@@ -148,7 +148,7 @@ const EVM_CHAIN_ID = 545;
 
 // mUSDC ERC20 address on Flow EVM testnet (canonical from janus-erc20-v0.4 deployment).
 // Faucet sends underlying mUSDC directly (not the shielded proxy).
-const MOCK_USDC_ADDR = "0x8405E8831737aE72204c271581b7d4fAD9f622bE";
+const MOCK_USDC_ADDR = "0x686E8d90A7B608540cAF46E527fD8a5631A1b658";
 
 const ERC20_TRANSFER_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
