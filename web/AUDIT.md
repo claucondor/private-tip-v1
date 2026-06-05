@@ -1,9 +1,63 @@
 # PrivateTip v0.7 Exhaustive Audit
-## Date: 2026-06-05
-## SDK: @claucondor/sdk@0.7.1 (aggregate-pedersen 2-gen)
-## Scope: all proof routes, lib helpers, UI pages
+## Date: 2026-06-05 (v0.7.1) → updated 2026-06-05 (v0.7.2 JanusFT migration)
+## SDK: @claucondor/sdk@0.7.2 (aggregate-pedersen 2-gen + JanusFT cadenceAddress migration)
+## Scope: all proof routes, lib helpers, UI pages; v0.7.2 JanusFT address change
 
 Format: `[CATEGORY] file:line — finding — action`
+
+---
+
+## v0.7.2 JanusFT migration audit (2026-06-05)
+
+**Scope:** SDK tarball upgrade v0.7.1 → v0.7.2, address change for MockFT JanusFT wrapper.
+
+### Address change summary
+
+| Constant | v0.7.1 | v0.7.2 | Role |
+|---|---|---|---|
+| `TOKEN_REGISTRY.mockft.cadenceAddress` | `0x7599043aea001283` | `0xc4e8f99915893a2f` | JanusFT wrapper (new aggregate) |
+| `TOKEN_REGISTRY.mockft.ftAddress` | `0x7599043aea001283` | `0x7599043aea001283` | Underlying MockFT FT (unchanged) |
+| `MEMO_REGISTRY_ADDRESS` | `0x05D104962ff087441f26BA11A1E1C3b9E091D663` | (same) | EVM MemoKeyRegistry |
+
+### Hardcoded address audit
+
+All occurrences of `0x7599043aea001283` in the PrivateTip front were audited. Result:
+- `app/api/faucet/route.ts` — **`ftAddress` (underlying MockFT FT contract, unchanged)**. Faucet sends raw MockFT tokens, not wrapped. Comment updated to clarify distinction from JanusFT wrapper.
+- `lib/ft-setup.ts` — **`ftAddress` (MockFT FT contract for vault setup)**. Comment updated.
+- `flow.json` — `testnet-claucondor` signer account identity. Unrelated to JanusFT contracts.
+- `fund-faucet.mjs` — MockFT deployer/faucet scripts. Underlying FT address. Unchanged correct.
+- `e2e/smoke.test.ts` — Test file constant `ALICE_FLOW_ADDR`. Not production code.
+
+**No app-level hardcoded JanusFT wrapper address found.** The SDK handles `cadenceAddress` internally via `TOKEN_REGISTRY`. The front routes through `sdk.token("mockft")` which picks up the new address automatically.
+
+### New functionality in v0.7.2 (SDK-side, no front changes required)
+
+- `JanusFTAdapter.publishMemoKey()` now writes to BOTH Cadence `/storage/openjanusMemoKey` AND EVM MemoKeyRegistry via COA cross-VM. The front uses `TX_SMART_SETUP` (which already sets up COA before publishing), so this is transparent.
+- `wrapViaCoa` for MockFT uses `wrapWithProof` with nonce + encryptedSnapshot + ephPubkey trio. The existing `wrapActionLegacy` cadence-ft path passes `prebuiltProof` with `nonce` field (already implemented in v0.7.1 audit sprint). No front changes required.
+- COA precondition: `TX_SMART_SETUP` (Step 2 of activation) creates COA at `/storage/evm` before calling MemoKey publish. Existing activation flow is correct for v0.7.2.
+
+### Files modified in v0.7.2 migration sprint
+
+| File | Change |
+|---|---|
+| `package.json` | `@claucondor/sdk`: `file:claucondor-sdk-0.7.1.tgz` → `file:claucondor-sdk-0.7.2.tgz` |
+| `claucondor-sdk-0.7.2.tgz` | Added to repo (Vercel build compat) |
+| `claucondor-sdk-0.7.1.tgz` | **Deleted** (superseded) |
+| `app/api/faucet/route.ts` | Comment updated: clarify `0x7599043` is ftAddress (underlying), not JanusFT wrapper |
+| `lib/ft-setup.ts` | JSDoc updated: clarify ftAddress vs cadenceAddress distinction |
+| `app/client-layout.tsx` | Footer version label `v0.7.1` → `v0.7.2` |
+| `AUDIT.md` | This section added |
+
+### New mainnet-blockers introduced: 0
+
+### Gates
+
+- `npm run build`: PASS (clean, 25 routes)
+- `npx tsc --noEmit`: PASS (zero errors)
+- Vercel deploy: `privatetip-izme0uxto-oydual3s-projects.vercel.app` READY
+- Smoke gates: /wrap 200, /portfolio 200, /send 200, /tips 200
+
+**ALIAS DECISION: ALIASED to privatetip.condordev.xyz**
 
 ---
 
