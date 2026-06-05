@@ -12,7 +12,8 @@
 // ─── FT config type ────────────────────────────────────────────────────────────
 
 export interface FTSetupConfig {
-  /** Cadence contract address, e.g. "0x7599043aea001283" */
+  /** Underlying FT contract address, e.g. "0x7599043aea001283" (MockFT deployer, unchanged in v0.7.2).
+   *  Note: the JanusFT wrapper (cadenceAddress) is distinct — see TOKEN_REGISTRY.mockft.cadenceAddress. */
   contractAddress: string;
   /** Contract name, e.g. "MockFT" */
   contractName: string;
