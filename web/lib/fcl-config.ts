@@ -1,15 +1,15 @@
-/// FCL Configuration for PrivateTip on Flow Testnet — v0.3.
+/// FCL Configuration for PrivateTip.
 ///
-/// IMPORTANT: PrivateTip is configured for TESTNET only. Mainnet deployment
-/// requires updating ALL contract addresses + accessNodeUrl + walletDiscovery
-/// before use.
+/// Contract aliases (0xJanusFlow, 0xPrivateTip, 0xEVM) are sourced from
+/// flow.json rather than hardcoded here. This ensures that a single edit
+/// to flow.json propagates to all Cadence scripts and transactions — the
+/// pattern mirrors how FlowProvider consumes flowJSON in client-layout.tsx.
 ///
-/// v0.3 canonical addresses (production set):
-///   JanusFlow EVM UUPS proxy:  0x2458ae2d26797c2ffa3B4f6612Bdc4aDf22b7156
-///   JanusFlow Cadence router:  0x5dcbeb41055ec57e
-///   PrivateTip Cadence router: 0xb9ac529c14a4c5a1
+/// To add mainnet support: add a "mainnet" alias entry for JanusFlow and
+/// PrivateTip in web/flow.json and update accessNodeUrl + discoveryWallet.
 
 import * as fcl from "@onflow/fcl";
+import flowJSON from "../flow.json";
 
 export interface PrivateTipConfig {
   accessNodeUrl: string;
@@ -52,6 +52,31 @@ export const flowConfig: PrivateTipConfig = {
 const WALLETCONNECT_PROJECT_ID =
   process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "";
 
+// ─── Resolve contract aliases from flow.json ────────────────────────────────
+//
+// flow.json is the single source of truth for per-network contract addresses.
+// FlowProvider receives flowJSON directly (client-layout.tsx) and FCL itself
+// resolves import aliases at runtime. We also feed the same values into the
+// FCL singleton here so that server-side proof routes (which call fcl.query /
+// fcl.mutate before client mount) see the same aliases.
+//
+// To support a new network: add alias entries in web/flow.json under the
+// relevant network key. No changes needed in this file.
+
+type FlowJsonContracts = typeof flowJSON.contracts;
+type ContractEntry = { aliases?: Record<string, string> };
+
+function resolveAlias(contractName: keyof FlowJsonContracts, network: string): string | undefined {
+  const entry = (flowJSON.contracts as Record<string, ContractEntry>)[contractName as string];
+  return entry?.aliases?.[network];
+}
+
+const network = flowConfig.flowNetwork; // "testnet" | future: "mainnet"
+
+const janusFlowAddr  = resolveAlias("JanusFlow",  network);
+const privateTipAddr = resolveAlias("PrivateTip",  network);
+const evmAddr        = resolveAlias("EVM",         network);
+
 const fclConfig = fcl
   .config()
   .put("accessNode.api", flowConfig.accessNodeUrl)
@@ -60,24 +85,26 @@ const fclConfig = fcl
   .put("app.detail.title", flowConfig.appDetailTitle)
   .put("app.detail.description", flowConfig.appDetailDescription)
   .put("app.detail.url", flowConfig.appDetailUrl)
-  .put("app.detail.icon", flowConfig.appDetailIcon)
-  // Contract aliases for `import "JanusFlow"` etc. in inline cadence
-  .put("0xJanusFlow", "0x5dcbeb41055ec57e")
-  .put("0xPrivateTip", "0xb9ac529c14a4c5a1")
-  // EVM core contract (needed for COA setup tx with `import "EVM"`)
-  .put("0xEVM", "0x8c5303eaa26202d6");
+  .put("app.detail.icon", flowConfig.appDetailIcon);
+
+// Contract aliases for `import "JanusFlow"` etc. in inline Cadence.
+// Guarded so that missing flow.json entries don't silently put "undefined"
+// into the FCL config (which would cause cryptic tx failures).
+if (janusFlowAddr)  fclConfig.put("0xJanusFlow",  `0x${janusFlowAddr}`);
+if (privateTipAddr) fclConfig.put("0xPrivateTip", `0x${privateTipAddr}`);
+if (evmAddr)        fclConfig.put("0xEVM",        `0x${evmAddr}`);
 
 if (WALLETCONNECT_PROJECT_ID) {
   fclConfig.put("walletconnect.projectId", WALLETCONNECT_PROJECT_ID);
 }
 
 /**
- * v0.3 canonical contract addresses.
+ * Current-network Cadence contract addresses, sourced from flow.json.
+ * Use TOKEN_REGISTRY.flow.proxy (from @claucondor/sdk) for the EVM proxy address.
  */
 export const ADDRESSES = {
-  JANUS_FLOW_EVM: "0x2458ae2d26797c2ffa3B4f6612Bdc4aDf22b7156",
-  JANUS_FLOW_CADENCE: "0x5dcbeb41055ec57e",
-  PRIVATE_TIP_CADENCE: "0xb9ac529c14a4c5a1",
+  JANUS_FLOW_CADENCE: janusFlowAddr ? `0x${janusFlowAddr}` : "0x5dcbeb41055ec57e",
+  PRIVATE_TIP_CADENCE: privateTipAddr ? `0x${privateTipAddr}` : "0xb9ac529c14a4c5a1",
 } as const;
 
 /** Helper to determine dev mode. */

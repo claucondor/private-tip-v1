@@ -8,6 +8,12 @@
 				"testnet": "8c5303eaa26202d6"
 			}
 		},
+		"JanusFlow": {
+			"source": "",
+			"aliases": {
+				"testnet": "5dcbeb41055ec57e"
+			}
+		},
 		"IPrivateTipImpl": {
 			"source": "./cadence/contracts/IPrivateTipImpl.cdc",
 			"aliases": {
