@@ -82,8 +82,14 @@ function RecoveryBanner() {
           if (!cancelled) setShow(false);
           return;
         }
-        const commit = await getCommitment(coaHex);
-        const chainIsIdentity = isIdentityPoint(commit);
+        // Check all 3 tokens — show banner if ANY has a non-identity on-chain commitment.
+        // For mockft, getCommitment expects the Cadence address (not COA EVM address).
+        const tokenChecks = await Promise.all([
+          getCommitment(coaHex, "flow").catch(() => ({ x: 0n, y: 1n })),
+          getCommitment(coaHex, "mockusdc").catch(() => ({ x: 0n, y: 1n })),
+          getCommitment(userAddress, "mockft").catch(() => ({ x: 0n, y: 1n })),
+        ]);
+        const chainIsIdentity = tokenChecks.every(c => isIdentityPoint(c));
 
         // v0.6.6: check the v2 cache (proxy-fingerprinted, multi-token).
         // Reading raw localStorage with old keys misses the actually-saved entries

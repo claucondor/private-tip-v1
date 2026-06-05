@@ -55,26 +55,11 @@ export type EVMSigner = ethers.Wallet;
 export const EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 export const EVM_CHAIN_ID = 545;
 
-// ─── Per-user per-token nonce tracking ──────────────────────────────────────────
-// Anti-replay nonce for AmountDisclose proofs (wrapWithProof contract storage).
-// Key: openjanus:wrap-nonce:<addr>:<tokenId>
-// Start at 1, increment after each successful wrap.
-
-function wrapNonceKey(addr: string, tokenId: TokenId): string {
-  return `openjanus:wrap-nonce:${addr.toLowerCase()}:${tokenId}`;
-}
-
-export function getWrapNonce(addr: string, tokenId: TokenId): bigint {
-  if (typeof window === "undefined") return 1n;
-  const raw = localStorage.getItem(wrapNonceKey(addr, tokenId));
-  return raw ? BigInt(raw) : 1n;
-}
-
-export function incrementWrapNonce(addr: string, tokenId: TokenId): void {
-  if (typeof window === "undefined") return;
-  const current = getWrapNonce(addr, tokenId);
-  localStorage.setItem(wrapNonceKey(addr, tokenId), (current + 1n).toString());
-}
+// ─── Nonce strategy (v0.7.4+) ────────────────────────────────────────────────
+// Anti-replay nonce for AmountDisclose proofs is now a random 256-bit value
+// generated server-side by /api/proof/wrap on every request.
+// No localStorage tracking needed — works across devices without coordination.
+// The generated nonce is returned in the proof response and used as-is.
 
 // Legacy PrivateTip Cadence address (still used for tip recording scripts).
 export const PRIVATE_TIP_CADENCE = "0xb9ac529c14a4c5a1";
@@ -1118,17 +1103,14 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
     // Generate blinding client-side (crypto.getRandomValues, browser-safe).
     const blinding = generateBlinding();
 
-    // Read per-user per-token nonce (anti-replay for wrapWithProof).
-    const nonce = getWrapNonce(coaEvmAddr, tokenId);
-
     // Build proof server-side (wasm/zkey file I/O requires Node.js).
+    // Nonce is generated randomly server-side (v0.7.4) — no nonce sent from client.
     const proofResponse = await fetch("/api/proof/wrap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         amount: netAmount.toString(),
         blinding: blinding.toString(),
-        nonce: nonce.toString(),
       }),
     });
     if (!proofResponse.ok) {
@@ -1136,6 +1118,9 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
       throw new Error(`wrapActionLegacy: proof generation failed: ${errBody.error}`);
     }
     const proofData = await proofResponse.json();
+
+    // Use nonce returned by server (random 256-bit, bound into the proof).
+    const nonce = BigInt(proofData.nonce);
 
     // Type assertion: both JanusFlowAdapter and JanusERC20Adapter have wrapViaCoa.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1150,8 +1135,6 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
         publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint],
       },
     });
-    // Increment nonce after successful wrap.
-    incrementWrapNonce(coaEvmAddr, tokenId);
     return {
       txId: result.txHash,
       blinding: 0n,  // caller should re-scan to get fresh blinding
@@ -1178,15 +1161,14 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
     const netAmount = amountWei - fee;
 
     const blinding = generateBlinding();
-    const nonce = getWrapNonce(coaEvmAddr, tokenId);
 
+    // Nonce is generated randomly server-side (v0.7.4) — no nonce sent from client.
     const proofResponse = await fetch("/api/proof/wrap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         amount: netAmount.toString(),
         blinding: blinding.toString(),
-        nonce: nonce.toString(),
       }),
     });
     if (!proofResponse.ok) {
@@ -1194,6 +1176,9 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
       throw new Error(`wrapActionLegacy (cadence-ft): proof generation failed: ${errBody.error}`);
     }
     const proofData = await proofResponse.json();
+
+    // Use nonce returned by server (random 256-bit, bound into the proof).
+    const nonce = BigInt(proofData.nonce);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await (adapter as any).wrapViaCoa({
@@ -1208,7 +1193,6 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
         publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint],
       },
     });
-    incrementWrapNonce(coaEvmAddr, tokenId);
     return {
       txId: result.txHash,
       blinding: 0n,

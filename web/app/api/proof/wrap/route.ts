@@ -1,24 +1,24 @@
 /// POST /api/proof/wrap — build AmountDisclose Groth16 proof server-side.
 ///
 /// Required because buildAmountDiscloseProof uses snarkjs with wasm/zkey
-/// file I/O (Node.js only). The browser generates blinding + nonce, POSTs
-/// here, and receives the proof + commitment to pass into adapter.wrapViaCoa.
+/// file I/O (Node.js only). The browser generates blinding, POSTs here,
+/// and receives the proof + commitment + nonce to pass into adapter.wrapViaCoa.
 ///
-/// v0.7: AmountDisclose circuit (aggregate, 2-gen Pedersen) takes 4 public
-/// inputs: [amount, commitX, commitY, nonce]. The nonce is a per-user
-/// per-token counter stored in localStorage (anti-replay via contract
-/// usedNonces mapping).
+/// v0.7.4: Nonce is now a random 256-bit value generated server-side if not
+/// explicitly provided. This eliminates the localStorage counter strategy
+/// which caused "nonce already used" reverts when localStorage was cleared.
 ///
-/// Body: { amount: string, blinding: string, nonce: string }  (decimal strings, NET amount)
+/// Body: { amount: string, blinding: string, nonce?: string }  (decimal strings, NET amount)
 /// Response: {
 ///   proof: string[8],                          // uint256[8] as decimal strings
 ///   txCommit: [string, string],                // [Cx, Cy] decimal strings
 ///   publicInputs: [string, string, string, string], // [amount, Cx, Cy, nonce]
-///   nonce: string,                             // echo back for client
+///   nonce: string,                             // generated (or echo of provided) nonce
 /// }
 
 import { NextRequest, NextResponse } from "next/server";
 import { buildAmountDiscloseProof } from "@claucondor/sdk/crypto";
+import { randomBytes } from "@noble/hashes/utils";
 import path from "path";
 
 export const runtime = "nodejs";
@@ -46,8 +46,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // nonce defaults to 1n if not supplied (first wrap for this user+token).
-    const nonceBig = nonce !== undefined ? BigInt(nonce) : 1n;
+    // nonce: use explicit value if provided (tests/replay), else random 256-bit.
+    const nonceBig = nonce !== undefined
+      ? BigInt(nonce)
+      : (() => {
+          const bytes = randomBytes(32);
+          let n = 0n;
+          for (const b of bytes) n = (n << 8n) | BigInt(b);
+          return n;
+        })();
 
     const result = await buildAmountDiscloseProof(
       { amount: BigInt(amount), blinding: BigInt(blinding), nonce: nonceBig },
