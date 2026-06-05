@@ -139,17 +139,19 @@ export function cacheDecryptedMemo(
 // When a recipient successfully decrypts a tip's ShieldedNote they get
 // `(amount, blinding)` — the values they need to keep their local shielded
 // state consistent with the on-chain Pedersen commitment. We accumulate them
-// here in sessionStorage (same key shape as /send and /wrap), tracking which
+// here in localStorage (same key shape as /send and /wrap), tracking which
 // tipIDs have already been ingested so multiple renders don't double-count.
+//
+// Key format: the store module writes keys in v2 format:
+//   openjanus:shielded:v2:<addr>:<tokenId>:<proxyFingerprint>
+// sweepStaleShieldedCache() deletes any openjanus:shielded: key that does NOT
+// match v2 format. ingestTipIfNew delegates to the store helpers so the key
+// written here always survives the sweep.
 
 const INGESTED_PREFIX = "openjanus:tip-ingested:";
-const SHIELDED_PREFIX = "openjanus:shielded:";
 
 function ingestedKey(addr: string): string {
   return `${INGESTED_PREFIX}${addr.toLowerCase()}`;
-}
-function shieldedKey(addr: string): string {
-  return `${SHIELDED_PREFIX}${addr.toLowerCase()}`;
 }
 
 function loadIngestedSet(addr: string): Set<string> {
@@ -166,47 +168,102 @@ function saveIngestedSet(addr: string, set: Set<string>): void {
   localStorage.setItem(ingestedKey(addr), JSON.stringify([...set]));
 }
 
-interface ShieldedState {
-  balanceWei: string;
-  blinding: string;
-}
-function loadShieldedState(addr: string): ShieldedState | null {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(shieldedKey(addr));
-  return raw ? (JSON.parse(raw) as ShieldedState) : null;
-}
-function saveShieldedState(addr: string, state: ShieldedState): void {
+/**
+ * Migrate a v1 shielded key (openjanus:shielded:<addr>) to v2 format if it
+ * exists. Called on first read so users upgrading from a session where tips
+ * were ingested with the old key shape don't lose their state. The v1 key is
+ * deleted after a successful migration.
+ *
+ * Tips are always for FLOW (the only token supported by PrivateTip), so we
+ * migrate under tokenId="flow".
+ */
+function migrateV1ShieldedKeyIfPresent(addr: string): void {
   if (typeof window === "undefined") return;
-  localStorage.setItem(shieldedKey(addr), JSON.stringify(state));
+  const v1Key = `openjanus:shielded:${addr.toLowerCase()}`;
+  const raw = localStorage.getItem(v1Key);
+  if (!raw) return;
+  try {
+    // Lazy import avoided by re-implementing the save directly via the store.
+    // We call saveShieldedState from store.ts via a dynamic require-style
+    // pattern isn't available here (ESM, no require), so we inline the logic
+    // using the same key construction used in store.ts.
+    const parsed = JSON.parse(raw) as { balanceWei?: string; balanceRaw?: string; blinding?: string };
+    const balanceRaw = parsed.balanceRaw ?? parsed.balanceWei ?? "0";
+    const blinding = parsed.blinding ?? "0";
+    // Reconstruct the v2 key.  We need proxyFingerprint for "flow".
+    // Inline TOKEN_REGISTRY lookup to avoid a circular import with store.ts.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { TOKEN_REGISTRY } = require("@claucondor/sdk/network") as {
+      TOKEN_REGISTRY: Record<string, { proxy?: string; cadenceAddress?: string; variant?: string }>;
+    };
+    const flowEntry = TOKEN_REGISTRY["flow"];
+    if (!flowEntry) return; // Safety guard.
+    const fingerprint =
+      flowEntry.variant === "cadence-ft"
+        ? (flowEntry.cadenceAddress ?? "unknown").toLowerCase()
+        : (flowEntry.proxy ?? "unknown").toLowerCase();
+    const v2Key = `openjanus:shielded:v2:${addr.toLowerCase()}:flow:${fingerprint}`;
+    // Only write if v2 key doesn't already exist (avoid clobbering a newer value).
+    if (!localStorage.getItem(v2Key)) {
+      localStorage.setItem(
+        v2Key,
+        JSON.stringify({ balanceRaw, blinding, lastUpdatedMs: Date.now() })
+      );
+    }
+    localStorage.removeItem(v1Key);
+  } catch {
+    // Non-fatal: migration failed, leave v1 key untouched so the user still
+    // sees their balance via the legacy-key check in client-layout.tsx.
+  }
 }
 
 /**
  * If this tipID hasn't been ingested yet, add (amount, blinding) into the
- * recipient's local shielded state and remember the tipID. Returns whether
- * ingestion happened (true) or was skipped as duplicate (false).
+ * recipient's local shielded state and remember the tipID. Writes to the v2
+ * key format (via store.ts saveShieldedState) so the entry survives the
+ * sweepStaleShieldedCache() call on every app mount.
+ *
+ * tokenId defaults to "flow" — PrivateTip currently only supports FLOW tips.
+ * Pass a different tokenId if tip support is extended to other tokens.
+ *
+ * Returns whether ingestion happened (true) or was skipped as duplicate (false).
  */
 export function ingestTipIfNew(opts: {
   recipient: string;
   tipID: number | string;
   amount: bigint;
   blinding: bigint;
+  tokenId?: string;
 }): boolean {
-  const key = String(opts.tipID);
-  const ingested = loadIngestedSet(opts.recipient);
-  if (ingested.has(key)) return false;
+  const tipKey = String(opts.tipID);
+  const tokenId = (opts.tokenId ?? "flow") as import("./tokens").TokenId;
 
-  const current = loadShieldedState(opts.recipient) ?? {
-    balanceWei: "0",
+  // Migrate any v1 key before checking state.
+  migrateV1ShieldedKeyIfPresent(opts.recipient);
+
+  const ingested = loadIngestedSet(opts.recipient);
+  if (ingested.has(tipKey)) return false;
+
+  // Delegate to the store helpers so we always write the v2 key format.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { loadShieldedState, saveShieldedState } = require("./store") as {
+    loadShieldedState: (addr: string, tokenId: import("./tokens").TokenId) => { balanceRaw: string; blinding: string; lastUpdatedMs?: number } | null;
+    saveShieldedState: (addr: string, tokenId: import("./tokens").TokenId, state: { balanceRaw: string; blinding: string; lastUpdatedMs?: number }) => void;
+  };
+
+  const current = loadShieldedState(opts.recipient, tokenId) ?? {
+    balanceRaw: "0",
     blinding: "0",
   };
-  const newBalance = BigInt(current.balanceWei) + opts.amount;
+  const newBalance = BigInt(current.balanceRaw) + opts.amount;
   const newBlinding = BigInt(current.blinding) + opts.blinding;
-  saveShieldedState(opts.recipient, {
-    balanceWei: newBalance.toString(),
+  saveShieldedState(opts.recipient, tokenId, {
+    balanceRaw: newBalance.toString(),
     blinding: newBlinding.toString(),
+    lastUpdatedMs: Date.now(),
   });
 
-  ingested.add(key);
+  ingested.add(tipKey);
   saveIngestedSet(opts.recipient, ingested);
   return true;
 }
