@@ -129,6 +129,81 @@ transaction {
 `.trim();
 }
 
+// ─── JanusFT registry helpers ─────────────────────────────────────────────────
+
+/**
+ * Check whether `addr` has the JanusFT.CommitmentRegistry installed with the
+ * CURRENT JanusFT contract address (0xc4e8f99915893a2f). Returns:
+ *   "none"    — no resource at the path (fresh account, needs install)
+ *   "current" — correct type present (no action needed)
+ *   "stale"   — resource at path but wrong contract address (v0.6 residue, needs replace)
+ */
+export async function checkJanusFTRegistryState(
+  addr: string
+): Promise<"none" | "current" | "stale"> {
+  const fcl = await import("@onflow/fcl");
+  // Use getAuthAccount in a script to inspect storage type
+  const script = `
+import JanusFT from 0xc4e8f99915893a2f
+
+access(all) fun main(addr: Address): String {
+  let acct = getAuthAccount<auth(Storage) &Account>(addr)
+  let t = acct.storage.type(at: JanusFT.CommitmentRegistryStoragePath)
+  if t == nil { return "none" }
+  if t == Type<@JanusFT.CommitmentRegistry>() { return "current" }
+  return "stale"
+}
+`.trim();
+  const result: string = await fcl.query({
+    cadence: script,
+    args: (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
+      arg(addr, t.Address),
+    ],
+  });
+  return result as "none" | "current" | "stale";
+}
+
+/**
+ * Build the Cadence transaction that installs (or replaces) the user's
+ * JanusFT.CommitmentRegistry. Idempotent — safe to re-run.
+ * Returns raw Cadence string for use with fcl.mutate.
+ */
+export function buildInstallJanusFTRegistryTx(): string {
+  return `
+import JanusFT from 0xc4e8f99915893a2f
+import MockFT from 0x7599043aea001283
+import FungibleToken from 0x9a0766d93b6608b7
+
+transaction {
+  prepare(signer: auth(BorrowValue, SaveValue, LoadValue, IssueStorageCapabilityController, PublishCapability, UnpublishCapability) &Account) {
+    let storagePath = JanusFT.CommitmentRegistryStoragePath
+    let publicPath  = JanusFT.CommitmentRegistryPublicPath
+
+    let storedType = signer.storage.type(at: storagePath)
+
+    if storedType == nil {
+      let emptyVault <- MockFT.createEmptyVault(vaultType: Type<@MockFT.Vault>())
+      let registry   <- JanusFT.createRegistry(vault: <- emptyVault)
+      signer.storage.save(<- registry, to: storagePath)
+    } else if storedType == Type<@JanusFT.CommitmentRegistry>() {
+      // Already installed with current contract — no-op on storage
+    } else {
+      let stale <- signer.storage.load<@AnyResource>(from: storagePath)
+        ?? panic("user_install_janus_ft_registry: expected stale resource but load returned nil")
+      destroy stale
+      let emptyVault <- MockFT.createEmptyVault(vaultType: Type<@MockFT.Vault>())
+      let registry   <- JanusFT.createRegistry(vault: <- emptyVault)
+      signer.storage.save(<- registry, to: storagePath)
+    }
+
+    signer.capabilities.unpublish(publicPath)
+    let cap = signer.capabilities.storage.issue<&{JanusFT.CommitmentRegistryPublic}>(storagePath)
+    signer.capabilities.publish(cap, at: publicPath)
+  }
+}
+`.trim();
+}
+
 // ─── Sign + submit the setup tx ────────────────────────────────────────────────
 
 export interface SetupTxResult {
@@ -142,6 +217,26 @@ export interface SetupTxResult {
 export async function signSetupTx(cfg: FTSetupConfig): Promise<SetupTxResult> {
   const fcl = await import("@onflow/fcl");
   const cadence = setupVaultTx(cfg);
+  const txId = await fcl.mutate({
+    cadence,
+    args: () => [],
+    proposer: fcl.authz,
+    payer: fcl.authz,
+    authorizations: [fcl.authz],
+    limit: 9999,
+  });
+  await fcl.tx(txId).onceSealed();
+  return { txId };
+}
+
+/**
+ * Asks the connected Flow Wallet to sign the JanusFT registry install/replace
+ * transaction. Idempotent — safe to call even if registry is already current.
+ * Awaits sealing before resolving.
+ */
+export async function signInstallJanusFTRegistryTx(): Promise<SetupTxResult> {
+  const fcl = await import("@onflow/fcl");
+  const cadence = buildInstallJanusFTRegistryTx();
   const txId = await fcl.mutate({
     cadence,
     args: () => [],
