@@ -1,8 +1,8 @@
 /**
- * PrivateTip v0.6 E2E Smoke Test — multi-token SDK 0.6.5
+ * PrivateTip v0.7 E2E Smoke Test — multi-token SDK 0.7.1
  *
  * Tests the full wrap → shieldedTransfer → decrypt → unwrap cycle
- * across all 4 tokens (flow, wflow, mockusdc, mockft).
+ * across all supported tokens (flow, mockusdc, mockft).
  *
  * Requirements:
  *   ALICE_EVM_PKEY — Alice's EVM private key (has COA + MemoKey published)
@@ -81,7 +81,8 @@ async function runSmokeTest(): Promise<void> {
   const canRunTx = await checkPreConditions();
 
   const results: TokenTestResult[] = [];
-  const tokenIds = ["flow", "wflow", "mockusdc", "mockft"] as const;
+  // wflow removed from TOKEN_REGISTRY in v0.7.
+  const tokenIds = ["flow", "mockusdc", "mockft"] as const;
 
   for (const tokenId of tokenIds) {
     console.log(`\n--- Token: ${tokenId} ---`);

@@ -1,4 +1,4 @@
-/// POST /api/proof/commit — compute a Pedersen commitment without ZK proof.
+/// POST /api/proof/commit — compute a 2-gen Pedersen commitment without ZK proof.
 ///
 /// Used by the recovery flow to validate that a reconstructed (balance, blinding)
 /// matches the on-chain commitment WITHOUT paying the cost of a full Groth16 proof.
@@ -6,27 +6,14 @@
 /// Body: { amount: string, blinding: string }  (decimal wei strings)
 /// Response: { x: string, y: string }           (BabyJubJub point, decimal strings)
 ///
-/// Uses buildAmountDiscloseProof from @claucondor/sdk/crypto (which internally
-/// uses computeCommitmentV05) and returns only the commitment field.
+/// Uses computeCommitment from @claucondor/sdk/crypto (2-gen Pedersen).
 /// A mismatch between this result and the on-chain commitment means the
 /// reconstructed state cannot open the on-chain commitment and unwrap WILL revert.
 
 import { NextRequest, NextResponse } from "next/server";
-import { buildAmountDiscloseProof } from "@claucondor/sdk/crypto";
-import path from "path";
+import { computeCommitment } from "@claucondor/sdk/crypto";
 
 export const runtime = "nodejs";
-
-const SDK_ROOT = path.resolve(
-  process.cwd(),
-  "node_modules",
-  "@claucondor",
-  "sdk",
-  "circuits",
-  "v0.5.1"
-);
-const AMOUNT_WASM = path.join(SDK_ROOT, "amount_disclose.wasm");
-const AMOUNT_ZKEY = path.join(SDK_ROOT, "amount_disclose_final.zkey");
 
 export async function POST(req: NextRequest) {
   try {
@@ -43,16 +30,14 @@ export async function POST(req: NextRequest) {
     const amountBig = BigInt(amount);
     const blindingBig = BigInt(blinding);
 
-    // buildAmountDiscloseProof uses computeCommitmentV05 internally.
-    // We provide the caller's blinding so the commitment matches what's on-chain.
-    const result = await buildAmountDiscloseProof(
-      { amount: amountBig, blinding: blindingBig },
-      { wasmPath: AMOUNT_WASM, zkeyPath: AMOUNT_ZKEY }
-    );
+    // computeCommitment is the SDK's canonical 2-gen Pedersen helper.
+    // No ZK proof needed — we just want the commitment point (C = [amount]·G + [blinding]·H)
+    // to validate that the local state matches the on-chain commitment.
+    const commitment = await computeCommitment(amountBig, blindingBig);
 
     return NextResponse.json({
-      x: result.commitment.x.toString(),
-      y: result.commitment.y.toString(),
+      x: commitment.x.toString(),
+      y: commitment.y.toString(),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

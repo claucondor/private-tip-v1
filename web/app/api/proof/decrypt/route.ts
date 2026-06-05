@@ -1,4 +1,4 @@
-/// API route for v0.3 confidential-transfer (shielded transfer) proof generation.
+/// API route for confidential-transfer (shielded transfer) proof generation.
 ///
 /// Server-side endpoint because @claucondor/sdk/crypto uses Node.js APIs (fs, path)
 /// for reading circuit artifacts (.wasm, .zkey) and generating Groth16 proofs via snarkjs.
@@ -7,14 +7,13 @@
 /// Proves that the caller's stored Pedersen commitment can be split into
 /// (transfer_commit, new_residual_commit).
 ///
-/// POST /api/proof/shielded-transfer  (legacy alias: /api/proof/decrypt — kept
-///                                     for the existing route layout)
+/// POST /api/proof/decrypt  (legacy alias — canonical name is /api/proof/shielded-transfer)
 /// Body: {
 ///   oldBalance:       string,  // current cleartext balance (wei)
-///   oldBlinding:      string,  // 128-bit blinding for the current commit
+///   oldBlinding:      string,  // blinding for the current commit
 ///   transferAmount:   string,  // amount to transfer (wei)
-///   transferBlinding?: string, // fresh 128-bit blinding for tx commit (optional)
-///   newBlinding?:     string,  // fresh 128-bit blinding for residual commit (optional)
+///   transferBlinding?: string, // fresh blinding for tx commit (optional)
+///   newBlinding?:     string,  // fresh blinding for residual commit (optional)
 /// }
 /// Returns: {
 ///   commitments: { oldCommit, transferCommit, newCommit },  // each { x, y }
@@ -32,18 +31,18 @@ import {
 } from "@claucondor/sdk/crypto";
 import path from "path";
 
-// v0.5.1 circuits (pot18 ceremony, 128-bit range, Pedersen(256)). Must match
-// the SDK's computeCommitmentV05 output — v0.3 wasm would fail the witness.
+// v0.7.1 SDK ships aggregate circuit artifacts under circuits/aggregate/.
+// 2-gen Pedersen ConfidentialTransfer circuit — same 6 public signals as v0.3.
 const SDK_ROOT = path.resolve(
   process.cwd(),
   "node_modules",
   "@claucondor",
   "sdk",
   "circuits",
-  "v0.5.1"
+  "aggregate"
 );
-const TRANSFER_WASM = path.join(SDK_ROOT, "confidential_transfer.wasm");
-const TRANSFER_ZKEY = path.join(SDK_ROOT, "confidential_transfer_final.zkey");
+const TRANSFER_WASM = path.join(SDK_ROOT, "confidential_transfer_aggregate.wasm");
+const TRANSFER_ZKEY = path.join(SDK_ROOT, "confidential_transfer_aggregate_test.zkey");
 
 export async function POST(request: NextRequest) {
   try {

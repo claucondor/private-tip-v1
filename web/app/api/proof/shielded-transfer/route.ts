@@ -28,10 +28,10 @@ const SDK_ROOT = path.resolve(
   "@claucondor",
   "sdk",
   "circuits",
-  "v0.3"
+  "aggregate"
 );
-const CT_WASM = path.join(SDK_ROOT, "confidential_transfer.wasm");
-const CT_ZKEY = path.join(SDK_ROOT, "confidential_transfer_final.zkey");
+const CT_WASM = path.join(SDK_ROOT, "confidential_transfer_aggregate.wasm");
+const CT_ZKEY = path.join(SDK_ROOT, "confidential_transfer_aggregate_test.zkey");
 
 export async function POST(req: NextRequest) {
   try {
