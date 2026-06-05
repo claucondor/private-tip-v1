@@ -10,6 +10,10 @@
 /// On-chain timestamps come from Cadence block time (Unix seconds), which
 /// lands within a few seconds of the user's local clock.
 
+import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
+import { loadShieldedState, saveShieldedState } from "./store";
+import type { TokenId } from "./tokens";
+
 const MIRROR_KEY_PREFIX = "openjanus:memo-mirror:";
 const MATCH_WINDOW_SEC = 120;
 
@@ -183,20 +187,12 @@ function migrateV1ShieldedKeyIfPresent(addr: string): void {
   const raw = localStorage.getItem(v1Key);
   if (!raw) return;
   try {
-    // Lazy import avoided by re-implementing the save directly via the store.
-    // We call saveShieldedState from store.ts via a dynamic require-style
-    // pattern isn't available here (ESM, no require), so we inline the logic
-    // using the same key construction used in store.ts.
     const parsed = JSON.parse(raw) as { balanceWei?: string; balanceRaw?: string; blinding?: string };
     const balanceRaw = parsed.balanceRaw ?? parsed.balanceWei ?? "0";
     const blinding = parsed.blinding ?? "0";
-    // Reconstruct the v2 key.  We need proxyFingerprint for "flow".
-    // Inline TOKEN_REGISTRY lookup to avoid a circular import with store.ts.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { TOKEN_REGISTRY } = require("@claucondor/sdk/network") as {
-      TOKEN_REGISTRY: Record<string, { proxy?: string; cadenceAddress?: string; variant?: string }>;
-    };
-    const flowEntry = TOKEN_REGISTRY["flow"];
+    // Reconstruct the v2 key. We need proxyFingerprint for "flow".
+    // TOKEN_REGISTRY is imported at top of file (static ESM import).
+    const flowEntry = TOKEN_REGISTRY["flow"] as { proxy?: string; cadenceAddress?: string; variant?: string } | undefined;
     if (!flowEntry) return; // Safety guard.
     const fingerprint =
       flowEntry.variant === "cadence-ft"
@@ -233,10 +229,10 @@ export function ingestTipIfNew(opts: {
   tipID: number | string;
   amount: bigint;
   blinding: bigint;
-  tokenId?: string;
+  tokenId?: TokenId;
 }): boolean {
   const tipKey = String(opts.tipID);
-  const tokenId = (opts.tokenId ?? "flow") as import("./tokens").TokenId;
+  const tokenId: TokenId = opts.tokenId ?? "flow";
 
   // Migrate any v1 key before checking state.
   migrateV1ShieldedKeyIfPresent(opts.recipient);
@@ -244,13 +240,9 @@ export function ingestTipIfNew(opts: {
   const ingested = loadIngestedSet(opts.recipient);
   if (ingested.has(tipKey)) return false;
 
-  // Delegate to the store helpers so we always write the v2 key format.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { loadShieldedState, saveShieldedState } = require("./store") as {
-    loadShieldedState: (addr: string, tokenId: import("./tokens").TokenId) => { balanceRaw: string; blinding: string; lastUpdatedMs?: number } | null;
-    saveShieldedState: (addr: string, tokenId: import("./tokens").TokenId, state: { balanceRaw: string; blinding: string; lastUpdatedMs?: number }) => void;
-  };
-
+  // Delegate to the store helpers (loadShieldedState / saveShieldedState are
+  // imported at the top of this file via static ESM import). This ensures the
+  // written key is always in v2 format and survives sweepStaleShieldedCache().
   const current = loadShieldedState(opts.recipient, tokenId) ?? {
     balanceRaw: "0",
     blinding: "0",
