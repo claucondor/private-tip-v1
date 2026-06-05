@@ -55,13 +55,34 @@ export type EVMSigner = ethers.Wallet;
 export const EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 export const EVM_CHAIN_ID = 545;
 
+// ─── Per-user per-token nonce tracking ──────────────────────────────────────────
+// Anti-replay nonce for AmountDisclose proofs (wrapWithProof contract storage).
+// Key: openjanus:wrap-nonce:<addr>:<tokenId>
+// Start at 1, increment after each successful wrap.
+
+function wrapNonceKey(addr: string, tokenId: TokenId): string {
+  return `openjanus:wrap-nonce:${addr.toLowerCase()}:${tokenId}`;
+}
+
+export function getWrapNonce(addr: string, tokenId: TokenId): bigint {
+  if (typeof window === "undefined") return 1n;
+  const raw = localStorage.getItem(wrapNonceKey(addr, tokenId));
+  return raw ? BigInt(raw) : 1n;
+}
+
+export function incrementWrapNonce(addr: string, tokenId: TokenId): void {
+  if (typeof window === "undefined") return;
+  const current = getWrapNonce(addr, tokenId);
+  localStorage.setItem(wrapNonceKey(addr, tokenId), (current + 1n).toString());
+}
+
 // Legacy PrivateTip Cadence address (still used for tip recording scripts).
 export const PRIVATE_TIP_CADENCE = "0xb9ac529c14a4c5a1";
 
 // Per-token proxy addresses from SDK registry (canonical, no hardcoding).
+// Note: wflow was removed in v0.7 TOKEN_REGISTRY (not supported in this deploy).
 export const TOKEN_PROXIES = {
   flow:     TOKEN_REGISTRY.flow.proxy,
-  wflow:    TOKEN_REGISTRY.wflow.proxy,
   mockusdc: TOKEN_REGISTRY.mockusdc.proxy,
   mockft:   TOKEN_REGISTRY.mockft.cadenceAddress,
 } as const;
@@ -395,7 +416,7 @@ export async function wrapAction(params: WrapActionParams): Promise<WrapActionRe
 
   // For ERC20 tokens, pre-approve the underlying before wrapping.
   if (entry.variant === "erc20" && evmSigner) {
-    const erc20Entry = entry as typeof TOKEN_REGISTRY["wflow"];
+    const erc20Entry = entry as typeof TOKEN_REGISTRY["mockusdc"];
     const erc20 = new ethers.Contract(
       erc20Entry.underlying,
       ["function approve(address spender, uint256 amount) returns (bool)"],
@@ -651,10 +672,12 @@ export async function unwrapAction(params: UnwrapActionParams): Promise<UnwrapAc
       prebuiltProofs: {
         amountProof: proofData.amountProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
         txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
-        amountPublicInputs: proofData.amountPublicInputs.map(BigInt) as [bigint,bigint,bigint],
+        amountPublicInputs: proofData.amountPublicInputs.map(BigInt) as [bigint,bigint,bigint,bigint],
         transferProof: proofData.transferProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
         transferPublicInputs: proofData.transferPublicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
         newBlinding,
+        // v0.7: SDK defaults nonce=0n for unwrap (anti-replay, Phase B.5 fix).
+        nonce: 0n,
       },
     });
     return { txHash: result.txHash, netToRecipient: result.netToRecipient };
@@ -704,10 +727,11 @@ export async function unwrapAction(params: UnwrapActionParams): Promise<UnwrapAc
       prebuiltProofs: {
         amountProof: proofData.amountProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
         txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
-        amountPublicInputs: proofData.amountPublicInputs.map(BigInt) as [bigint,bigint,bigint],
+        amountPublicInputs: proofData.amountPublicInputs.map(BigInt) as [bigint,bigint,bigint,bigint],
         transferProof: proofData.transferProof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
         transferPublicInputs: proofData.transferPublicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
         newBlinding,
+        nonce: 0n,
       },
     });
     return { txHash: result.txHash, netToRecipient: result.netToRecipient };
@@ -1094,6 +1118,9 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
     // Generate blinding client-side (crypto.getRandomValues, browser-safe).
     const blinding = generateBlinding();
 
+    // Read per-user per-token nonce (anti-replay for wrapWithProof).
+    const nonce = getWrapNonce(coaEvmAddr, tokenId);
+
     // Build proof server-side (wasm/zkey file I/O requires Node.js).
     const proofResponse = await fetch("/api/proof/wrap", {
       method: "POST",
@@ -1101,6 +1128,7 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
       body: JSON.stringify({
         amount: netAmount.toString(),
         blinding: blinding.toString(),
+        nonce: nonce.toString(),
       }),
     });
     if (!proofResponse.ok) {
@@ -1118,9 +1146,12 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
         proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
         txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
         blinding,
-        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint],
+        nonce,
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint],
       },
     });
+    // Increment nonce after successful wrap.
+    incrementWrapNonce(coaEvmAddr, tokenId);
     return {
       txId: result.txHash,
       blinding: 0n,  // caller should re-scan to get fresh blinding
@@ -1147,6 +1178,7 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
     const netAmount = amountWei - fee;
 
     const blinding = generateBlinding();
+    const nonce = getWrapNonce(coaEvmAddr, tokenId);
 
     const proofResponse = await fetch("/api/proof/wrap", {
       method: "POST",
@@ -1154,6 +1186,7 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
       body: JSON.stringify({
         amount: netAmount.toString(),
         blinding: blinding.toString(),
+        nonce: nonce.toString(),
       }),
     });
     if (!proofResponse.ok) {
@@ -1171,9 +1204,11 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
         proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
         txCommit: [BigInt(proofData.txCommit[0]), BigInt(proofData.txCommit[1])] as [bigint,bigint],
         blinding,
-        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint],
+        nonce,
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint],
       },
     });
+    incrementWrapNonce(coaEvmAddr, tokenId);
     return {
       txId: result.txHash,
       blinding: 0n,
