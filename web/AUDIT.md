@@ -66,15 +66,14 @@ Action: FIXED — updated to `v0.7.1`.
 
 **[MAINNET-BLOCKER-1] lib/memo-mirror.ts:148 — `ingestTipIfNew` writes to `openjanus:shielded:<addr>` (old v1 format, no token ID, no proxy fingerprint). The `sweepStaleShieldedCache()` call on every mount (client-layout.tsx) DELETES any `openjanus:shielded:` key that doesn't match the v2 format. Users who received tips via the /tips page but never wrapped will lose their ingested balances on next session.**
 - Affected path: /tips page decrypt → ingestTipIfNew → save to v1 key → sweeped on next mount
-- Fix required: Either update `ingestTipIfNew` to use the v2 key format (with tokenId and proxy fingerprint), or disable the sweep for the `openjanus:shielded:<addr>` key shape that doesn't include a v2 prefix. Since `ingestTipIfNew` doesn't know which `tokenId` the tip is for (PrivateTip tracks tips generically), the simplest fix is to change `ingestTipIfNew` to write to the v2 key format with `tokenId="flow"` (the only token supported for tipping currently), and update `sweepStaleShieldedCache` to recognize the tip-ingested sub-key.
-- Status: NOT FIXED in this sprint (scope was proof routes + SDK migration). Must fix before mainnet.
+- Status: **FIXED** in commit `2603eb4`. `ingestTipIfNew` now delegates to `store.ts` `saveShieldedState` (v2 key format: `openjanus:shielded:v2:<addr>:<tokenId>:<fingerprint>`). Default `tokenId="flow"`. Added `migrateV1ShieldedKeyIfPresent()` that runs on first call per address: decodes any existing v1 key, writes to v2, deletes v1. Users with prior ingested balances are migrated automatically.
 
 **[MAINNET-BLOCKER-2] lib/fcl-config.ts:65-66 — Cadence contract aliases `0xJanusFlow: 0x5dcbeb41055ec57e` and `0xPrivateTip: 0xb9ac529c14a4c5a1` are hardcoded. These are the correct testnet addresses but are not validated against the SDK's network config. If a testnet re-deploy changes the Cadence router address, the TX_SMART_SETUP transaction (tip-actions.ts:279-280) and all PrivateTip Cadence scripts will silently use the stale address. Before mainnet, Cadence contract aliases must come from the SDK's exported network constants or flow.json, not hardcoded strings.**
 - Severity: testnet OK (addresses currently correct), mainnet is a different chain → addresses will change.
-- Status: NOT FIXED in this sprint. Flag for mainnet migration.
+- Status: **FIXED** in commit `e72a33f`. Added `JanusFlow` contract entry to `web/flow.json` with testnet alias. `resolveAlias()` in `fcl-config.ts` reads per-network entries from `flow.json` at module load time — same source used by `FlowProvider` in `client-layout.tsx`. To port to mainnet: add `"mainnet"` alias entries in `web/flow.json` and update `accessNodeUrl` + `discoveryWallet`.
 
 **[MAINNET-BLOCKER-3] lib/fcl-config.ts:78 — `ADDRESSES.JANUS_FLOW_EVM: "0x2458ae2d26797c2ffa3B4f6612Bdc4aDf22b7156"` is a stale v0.3 address. Not currently imported by any production code (grep confirms), but a dead export. If a future developer imports it they'll use the wrong proxy. Remove or update.**
-- Status: NOT FIXED in this sprint (no runtime impact currently). Fix before mainnet.
+- Status: **FIXED** in commit `e72a33f`. `ADDRESSES.JANUS_FLOW_EVM` removed. `ADDRESSES` now only exports `JANUS_FLOW_CADENCE` and `PRIVATE_TIP_CADENCE`, both sourced from `flow.json`. Callers needing the EVM proxy should use `TOKEN_REGISTRY.flow.proxy` from `@claucondor/sdk`.
 
 ---
 
@@ -123,3 +122,18 @@ The 3 mainnet-blockers are:
 3. Stale `ADDRESSES.JANUS_FLOW_EVM` in `fcl-config.ts` (dead code but dangerous)
 
 **For testnet deploy: blockers 2 and 3 are testnet-correct (addresses match current deployment) and do not affect testnet operation. Blocker 1 affects tip-only users on testnet today.**
+
+---
+
+## Final status — v0.7 sprint
+
+All 3 mainnet-blockers closed as of 2026-06-05. Commits: `2603eb4`, `e72a33f`.
+
+**READY-FOR-MAINNET-PORT: TBD**
+
+Remaining external dependencies before actual mainnet launch (not testnet blockers):
+
+1. **OFAC compliance hook** — Chainalysis Oracle integration in wrap/unwrap path (per mainnet-compliance-ofac.md). "Privacy not impunity" stance, legal differentiator vs mixers.
+2. **Multi-party ceremony** — The ZK circuit trusted setup (Pedersen aggregate) requires a multi-party ceremony for mainnet. Current `.zkey` files are for testnet/dev only.
+3. **Mainnet contract addresses** — Deploy JanusFlow and PrivateTip to mainnet, add `"mainnet"` alias entries in `web/flow.json`, update `accessNodeUrl` + `discoveryWallet` in `fcl-config.ts`.
+4. **Nonce UX hardening** — FUTURE-6 (wrap nonce collision on second device) should be resolved before mainnet via on-chain nonce read before proof generation.
