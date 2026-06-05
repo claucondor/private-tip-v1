@@ -10,7 +10,6 @@
 /// On-chain timestamps come from Cadence block time (Unix seconds), which
 /// lands within a few seconds of the user's local clock.
 
-import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
 import { loadShieldedState, saveShieldedState } from "./store";
 import type { TokenId } from "./tokens";
 
@@ -173,47 +172,6 @@ function saveIngestedSet(addr: string, set: Set<string>): void {
 }
 
 /**
- * Migrate a v1 shielded key (openjanus:shielded:<addr>) to v2 format if it
- * exists. Called on first read so users upgrading from a session where tips
- * were ingested with the old key shape don't lose their state. The v1 key is
- * deleted after a successful migration.
- *
- * Tips are always for FLOW (the only token supported by PrivateTip), so we
- * migrate under tokenId="flow".
- */
-function migrateV1ShieldedKeyIfPresent(addr: string): void {
-  if (typeof window === "undefined") return;
-  const v1Key = `openjanus:shielded:${addr.toLowerCase()}`;
-  const raw = localStorage.getItem(v1Key);
-  if (!raw) return;
-  try {
-    const parsed = JSON.parse(raw) as { balanceWei?: string; balanceRaw?: string; blinding?: string };
-    const balanceRaw = parsed.balanceRaw ?? parsed.balanceWei ?? "0";
-    const blinding = parsed.blinding ?? "0";
-    // Reconstruct the v2 key. We need proxyFingerprint for "flow".
-    // TOKEN_REGISTRY is imported at top of file (static ESM import).
-    const flowEntry = TOKEN_REGISTRY["flow"] as { proxy?: string; cadenceAddress?: string; variant?: string } | undefined;
-    if (!flowEntry) return; // Safety guard.
-    const fingerprint =
-      flowEntry.variant === "cadence-ft"
-        ? (flowEntry.cadenceAddress ?? "unknown").toLowerCase()
-        : (flowEntry.proxy ?? "unknown").toLowerCase();
-    const v2Key = `openjanus:shielded:v2:${addr.toLowerCase()}:flow:${fingerprint}`;
-    // Only write if v2 key doesn't already exist (avoid clobbering a newer value).
-    if (!localStorage.getItem(v2Key)) {
-      localStorage.setItem(
-        v2Key,
-        JSON.stringify({ balanceRaw, blinding, lastUpdatedMs: Date.now() })
-      );
-    }
-    localStorage.removeItem(v1Key);
-  } catch {
-    // Non-fatal: migration failed, leave v1 key untouched so the user still
-    // sees their balance via the legacy-key check in client-layout.tsx.
-  }
-}
-
-/**
  * If this tipID hasn't been ingested yet, add (amount, blinding) into the
  * recipient's local shielded state and remember the tipID. Writes to the v2
  * key format (via store.ts saveShieldedState) so the entry survives the
@@ -233,9 +191,6 @@ export function ingestTipIfNew(opts: {
 }): boolean {
   const tipKey = String(opts.tipID);
   const tokenId: TokenId = opts.tokenId ?? "flow";
-
-  // Migrate any v1 key before checking state.
-  migrateV1ShieldedKeyIfPresent(opts.recipient);
 
   const ingested = loadIngestedSet(opts.recipient);
   if (ingested.has(tipKey)) return false;
