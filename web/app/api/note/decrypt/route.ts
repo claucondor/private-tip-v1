@@ -11,15 +11,7 @@
 /// (likely a legacy plain-text memo from before SDK v0.4.4).
 
 import { NextRequest, NextResponse } from "next/server";
-
-// Inline type for the SDK's decryptAnyNote — avoids TS reading stale cached
-// type declarations from a previous Vercel build. Runtime cast is safe because
-// the dynamic import below loads the real module at execution time.
-type DecryptAnyNoteFn = (
-  ciphertext: Uint8Array,
-  ephPubkey: { x: bigint; y: bigint },
-  memoPrivKey: bigint
-) => Promise<{ amount: bigint; blinding: bigint; data?: string } | null>;
+import { decryptShieldedNote, decryptNote } from "@claucondor/sdk/crypto";
 
 export const runtime = "nodejs";
 
@@ -51,24 +43,30 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Dynamic import avoids Turbopack static-export analysis against a stale
-    // build cache. The type annotation above keeps full TypeScript safety.
-    const { decryptAnyNote } = (await import("@claucondor/sdk") as unknown) as {
-      decryptAnyNote: DecryptAnyNoteFn;
-    };
-
+    // Try the new note schema (v3-compatible: {v, amt, bld, memo}) first.
+    // Fall back to legacy ShieldedNote (v1: {v, a, b, d}) for old tips.
     const ct = new Uint8Array(ciphertext);
     const ephPub = { x: BigInt(ephemeralPubkey.x), y: BigInt(ephemeralPubkey.y) };
     const pk = BigInt(privkey);
-    const decoded = await decryptAnyNote(ct, ephPub, pk);
-    if (!decoded) {
-      throw new Error("cannot decrypt note: neither v3 nor shielded format matched");
+    try {
+      const note = await decryptNote(ct, ephPub, pk);
+      return NextResponse.json({
+        amount: note.amount.toString(),
+        blinding: note.blinding.toString(),
+        data: note.memo,
+      });
+    } catch (newErr) {
+      try {
+        const note = await decryptShieldedNote(ct, ephPub, pk);
+        return NextResponse.json({
+          amount: note.amount.toString(),
+          blinding: note.blinding.toString(),
+          data: note.data,
+        });
+      } catch {
+        throw newErr;
+      }
     }
-    return NextResponse.json({
-      amount: decoded.amount.toString(),
-      blinding: decoded.blinding.toString(),
-      data: decoded.data,
-    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 400 });
