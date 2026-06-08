@@ -6,6 +6,7 @@ const nextConfig: NextConfig = {
   // the client bundle light.
   serverExternalPackages: [
     "@openjanus/sdk",
+    "@claucondor/sdk",
     "snarkjs",
     "circomlibjs",
     "ffjavascript",
