@@ -39,10 +39,11 @@ import {
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   buildGetShieldedTipsByRecipientWithMemoScript,
-  buildGetShieldedTipsBySenderScript,
+  buildGetShieldedTipsBySenderWithSnapshotScript,
   decryptNote,
   getOrDeriveMemoPrivkey,
 } from "@/lib/tip-actions";
+import { decryptSnapshot } from "@claucondor/sdk/crypto";
 import { getCachedMemoPrivkey } from "@/lib/memo-key-session";
 import {
   findSentMemo,
@@ -70,6 +71,7 @@ interface RawTipMetadata {
   recipient: string;
   timestamp: string;
   memo?: RawMemoCiphertext | null;
+  senderSnapshot?: RawMemoCiphertext | null;  // v0.5 — present in Sent tips via getShieldedTipsBySenderWithSnapshot
 }
 
 interface MemoCiphertext {
@@ -84,28 +86,24 @@ interface TipMetadata {
   recipient: string;
   timestamp: number;            // Unix epoch seconds
   memo: MemoCiphertext | null;  // null for pre-v0.4.2 tips or no-memo sends
+  senderSnapshot: MemoCiphertext | null;  // v0.5 — present in Sent tips post-upgrade
 }
 
 function normalizeTip(raw: RawTipMetadata): TipMetadata {
-  let memo: MemoCiphertext | null = null;
-  if (raw.memo) {
-    const ct = Array.isArray(raw.memo.ciphertext)
-      ? new Uint8Array(raw.memo.ciphertext)
-      : new Uint8Array(
-          (raw.memo.ciphertext as string).split(",").map((s) => Number(s))
-        );
-    memo = {
-      ciphertext: ct,
-      ephPubkeyX: BigInt(raw.memo.ephPubkeyX),
-      ephPubkeyY: BigInt(raw.memo.ephPubkeyY),
-    };
-  }
+  const parseMemo = (m: RawMemoCiphertext | null | undefined): MemoCiphertext | null => {
+    if (!m) return null;
+    const ct = Array.isArray(m.ciphertext)
+      ? new Uint8Array(m.ciphertext)
+      : new Uint8Array((m.ciphertext as string).split(",").map((s) => Number(s)));
+    return { ciphertext: ct, ephPubkeyX: BigInt(m.ephPubkeyX), ephPubkeyY: BigInt(m.ephPubkeyY) };
+  };
   return {
     tipID: Number(raw.tipID),
     sender: raw.sender,
     recipient: raw.recipient,
     timestamp: Number(raw.timestamp),
-    memo,
+    memo: parseMemo(raw.memo),
+    senderSnapshot: parseMemo(raw.senderSnapshot),
   };
 }
 
@@ -145,7 +143,7 @@ export default function TipsPage() {
   });
 
   const sentQuery = useFlowQuery({
-    cadence: buildGetShieldedTipsBySenderScript(),
+    cadence: buildGetShieldedTipsBySenderWithSnapshotScript(),
     args: userAddress
       ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (arg: any, t: any) => [arg(userAddress, t.Address)]
@@ -405,6 +403,30 @@ function TipCard({
     return getCachedMemoPrivkey(currentUser) === null;
   });
 
+  // v0.5 — receiver-side amount (decoded from the note we already decrypt).
+  // The note contains amount + blinding + memo; we already use amount for
+  // ingestTipIfNew, just need to surface it in the render.
+  const [receivedAmount, setReceivedAmount] = useState<bigint | null>(null);
+
+  // v0.5 — sender-side snapshot decryption (for Sent tips post-upgrade).
+  // Reveals memo + txAmt the sender wrote, decoded from their own self-snapshot.
+  const [senderSnap, setSenderSnap] = useState<{ memo?: string; txAmt?: bigint; rcp?: string } | null>(null);
+  useEffect(() => {
+    if (isReceived || !tip.senderSnapshot) return;
+    const privkey = getCachedMemoPrivkey(currentUser);
+    if (!privkey) return;
+    let cancelled = false;
+    decryptSnapshot(
+      tip.senderSnapshot.ciphertext,
+      { x: tip.senderSnapshot.ephPubkeyX, y: tip.senderSnapshot.ephPubkeyY },
+      privkey
+    ).then((snap) => {
+      if (cancelled || !snap) return;
+      setSenderSnap({ memo: snap.memo, txAmt: snap.txAmt, rcp: snap.rcp });
+    }).catch(() => { /* silent — fall back to placeholder */ });
+    return () => { cancelled = true; };
+  }, [isReceived, tip.senderSnapshot, currentUser]);
+
   const runDecrypt = useCallback((privkey: bigint) => {
     if (!tip.memo) return;
     let cancelled = false;
@@ -420,6 +442,7 @@ function TipCard({
         // the optional memo text. Empty data → display "(no memo text)".
         const displayText = note.data ?? "";
         setDecrypted(displayText);
+        setReceivedAmount(note.amount);
         setLocked(false);
         cacheDecryptedMemo(currentUser, tip.tipID, displayText);
         // Auto-ingest (amount, blinding) into the recipient's local shielded
@@ -444,12 +467,18 @@ function TipCard({
 
   // Auto-decrypt when privkey is already in sessionStorage (e.g. user already
   // signed earlier this session). Does NOT prompt the wallet.
+  // Also re-runs if we have a cached memo but no amount yet (post-v0.5 — we
+  // surface note.amount in the render, which requires running decryptNote
+  // even when the memo string is cached).
   useEffect(() => {
-    if (!isReceived || !tip.memo || decrypted || decryptError || locked) return;
-    const cached = getCachedDecryptedMemo(currentUser, tip.tipID);
-    if (cached) {
-      setDecrypted(cached);
-      return;
+    if (!isReceived || !tip.memo || decryptError || locked) return;
+    if (decrypted && receivedAmount !== null) return;  // already have both
+    if (!decrypted) {
+      const cached = getCachedDecryptedMemo(currentUser, tip.tipID);
+      if (cached) {
+        setDecrypted(cached);
+        // fall through — still need amount, so let runDecrypt also run
+      }
     }
     const privkey = getCachedMemoPrivkey(currentUser);
     if (!privkey) {
@@ -457,7 +486,7 @@ function TipCard({
       return;
     }
     runDecrypt(privkey);
-  }, [isReceived, tip.memo, tip.tipID, currentUser, decrypted, decryptError, locked, runDecrypt]);
+  }, [isReceived, tip.memo, tip.tipID, currentUser, decrypted, decryptError, locked, runDecrypt, receivedAmount]);
 
   const handleUnlockClick = useCallback(async () => {
     setDecrypting(true);
@@ -568,6 +597,18 @@ function TipCard({
           })()}
 
           {!isReceived && (() => {
+            // v0.5 — prefer decrypted sender snapshot (on-chain, device-portable).
+            if (senderSnap?.memo !== undefined) {
+              return (
+                <div className="flex items-start gap-1.5 text-xs">
+                  <MessageSquare className="w-3.5 h-3.5 shrink-0 text-muted-foreground mt-0.5" />
+                  <span className="text-foreground/80 break-words">
+                    {senderSnap.memo ? `“${senderSnap.memo}”` : <span className="italic">(no memo)</span>}
+                  </span>
+                </div>
+              );
+            }
+            // Fallback: local memo mirror (this browser only).
             const localMemo = findSentMemo({
               sender: currentUser,
               recipient: tip.recipient,
@@ -584,17 +625,37 @@ function TipCard({
             ) : (
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <MessageSquare className="w-3.5 h-3.5 shrink-0" />
-                <span className="italic">No local memo</span>
+                <span className="italic">No memo</span>
               </div>
             );
           })()}
         </div>
 
         <div className="flex flex-col items-end gap-2 shrink-0">
-          <div className="flex items-center gap-1 text-xs text-muted-foreground">
-            <EyeOff className="w-3 h-3" />
-            Amount hidden
-          </div>
+          {(() => {
+            // Heuristic decimals (token info isn't in PrivateTip metadata yet):
+            //   raw > 1e16 → FLOW (18d), > 1e7 → MockFT (8d), else mUSDC (6d).
+            const raw = !isReceived ? senderSnap?.txAmt : receivedAmount;
+            if (raw === undefined || raw === null) {
+              return (
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <EyeOff className="w-3 h-3" />
+                  Amount hidden
+                </div>
+              );
+            }
+            let dec = 6, unit = "mUSDC";
+            if (raw > 10000000000000000n) { dec = 18; unit = "FLOW"; }
+            else if (raw > 10000000n) { dec = 8; unit = "MockFT"; }
+            const divisor = 10n ** BigInt(dec);
+            const whole = raw / divisor;
+            const frac = (raw % divisor).toString().padStart(dec, "0").slice(0, 4);
+            return (
+              <div className="flex items-center gap-1 text-xs text-foreground/80">
+                <span>{whole.toString()}.{frac} {unit}</span>
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>

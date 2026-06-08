@@ -27,6 +27,7 @@ import {
   computeWrapFee,
   generateBlinding,
 } from "@claucondor/sdk";
+import { orchestrateShieldedTransferWithPrebuiltProof } from "@claucondor/sdk/orchestration";
 import {
   getCoaEvmAddress as sdkGetCoaEvmAddress,
   hasCOA,
@@ -444,14 +445,22 @@ export interface SendActionParams {
    * Required for shieldedTransferViaCoa — passed as the FCL signer address arg.
    */
   userCadenceAddr?: string;
+  /**
+   * Recipient's Cadence Flow address — required to record tip on PrivateTip
+   * with sender-snapshot v3 metadata for /tips Sent view memo+amount visibility.
+   * If absent, falls back to legacy dispatch (no PrivateTip recording).
+   */
+  recipientFlowAddr?: string;
 }
 
 export interface SendActionResult {
   txHash: string;
+  /** Sender's new blinding after the transfer — required to compute next C_old. */
+  newBlinding?: bigint;
 }
 
 export async function sendShieldedAction(params: SendActionParams): Promise<SendActionResult> {
-  const { tokenId, recipientAddr, amount, currentBalance, currentBlinding, memo, evmSigner, coaEvmAddr, userCadenceAddr } = params;
+  const { tokenId, recipientAddr, amount, currentBalance, currentBlinding, memo, evmSigner, coaEvmAddr, userCadenceAddr, recipientFlowAddr } = params;
 
   if (amount > currentBalance) {
     throw new Error(
@@ -492,6 +501,126 @@ export async function sendShieldedAction(params: SendActionParams): Promise<Send
     }
     const proofData = await proofResponse.json();
 
+    // Combined dispatch path (v0.5) — only when recipientFlowAddr is a valid Cadence address.
+    // Single atomic Cadence tx: EVM JanusX.shieldedTransfer via COA + PrivateTip.recordTipWithSenderSnapshot.
+    // This is what populates SenderSnapshotStore so /tips Sent shows memo+amount.
+    const isFlow = recipientFlowAddr && /^0x[0-9a-fA-F]{16}$/.test(recipientFlowAddr);
+    if (isFlow) {
+      // Fetch memokeys (sender + recipient) on-chain (same as adapter does internally).
+      const [senderMemoKey, recipientMemoKey] = await Promise.all([
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (adapter as any).getMemoKey(coaEvmAddr),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (adapter as any).getMemoKey(recipientAddr),
+      ]);
+      if (!senderMemoKey) throw new Error(`sender COA ${coaEvmAddr} has no registered memokey`);
+      if (!recipientMemoKey) throw new Error(`recipient ${recipientAddr} has no registered memokey`);
+
+      // Compose v3 snapshot (with txAmt+rcp+memo) + encryptedNoteTo + EVM calldata.
+      const orch = await orchestrateShieldedTransferWithPrebuiltProof({
+        currentBalance,
+        transferAmount: amount,
+        senderMemoKeypair: { privkey: 0n, pubkey: senderMemoKey },
+        recipientMemoKey,
+        memo,
+        recipient: recipientAddr,
+        proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
+        transferBlinding,
+        newBlinding,
+      });
+
+      // EVM calldata for shieldedTransfer (same shape for JanusFlow and JanusERC20).
+      const SHIELDED_ABI = [
+        "function shieldedTransfer(address to, uint256[6] publicInputs, uint256[8] proof, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY, bytes encryptedNoteTo, uint256 ephPubkeyToX, uint256 ephPubkeyToY) external",
+      ];
+      const iface = new ethers.Interface(SHIELDED_ABI);
+      const calldata = iface.encodeFunctionData("shieldedTransfer", [
+        recipientAddr,
+        [...orch.publicInputs],
+        [...orch.proof],
+        ethers.hexlify(orch.encryptedSnapshot),
+        orch.ephPubkeyX,
+        orch.ephPubkeyY,
+        ethers.hexlify(orch.encryptedNoteTo),
+        orch.ephPubkeyToX,
+        orch.ephPubkeyToY,
+      ]);
+      const calldataHex = calldata.slice(2);
+
+      const proxyAddr = entry.proxy;
+      const combinedTx = `
+import EVM from 0x8c5303eaa26202d6
+import PrivateTip from 0xb9ac529c14a4c5a1
+
+transaction(
+    recipient: Address,
+    proxyHex: String,
+    calldataHex: String,
+    ciphertextRefX: UInt256,
+    ciphertextRefY: UInt256,
+    memoCiphertext: [UInt8],
+    memoEphPubkeyX: UInt256,
+    memoEphPubkeyY: UInt256,
+    senderSnapshotCiphertext: [UInt8],
+    senderSnapshotEphPubkeyX: UInt256,
+    senderSnapshotEphPubkeyY: UInt256
+) {
+    let signerRef: auth(BorrowValue) &Account
+    prepare(signer: auth(BorrowValue) &Account) { self.signerRef = signer }
+    execute {
+        let coa = self.signerRef.storage.borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+            ?? panic("No COA at /storage/evm")
+        let result = coa.call(
+            to: EVM.addressFromString(proxyHex),
+            data: calldataHex.decodeHex(),
+            gasLimit: 3000000,
+            value: EVM.Balance(attoflow: 0)
+        )
+        assert(result.status == EVM.Status.successful,
+            message: "shieldedTransfer reverted: ".concat(result.errorCode.toString()).concat(" ").concat(result.errorMessage))
+        let _tipID = PrivateTip.recordTipWithSenderSnapshot(
+            sender: self.signerRef,
+            recipient: recipient,
+            ciphertextRef: [ciphertextRefX, ciphertextRefY],
+            memoCiphertext: memoCiphertext,
+            memoEphPubkeyX: memoEphPubkeyX,
+            memoEphPubkeyY: memoEphPubkeyY,
+            senderSnapshotCiphertext: senderSnapshotCiphertext,
+            senderSnapshotEphPubkeyX: senderSnapshotEphPubkeyX,
+            senderSnapshotEphPubkeyY: senderSnapshotEphPubkeyY
+        )
+    }
+}
+`;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fcl: any = await import("@onflow/fcl");
+      const txId: string = await fcl.mutate({
+        cadence: combinedTx,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        args: (arg: any, t: any) => [
+          arg(recipientFlowAddr, t.Address),
+          arg(proxyAddr, t.String),
+          arg(calldataHex, t.String),
+          arg(orch.publicInputs[2].toString(), t.UInt256),
+          arg(orch.publicInputs[3].toString(), t.UInt256),
+          arg(Array.from(orch.encryptedNoteTo).map(b => b.toString()), t.Array(t.UInt8)),
+          arg(orch.ephPubkeyToX.toString(), t.UInt256),
+          arg(orch.ephPubkeyToY.toString(), t.UInt256),
+          arg(Array.from(orch.encryptedSnapshot).map(b => b.toString()), t.Array(t.UInt8)),
+          arg(orch.ephPubkeyX.toString(), t.UInt256),
+          arg(orch.ephPubkeyY.toString(), t.UInt256),
+        ],
+        proposer: fcl.authz,
+        payer: fcl.authz,
+        authorizations: [fcl.authz],
+        limit: 9999,
+      });
+      await fcl.tx(txId).onceSealed();
+      return { txHash: txId, newBlinding: newBlinding };
+    }
+
+    // Legacy path: only EVM dispatch (no PrivateTip recording with sender snapshot).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await (adapter as any).shieldedTransferViaCoa({
       recipient: recipientAddr,
@@ -510,7 +639,7 @@ export async function sendShieldedAction(params: SendActionParams): Promise<Send
     return { txHash: result.txHash };
   }
 
-  // cadence-ft (MockFT): use shieldedTransferViaCoa with server-side proof (browser-safe).
+  // cadence-ft (MockFT): Cadence-direct JanusFT.shieldedTransfer + PrivateTip.recordTipWithSenderSnapshot.
   if (entry.variant === "cadence-ft") {
     if (!coaEvmAddr) {
       throw new Error(
@@ -543,6 +672,117 @@ export async function sendShieldedAction(params: SendActionParams): Promise<Send
     }
     const proofData = await proofResponse.json();
 
+    // Combined Cadence tx path — only when both sender and recipient Cadence addresses are valid.
+    // Single atomic Cadence tx: JanusFT.CommitmentRegistry.shieldedTransfer (Cadence-direct)
+    // + PrivateTip.recordTipWithSenderSnapshot — populates SenderSnapshotStore so
+    // /tips Sent shows memo+amount for MockFT tips.
+    const isSenderValid    = /^0x[0-9a-fA-F]{16}$/.test(userCadenceAddr);
+    const isRecipientValid = recipientFlowAddr && /^0x[0-9a-fA-F]{16}$/.test(recipientFlowAddr);
+    if (isSenderValid && isRecipientValid) {
+      // Resolve recipient Cadence addr → COA EVM addr so memokey can be looked up from EVM registry.
+      const recipientCoaEvm = await sdkGetCoaEvmAddress(recipientFlowAddr!);
+      if (!recipientCoaEvm) {
+        throw new Error(
+          `sendShieldedAction (cadence-ft): could not resolve COA EVM for recipient ${recipientFlowAddr}`
+        );
+      }
+
+      // Fetch memokeys from EVM registry (sender by coaEvmAddr, recipient by their COA EVM).
+      const [senderMemoKey, recipientMemoKey] = await Promise.all([
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (adapter as any).getMemoKey(coaEvmAddr),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (adapter as any).getMemoKey(recipientCoaEvm),
+      ]);
+      if (!senderMemoKey) throw new Error(`sender COA ${coaEvmAddr} has no registered memokey`);
+      if (!recipientMemoKey) throw new Error(`recipient COA ${recipientCoaEvm} has no registered memokey`);
+
+      // Compose v3 snapshot (with txAmt+rcp+memo) + encryptedNoteTo.
+      // recipient field uses COA EVM addr — consistent with native+erc20 path.
+      const orch = await orchestrateShieldedTransferWithPrebuiltProof({
+        currentBalance,
+        transferAmount: amount,
+        senderMemoKeypair: { privkey: 0n, pubkey: senderMemoKey },
+        recipientMemoKey,
+        memo,
+        recipient: recipientCoaEvm,
+        proof: proofData.proof.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint],
+        publicInputs: proofData.publicInputs.map(BigInt) as [bigint,bigint,bigint,bigint,bigint,bigint],
+        transferBlinding,
+        newBlinding,
+      });
+
+      const janusFTAddr = TOKEN_REGISTRY.mockft.cadenceAddress;
+      const combinedFtTx = `
+import JanusFT from ${janusFTAddr}
+import PrivateTip from 0xb9ac529c14a4c5a1
+import EVM from 0x8c5303eaa26202d6
+
+transaction(
+  fromAccount: Address,
+  toAccount: Address,
+  transferProof: [UInt256],
+  publicInputs: [UInt256],
+  encryptedSnapshotFrom: [UInt8], ephPubFromX: UInt256, ephPubFromY: UInt256,
+  encryptedNoteTo: [UInt8], ephPubToX: UInt256, ephPubToY: UInt256
+) {
+  let registryRef: &JanusFT.CommitmentRegistry
+  let coa: auth(EVM.Call) &EVM.CadenceOwnedAccount
+  let signerRef: auth(BorrowValue) &Account
+  prepare(signer: auth(BorrowValue) &Account) {
+    self.signerRef = signer
+    self.registryRef = signer.storage.borrow<&JanusFT.CommitmentRegistry>(
+      from: JanusFT.CommitmentRegistryStoragePath
+    ) ?? panic("sendShieldedAction (cadence-ft): signer must hold the JanusFT registry")
+    self.coa = signer.storage.borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(
+      from: /storage/evm
+    ) ?? panic("sendShieldedAction (cadence-ft): no COA at /storage/evm")
+  }
+  execute {
+    self.registryRef.shieldedTransfer(
+      fromAccount: fromAccount, toAccount: toAccount,
+      transferProof: transferProof, publicInputs: publicInputs,
+      encryptedSnapshotFrom: encryptedSnapshotFrom, ephPubFromX: ephPubFromX, ephPubFromY: ephPubFromY,
+      encryptedNoteTo: encryptedNoteTo, ephPubToX: ephPubToX, ephPubToY: ephPubToY,
+      coa: self.coa
+    )
+    let _tipID = PrivateTip.recordTipWithSenderSnapshot(
+      sender: self.signerRef, recipient: toAccount,
+      ciphertextRef: [publicInputs[2], publicInputs[3]],
+      memoCiphertext: encryptedNoteTo, memoEphPubkeyX: ephPubToX, memoEphPubkeyY: ephPubToY,
+      senderSnapshotCiphertext: encryptedSnapshotFrom, senderSnapshotEphPubkeyX: ephPubFromX, senderSnapshotEphPubkeyY: ephPubFromY
+    )
+  }
+}
+`;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fcl: any = await import("@onflow/fcl");
+      const txId: string = await fcl.mutate({
+        cadence: combinedFtTx,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        args: (arg: any, t: any) => [
+          arg(userCadenceAddr, t.Address),
+          arg(recipientFlowAddr!, t.Address),
+          arg(Array.from(orch.proof).map((v: bigint) => v.toString()), t.Array(t.UInt256)),
+          arg(Array.from(orch.publicInputs).map((v: bigint) => v.toString()), t.Array(t.UInt256)),
+          arg(Array.from(orch.encryptedSnapshot).map((b: number) => b.toString()), t.Array(t.UInt8)),
+          arg(orch.ephPubkeyX.toString(), t.UInt256),
+          arg(orch.ephPubkeyY.toString(), t.UInt256),
+          arg(Array.from(orch.encryptedNoteTo).map((b: number) => b.toString()), t.Array(t.UInt8)),
+          arg(orch.ephPubkeyToX.toString(), t.UInt256),
+          arg(orch.ephPubkeyToY.toString(), t.UInt256),
+        ],
+        proposer: fcl.authz,
+        payer: fcl.authz,
+        authorizations: [fcl.authz],
+        limit: 9999,
+      });
+      await fcl.tx(txId).onceSealed();
+      return { txHash: txId, newBlinding: newBlinding };
+    }
+
+    // Legacy fallback: JanusFT-only dispatch (no PrivateTip recording with sender snapshot).
+    // Triggered when userCadenceAddr or recipientFlowAddr is missing or not a valid 16-hex Cadence addr.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await (adapter as any).shieldedTransferViaCoa({
       recipient: recipientAddr,
@@ -754,6 +994,101 @@ export function buildGetShieldedTipsBySenderScript(): string {
       return PrivateTip.getShieldedTipsBySender(sender: sender)
     }
   `;
+}
+
+/// v0.5 — returns TipMetadataWithSenderSnapshot for sent tips,
+/// including the sender's own encrypted snapshot blob (if present).
+export function buildGetShieldedTipsBySenderWithSnapshotScript(): string {
+  return `
+    import PrivateTip from 0xb9ac529c14a4c5a1
+    access(all) fun main(sender: Address): [PrivateTip.TipMetadataWithSenderSnapshot] {
+      return PrivateTip.getShieldedTipsBySenderWithSnapshot(sender: sender)
+    }
+  `;
+}
+
+/// Cadence transaction template for PrivateTip.recordTipWithSenderSnapshot.
+/// Called AFTER the EVM shieldedTransfer has been dispatched via the SDK's
+/// shieldedTransferViaCoa() path (which only does the EVM side).
+export function buildRecordTipWithSenderSnapshotTx(): string {
+  return `
+import PrivateTip from 0xb9ac529c14a4c5a1
+
+transaction(
+    recipient: Address,
+    ciphertextRefX: UInt256,
+    ciphertextRefY: UInt256,
+    memoCiphertext: [UInt8],
+    memoEphPubkeyX: UInt256,
+    memoEphPubkeyY: UInt256,
+    senderSnapshotCiphertext: [UInt8],
+    senderSnapshotEphPubkeyX: UInt256,
+    senderSnapshotEphPubkeyY: UInt256
+) {
+    let signerRef: auth(BorrowValue) &Account
+
+    prepare(signer: auth(BorrowValue) &Account) {
+        self.signerRef = signer
+    }
+
+    execute {
+        let _tipID = PrivateTip.recordTipWithSenderSnapshot(
+            sender: self.signerRef,
+            recipient: recipient,
+            ciphertextRef: [ciphertextRefX, ciphertextRefY],
+            memoCiphertext: memoCiphertext,
+            memoEphPubkeyX: memoEphPubkeyX,
+            memoEphPubkeyY: memoEphPubkeyY,
+            senderSnapshotCiphertext: senderSnapshotCiphertext,
+            senderSnapshotEphPubkeyX: senderSnapshotEphPubkeyX,
+            senderSnapshotEphPubkeyY: senderSnapshotEphPubkeyY
+        )
+        log("PrivateTip.recordTipWithSenderSnapshot tipID=".concat(_tipID.toString()))
+    }
+}
+`;
+}
+
+interface EncryptSenderSnapshotParams {
+  balance: string;        // decimal string (new balance after transfer, wei)
+  blinding: string;       // decimal string (new blinding factor)
+  txAmt: string;          // decimal string (transfer amount, wei)
+  rcp: string;            // recipient hint (COA EVM hex or Cadence addr)
+  memo?: string;          // optional memo text
+  senderPubkeyX: string;  // decimal string (sender's BabyJub pubkey X)
+  senderPubkeyY: string;  // decimal string (sender's BabyJub pubkey Y)
+}
+
+interface EncryptSenderSnapshotResult {
+  ciphertext: number[];
+  ephPubkeyX: string;
+  ephPubkeyY: string;
+}
+
+/// Encrypt a v3 sender snapshot to the sender's own memokey pubkey.
+/// Calls /api/snapshot/encrypt (server-side, avoids circomlibjs in client bundle).
+export async function encryptSenderSnapshot(
+  params: EncryptSenderSnapshotParams
+): Promise<EncryptSenderSnapshotResult> {
+  const res = await fetch("/api/snapshot/encrypt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      balance: params.balance,
+      blinding: params.blinding,
+      txAmt: params.txAmt,
+      rcp: params.rcp,
+      memo: params.memo ?? "",
+      timestampMs: Date.now(),
+      senderPubkeyX: params.senderPubkeyX,
+      senderPubkeyY: params.senderPubkeyY,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(`encryptSenderSnapshot: ${err.error ?? res.statusText}`);
+  }
+  return res.json();
 }
 
 export function buildGetTipCountScript(): string {
@@ -1018,17 +1353,17 @@ export async function sendShieldedTipAction(
     memoKeypair: memoKeypair ?? { privkey: 0n, pubkey: { x: 0n, y: 1n } },
     coaEvmAddr: senderCoaEvmAddr,
     userCadenceAddr: userCadenceAddrForSend,
+    recipientFlowAddr: recipientFlowAddr,
   });
 
-  // v0.6: SDK doesn't return newBlinding directly. We can reconstruct it
-  // from latestSnapshot after the tx, but for UI purposes we return the
-  // tx hash and signal that the user should re-scan for latest state.
-  // Return a provisional result that pages can use for optimistic UI.
+  // If the combined-tx path was taken, result.newBlinding is populated with the
+  // sender's actual post-transfer blinding (so next C_old proves correctly).
+  // Otherwise fall back to 0n and caller will need to re-scan via latestSnapshot.
   return {
     txId: result.txHash,
-    newBlinding: 0n,           // caller should re-scan via latestSnapshot
+    newBlinding: result.newBlinding ?? 0n,
     transferBlinding: 0n,      // not exposed by v0.6 API surface
-    newCommit: { x: 0n, y: 1n }, // identity — will be updated on scan
+    newCommit: { x: 0n, y: 1n }, // identity — caller can re-scan if needed
     newBalanceWei: oldBalanceWei - transferAmountWei,
   };
 }
@@ -1137,8 +1472,8 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
     });
     return {
       txId: result.txHash,
-      blinding: 0n,  // caller should re-scan to get fresh blinding
-      commitment: { x: 0n, y: 1n },
+      blinding,  // the actual blinding used in the proof; front must save this to localStorage
+      commitment: { x: BigInt(proofData.txCommit[0]), y: BigInt(proofData.txCommit[1]) },
     };
   }
 
@@ -1195,8 +1530,8 @@ export async function wrapActionLegacy(params: LegacyWrapParams): Promise<Legacy
     });
     return {
       txId: result.txHash,
-      blinding: 0n,
-      commitment: { x: 0n, y: 1n },
+      blinding,  // actual blinding used in the proof
+      commitment: { x: BigInt(proofData.txCommit[0]), y: BigInt(proofData.txCommit[1]) },
     };
   }
 

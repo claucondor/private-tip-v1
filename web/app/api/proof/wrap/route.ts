@@ -18,7 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { buildAmountDiscloseProof } from "@claucondor/sdk/crypto";
-import { randomBytes } from "@noble/hashes/utils";
+import { randomNonce256 } from "@claucondor/sdk";
 import path from "path";
 
 export const runtime = "nodejs";
@@ -46,15 +46,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // nonce: use explicit value if provided (tests/replay), else random 256-bit.
-    const nonceBig = nonce !== undefined
-      ? BigInt(nonce)
-      : (() => {
-          const bytes = randomBytes(32);
-          let n = 0n;
-          for (const b of bytes) n = (n << 8n) | BigInt(b);
-          return n;
-        })();
+    // nonce: use explicit value if provided (tests/replay), else SDK's
+    // randomNonce256 which rejection-samples within BN254 scalar field
+    // (avoids verifier reject when nonce > field modulus).
+    const nonceBig = nonce !== undefined ? BigInt(nonce) : randomNonce256();
 
     const result = await buildAmountDiscloseProof(
       { amount: BigInt(amount), blinding: BigInt(blinding), nonce: nonceBig },
