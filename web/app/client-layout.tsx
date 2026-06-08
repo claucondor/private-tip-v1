@@ -158,13 +158,19 @@ function RecoveryBanner() {
       }
 
       // v0.6: recover per-token via SDK adapter latestSnapshot.
+      // Iterate dynamically over SUPPORTED_TOKENS so adding a new token to
+      // the registry doesn't require manually updating this list (OF-5).
       const { saveShieldedState } = await import("@/lib/store");
+      const { SUPPORTED_TOKENS } = await import("@/lib/tokens");
+      const { TOKEN_REGISTRY } = await import("@claucondor/sdk/network");
       let anyRecovered = false;
-      for (const tokenId of ["flow", "mockusdc"] as const) {
+      for (const t of SUPPORTED_TOKENS) {
         try {
-          const snap = await recoverShieldedState(coaHex, privkey, tokenId);
+          // cadence-ft variant uses the Cadence wallet address; EVM tokens use the COA hex.
+          const queryAddr = TOKEN_REGISTRY[t.id].variant === "cadence-ft" ? userAddress : coaHex;
+          const snap = await recoverShieldedState(queryAddr, privkey, t.id);
           if (snap) {
-            saveShieldedState(userAddress, tokenId, {
+            saveShieldedState(userAddress, t.id, {
               balanceRaw: snap.balance.toString(),
               blinding: snap.blinding.toString(),
               lastUpdatedMs: snap.timestampMs,
@@ -173,18 +179,6 @@ function RecoveryBanner() {
           }
         } catch { /* try next token */ }
       }
-      // mockft: try with Cadence address.
-      try {
-        const snap = await recoverShieldedState(userAddress, privkey, "mockft");
-        if (snap) {
-          saveShieldedState(userAddress, "mockft", {
-            balanceRaw: snap.balance.toString(),
-            blinding: snap.blinding.toString(),
-            lastUpdatedMs: snap.timestampMs,
-          });
-          anyRecovered = true;
-        }
-      } catch { /* non-fatal */ }
 
       if (anyRecovered) {
         toast.success("Shielded state recovered from chain.");
@@ -542,7 +536,7 @@ export default function ClientLayout({
               GitHub
             </a>
             <span className="text-foreground/30">·</span>
-            <span className="font-mono text-foreground/40">v0.7.2</span>
+            <span className="font-mono text-foreground/40">v0.7.5</span>
             <span className="text-foreground/30">·</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
               testnet

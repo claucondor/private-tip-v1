@@ -25,8 +25,6 @@ import {
   getCoaEvmAddress,
   getCommitment,
   unwrapActionLegacy as unwrapAction,
-  parseFlowToWei,
-  formatWeiToFlow,
   formatPoint,
   getRecipientMemoPubkey,
   PRIVATE_TIP_CADENCE,
@@ -37,7 +35,7 @@ import {
 } from "@/lib/tip-actions";
 import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveTokenShieldedState } from "@/lib/store";
 import { TokenSelector } from "@/components/TokenSelector";
-import type { TokenId } from "@/lib/tokens";
+import { type TokenId, getTokenMeta, formatTokenAmount, parseTokenAmount } from "@/lib/tokens";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -96,11 +94,14 @@ function ClaimPageInner() {
   const [showPreAnimation, setShowPreAnimation] = useState(false);
   const [showPostAnimation, setShowPostAnimation] = useState(false);
 
+  const symbol = getTokenMeta(selectedToken).symbol;
+
   // -- Initial load -----------------------------------------------------------
 
   useEffect(() => {
     if (!userAddress) return;
     let cancelled = false;
+    setAmountFlow("");
 
     (async () => {
       try {
@@ -137,7 +138,7 @@ function ClaimPageInner() {
     })();
 
     return () => { cancelled = true; };
-  }, [userAddress]);
+  }, [userAddress, selectedToken]);
 
   // -- Unwrap handler ---------------------------------------------------------
 
@@ -152,7 +153,7 @@ function ClaimPageInner() {
 
     let amountWei: bigint;
     try {
-      amountWei = parseFlowToWei(amountFlow);
+      amountWei = parseTokenAmount(amountFlow, selectedToken);
       if (amountWei <= BigInt(0)) throw new Error("Amount must be > 0");
     } catch (err) {
       setClaimState((p) => ({ ...p, status: "error", error: err instanceof Error ? err.message : "Invalid amount" }));
@@ -163,7 +164,7 @@ function ClaimPageInner() {
     if (amountWei > oldBalance) {
       setClaimState((p) => ({
         ...p, status: "error",
-        error: `Insufficient shielded balance: have ${formatWeiToFlow(oldBalance)} FLOW, claim ${amountFlow} FLOW`,
+        error: `Insufficient shielded balance: have ${formatTokenAmount(oldBalance, selectedToken)} ${symbol}, claim ${amountFlow} ${symbol}`,
       }));
       return;
     }
@@ -207,8 +208,8 @@ function ClaimPageInner() {
       setShowPreAnimation(false);
       setShowPostAnimation(true);
 
-      setClaimState({ status: "success", error: null, txId: result.txId, unwrappedFlow: formatWeiToFlow(amountWei) });
-      toast.success("Unwrap successful!", { description: `${formatWeiToFlow(amountWei)} FLOW deposited to your Cadence vault.` });
+      setClaimState({ status: "success", error: null, txId: result.txId, unwrappedFlow: formatTokenAmount(amountWei, selectedToken) });
+      toast.success("Unwrap successful!", { description: `${formatTokenAmount(amountWei, selectedToken)} ${symbol} deposited to your Cadence vault.` });
     } catch (err) {
       setShowPreAnimation(false);
       setClaimState({
@@ -268,7 +269,7 @@ function ClaimPageInner() {
           <Wallet className="w-5 h-5 text-[#B45309]" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Withdraw FLOW</h1>
+          <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Withdraw {symbol}</h1>
           <p className="text-sm text-foreground/50">Move your private balance back to your regular wallet — one click.</p>
         </div>
       </motion.div>
@@ -286,7 +287,7 @@ function ClaimPageInner() {
             <p className="text-xs font-medium text-foreground/60 mb-1">Your private balance</p>
             {shielded ? (
               <p className="text-2xl font-bold text-[#00EF8B]" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>
-                {formatWeiToFlow(BigInt(shielded.balanceWei), 4)} FLOW
+                {formatTokenAmount(BigInt(shielded.balanceWei), selectedToken, 4)} {symbol}
               </p>
             ) : (
               <p className="text-sm text-foreground/40">
@@ -318,6 +319,7 @@ function ClaimPageInner() {
           </p>
           <PasteShieldedStateForm
             addr={userAddress!}
+            tokenId={selectedToken}
             onSaved={(s) => {
               setShielded(s);
               setClaimState({ status: "ready", error: null, txId: null, unwrappedFlow: null });
@@ -364,23 +366,23 @@ function ClaimPageInner() {
             {/* Fee disclosure */}
             {(() => {
               try {
-                const claimedWei = parseFlowToWei(amountFlow);
+                const claimedWei = parseTokenAmount(amountFlow, selectedToken);
                 if (claimedWei > 0n) {
                   const feeWei = feeBps === 0 ? 0n : (claimedWei * BigInt(feeBps)) / 10000n;
                   const netWei  = claimedWei - feeWei;
                   const feePct  = feeBps / 100;
                   return (
                     <p className="text-[10px] text-foreground/40 mt-1">
-                      Withdrawing {amountFlow} FLOW → you receive{" "}
-                      <span className="text-[#00EF8B]/70">{formatWeiToFlow(netWei, 4)} FLOW</span>
-                      {" "}(<span className="text-foreground/50">{formatWeiToFlow(feeWei, 4)} FLOW fee, {feePct}%</span>)
+                      Withdrawing {amountFlow} {symbol} → you receive{" "}
+                      <span className="text-[#00EF8B]/70">{formatTokenAmount(netWei, selectedToken, 4)} {symbol}</span>
+                      {" "}(<span className="text-foreground/50">{formatTokenAmount(feeWei, selectedToken, 4)} {symbol} fee, {feePct}%</span>)
                     </p>
                   );
                 }
               } catch { /* invalid amount */ }
               return (
                 <p className="text-[10px] text-foreground/30 mt-1">
-                  A {feeBps / 100}% fee applies. For maximum privacy, send the FLOW to a fresh wallet afterwards.
+                  A {feeBps / 100}% fee applies. For maximum privacy, send the {symbol} to a fresh wallet afterwards.
                 </p>
               );
             })()}
@@ -435,7 +437,7 @@ function ClaimPageInner() {
               <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
               <div>
                 <h3 className="text-lg font-bold mb-1 text-foreground">Unwrap successful!</h3>
-                <p className="text-xs text-foreground/50">{claimState.unwrappedFlow} FLOW now in your Cadence vault.</p>
+                <p className="text-xs text-foreground/50">{claimState.unwrappedFlow} {symbol} now in your Cadence vault.</p>
               </div>
             </div>
             <p className="font-mono text-[10px] break-all mb-3 text-foreground/40">{claimState.txId}</p>
@@ -483,20 +485,23 @@ export default function ClaimPage() {
 // MVP-paste shielded state form
 function PasteShieldedStateForm({
   addr,
+  tokenId,
   onSaved,
 }: {
   addr: string;
+  tokenId: TokenId;
   onSaved: (s: ShieldedState) => void;
 }) {
   const [balanceFlow, setBalanceFlow] = useState("");
   const [blinding, setBlinding] = useState("");
+  const tokenSymbol = getTokenMeta(tokenId).symbol;
 
   const handleSave = () => {
     try {
-      const balanceWei = parseFlowToWei(balanceFlow).toString();
+      const balanceWei = parseTokenAmount(balanceFlow, tokenId).toString();
       const blindingDec = BigInt(blinding.trim()).toString();
       const s: ShieldedState = { balanceWei, blinding: blindingDec };
-      saveShieldedState(addr, s);
+      saveShieldedState(addr, s, tokenId);
       onSaved(s);
       toast.success("Shielded state saved (session only)");
     } catch (err) {
@@ -508,7 +513,7 @@ function PasteShieldedStateForm({
     <div className="space-y-2">
       <input
         type="text"
-        placeholder="Cleartext balance (FLOW, e.g. 5)"
+        placeholder={`Cleartext balance (${tokenSymbol}, e.g. 5)`}
         value={balanceFlow}
         onChange={(e) => setBalanceFlow(e.target.value)}
         className="janus-input font-mono text-xs"
