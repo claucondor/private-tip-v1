@@ -14,3 +14,6 @@ ARCHITECTURE-*.md
 
 # misc
 .tmp_test_script.cdc
+
+# vercel
+.vercel/
