@@ -6,7 +6,8 @@
 
 import { MEMO_REGISTRY_ADDRESS } from "@claucondor/sdk/network";
 
-const CADENCE_DEPLOYER = "0x4b6bc58bc8bf5dcc";    // v0.8 openjanus-v08
+const CADENCE_DEPLOYER = "0x4b6bc58bc8bf5dcc";    // v0.8 openjanus-v08 (JanusFT, MockFT, PrivateTip, ShieldedInbox, ShieldedCheckpoint)
+const JANUSFLOW_CADENCE = "0x5dcbeb41055ec57e";   // v0.8 JanusFlow Cadence (NOT same as CADENCE_DEPLOYER)
 const EVM_SYSTEM_CONTRACT = "0x8c5303eaa26202d6"; // testnet EVM system contract
 
 /**
@@ -22,11 +23,11 @@ const EVM_SYSTEM_CONTRACT = "0x8c5303eaa26202d6"; // testnet EVM system contract
  */
 export const TX_PUBLISH_MEMOKEY_XVM = `
 import JanusFT from ${CADENCE_DEPLOYER}
-import JanusFlow from ${CADENCE_DEPLOYER}
+import JanusFlow from ${JANUSFLOW_CADENCE}
 import EVM from ${EVM_SYSTEM_CONTRACT}
 
 transaction(memoPubX: UInt256, memoPubY: UInt256) {
-    prepare(signer: auth(BorrowValue, IssueStorageCapabilityController, PublishCapability, SaveValue, Storage) &Account) {
+    prepare(signer: auth(BorrowValue, Storage, SaveValue, LoadValue, IssueStorageCapabilityController, PublishCapability, UnpublishCapability) &Account) {
 
         // ----------------------------------------------------------------
         // 1. Publish to Cadence storage path.
