@@ -1,64 +1,46 @@
 /// POST /api/proof/unwrap — build both proofs needed for JanusFlow.unwrap server-side.
 ///
 /// unwrap needs TWO proofs:
-///   1. AmountDisclose proof: proves claimedAmount binds to the current commitment.
-///   2. ConfidentialTransfer proof: proves the spend transition (old → residual).
+///   1. AmountDisclose proof:     proves claimedAmount is bound to the transfer commitment.
+///   2. ConfidentialTransfer proof: proves old commit = new (residual) commit + transfer commit.
 ///
 /// Both proof builders require Node.js (snarkjs wasm/zkey file I/O).
-/// The browser generates blindings, POSTs here, receives both proofs.
+/// The browser generates blindings, POSTs here, and receives both proof bundles.
 ///
-/// v0.7: AmountDisclose now takes a nonce (4th public input, anti-replay).
-/// The SDK's orchestrateUnwrap defaults nonce to 0n; here we pass it through.
+/// Nonce for unwrap: JanusFlow._unwrap always calls _verifyAmountDisclose(..., nonce=0).
+/// The unwrap nonce is NOT a per-user replay counter — it is always 0n on-chain.
+/// Passing any non-zero value will cause a public input mismatch and the tx reverts.
+///
+/// The SDK resolves artifact paths automatically via PACKAGE_ROOT walk-up.
 ///
 /// Body: {
+///   oldBalance: string,         // decimal string (current shielded balance, wei)
+///   oldBlinding: string,        // decimal string (current blinding from checkpoint)
 ///   claimedAmount: string,      // decimal string (full debit from commitment, wei)
-///   currentBalance: string,     // decimal string (current shielded balance, wei)
-///   currentBlinding: string,    // decimal string (current blinding from snapshot)
-///   transferBlinding: string,   // decimal string (fresh, generated client-side)
-///   newBlinding: string,        // decimal string (fresh, generated client-side)
-///   nonce?: string,             // decimal string (defaults to 0n for unwrap anti-replay)
+///   claimedBlinding: string,    // decimal string (fresh blinding for the transfer commit)
+///   newBlinding: string,        // decimal string (fresh blinding for residual commit)
+///   nonce?: string,             // decimal string (MUST be 0 for unwrap — defaults to 0n)
 /// }
 /// Response: {
-///   amountProof: string[8],           // AmountDisclose proof uint256[8]
-///   txCommit: [string, string],       // AmountDisclose [Cx, Cy]
-///   amountPublicInputs: string[4],    // [claimed_amount, Cx, Cy, nonce]
-///   transferProof: string[8],         // ConfidentialTransfer proof uint256[8]
-///   transferPublicInputs: string[6],  // [C_old.x,y, C_tx.x,y, C_new.x,y]
-///   newBlinding: string,              // echo back for snapshot encryption (same value client sent)
+///   amountDisclose: { proof: string[8], publicInputs: string[4] },
+///   transfer:       { proof: string[8], publicInputs: string[6] },
 /// }
+///
+/// The client submits both bundles in a single JanusFlow.unwrap(...) call.
+/// txCommit = amountDisclose.publicInputs[1..2], nonce = amountDisclose.publicInputs[3].
 
 import { NextRequest, NextResponse } from "next/server";
-import { buildAmountDiscloseProof, buildShieldedTransferProof } from "@claucondor/sdk/crypto";
-import path from "path";
+import { buildAmountDiscloseProof, buildShieldedTransferProof } from "@claucondor/sdk";
 
 export const runtime = "nodejs";
-
-const SDK_ROOT = path.resolve(
-  process.cwd(),
-  "node_modules",
-  "@claucondor",
-  "sdk",
-  "circuits",
-  "aggregate"
-);
-const AMOUNT_WASM = path.join(SDK_ROOT, "amount_disclose_aggregate.wasm");
-const AMOUNT_ZKEY = path.join(SDK_ROOT, "amount_disclose_aggregate_test.zkey");
-const CT_WASM = path.join(SDK_ROOT, "confidential_transfer_aggregate.wasm");
-const CT_ZKEY = path.join(SDK_ROOT, "confidential_transfer_aggregate_test.zkey");
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { claimedAmount, currentBalance, currentBlinding, transferBlinding, newBlinding, nonce } =
+    const { oldBalance, oldBlinding, claimedAmount, claimedBlinding, newBlinding, nonce } =
       body ?? {};
 
-    const required = {
-      claimedAmount,
-      currentBalance,
-      currentBlinding,
-      transferBlinding,
-      newBlinding,
-    };
+    const required = { oldBalance, oldBlinding, claimedAmount, claimedBlinding, newBlinding };
     for (const [key, val] of Object.entries(required)) {
       if (typeof val !== "string") {
         return NextResponse.json(
@@ -69,39 +51,35 @@ export async function POST(req: NextRequest) {
     }
 
     const claimedBig = BigInt(claimedAmount);
-    const balanceBig = BigInt(currentBalance);
-    const curBlindBig = BigInt(currentBlinding);
-    const txBlindBig = BigInt(transferBlinding);
-    const newBlindBig = BigInt(newBlinding);
-    // v0.7: SDK's orchestrateUnwrap defaults nonce to 0n (anti-replay, Phase B.5 fix).
+    const claimedBlindBig = BigInt(claimedBlinding);
+    // nonce MUST be 0n for JanusFlow.unwrap — hardcoded on-chain.
     const nonceBig = nonce !== undefined ? BigInt(nonce) : 0n;
 
-    // Build both proofs in parallel.
+    // Build both proofs in parallel — independent inputs.
     const [amountResult, transferResult] = await Promise.all([
-      buildAmountDiscloseProof(
-        { amount: claimedBig, blinding: txBlindBig, nonce: nonceBig },
-        { wasmPath: AMOUNT_WASM, zkeyPath: AMOUNT_ZKEY }
-      ),
-      buildShieldedTransferProof(
-        {
-          oldBalance: balanceBig,
-          oldBlinding: curBlindBig,
-          transferAmount: claimedBig,
-          transferBlinding: txBlindBig,
-          newBlinding: newBlindBig,
-        },
-        { wasmPath: CT_WASM, zkeyPath: CT_ZKEY }
-      ),
+      buildAmountDiscloseProof({
+        amount: claimedBig,
+        blinding: claimedBlindBig,
+        nonce: nonceBig,
+      }),
+      buildShieldedTransferProof({
+        oldBalance: BigInt(oldBalance),
+        oldBlinding: BigInt(oldBlinding),
+        transferAmount: claimedBig,
+        transferBlinding: claimedBlindBig,
+        newBlinding: BigInt(newBlinding),
+      }),
     ]);
 
     return NextResponse.json({
-      amountProof: Array.from(amountResult.proof).map((p) => p.toString()),
-      txCommit: [amountResult.txCommit[0].toString(), amountResult.txCommit[1].toString()],
-      // v0.7: 4 public inputs [amount, Cx, Cy, nonce]
-      amountPublicInputs: amountResult.publicInputs.map((p) => p.toString()),
-      transferProof: Array.from(transferResult.proof).map((p) => p.toString()),
-      transferPublicInputs: transferResult.publicInputs.map((p) => p.toString()),
-      newBlinding: newBlinding, // echo back for snapshot encryption
+      amountDisclose: {
+        proof: Array.from(amountResult.proof).map((p) => p.toString()),
+        publicInputs: amountResult.publicInputs.map((p) => p.toString()),
+      },
+      transfer: {
+        proof: Array.from(transferResult.proof).map((p) => p.toString()),
+        publicInputs: transferResult.publicInputs.map((p) => p.toString()),
+      },
     });
   } catch (err) {
     console.error("[/api/proof/unwrap] failed:", err);
