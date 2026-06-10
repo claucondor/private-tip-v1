@@ -1,0 +1,142 @@
+{
+  "scenario": "batch-claim",
+  "started": "2026-06-10T04:20:14.179Z",
+  "steps": {
+    "admin_reset": {
+      "cadenceTxId": "4a7c8aee4e902251258353ff437c08462fceddff9b80889353fa103e0cc7b1b2",
+      "targets": [
+        "0xFc47B35f79d26A060B652E112c53d7c6057d05FF"
+      ],
+      "bobIsFresh": true
+    },
+    "memokeys": {
+      "alice": null,
+      "bob": "0x114258accd21211dbbaa69ad7c5a32b40722359a992d5b565915374a4b84bdd1",
+      "charlie": "0xfa08a76b5724f59dc7be051f4aad78abeaaaa053e9e938c6293696bab6ad9f21"
+    },
+    "alice_wrap": {
+      "txHash": "0x2e9882917901e6411f5380260b6353fb2959f2dbefeb21fbf86e758d78cfb64d",
+      "checkpointTx": "0x4add1797adb802c580b410019f1bfb5529a6f259a975621cb8f48bf947f2bb9a",
+      "netAmount": "50000000000000000"
+    },
+    "alice_checkpoint_after_tips": {
+      "txHash": "0x30d5d08748fdf9e4b5bc647f9e0b988b80f44d3155b9e81b0a2ed8a4515fadc2"
+    },
+    "alice_tips": {
+      "count": 6,
+      "tipAmount": "5000000000000000",
+      "txHashes": [
+        "0xf061293188d03226a410473520623d6c20f57eeef99d078bd6b0e6be89ba8973",
+        "0xc394ccb8e2e27afde12ac41d94dad1ee4ef88307ea7df02b11f1100bd098f018",
+        "0x79d00b37a52435ff4e62d4c26a0cecdde14c78d99b2e143a3c933f6840644b29",
+        "0x0a63dd43786a03b77be8bc2fdad147a45e9b8e0d76971a742eb58eb81373017f",
+        "0xf098f485f86ac8c85bacc6ab01e2307df14f8712ba11b05ff3723320f793447f",
+        "0x3391629743050862b455f1d225cb6e3ccb378f5043b286c620395a1ce10bbf32"
+      ],
+      "aliceResidual": "20000000000000000"
+    },
+    "inbox_drain": {
+      "drainTxHash": "0xc67e76fab119fd5e0540c5db14b5129cb7d4acb8defcdde6de32e4e90991f02e",
+      "noteCount": 6,
+      "failedCount": 0,
+      "blindingSum": "6510951787264042154136889077510884433173690486964030197842108804199249615221",
+      "blindingOverflows2_252": false,
+      "notes": [
+        {
+          "amount": "5000000000000000",
+          "blinding": "93729927835805627995..."
+        },
+        {
+          "amount": "5000000000000000",
+          "blinding": "95852736083993963222..."
+        },
+        {
+          "amount": "5000000000000000",
+          "blinding": "33896239830219071871..."
+        },
+        {
+          "amount": "5000000000000000",
+          "blinding": "32623254934408713772..."
+        },
+        {
+          "amount": "5000000000000000",
+          "blinding": "24895140071318480422..."
+        },
+        {
+          "amount": "5000000000000000",
+          "blinding": "23039855438101709952..."
+        }
+      ]
+    },
+    "pre_batch_transfer": {
+      "bobCommitX": "13439739948371199254645649406930679312761216613345365150782550896129563800408",
+      "bobCommitY": "7703669607232433577934056885238437713176020231909315326520599257114310788818",
+      "bobCommitIsIdentity": false,
+      "blindingSum": "6510951787264042154136889077510884433173690486964030197842108804199249615221",
+      "blindingSumOverflows": false,
+      "blindingSumOverflowsSUBORDER": true,
+      "failed": true,
+      "reason": "Accumulated blinding (65109517872640421541...) >= SUBORDER. computeCommitment would throw RangeError — regular shieldedTransfer is impossible without batchClaim."
+    },
+    "batch_claim": {
+      "txHash": "0xcb9a6361462c17b3337ed99d87adefd52df6b98eb3841c522c466ff7127c05d7",
+      "verifier": "0x2FBf6baef1D70f5A9aFF2602c934Bd62dcf6Df80",
+      "newBalance": "30000000000000000",
+      "freshBlinding": "157548652201294536874518841561904358819542015920001368935063158096362856239",
+      "newCommit": {
+        "x": "6196138634592495499460853149941251436295638976610406071251272299664417460866",
+        "y": "11665069610306179573796053030994309577939563090639236950742639003542285618398"
+      },
+      "publicInputs": [
+        "13439739948371199254645649406930679312761216613345365150782550896129563800408",
+        "7703669607232433577934056885238437713176020231909315326520599257114310788818",
+        "6196138634592495499460853149941251436295638976610406071251272299664417460866",
+        "11665069610306179573796053030994309577939563090639236950742639003542285618398",
+        "0",
+        "1"
+      ]
+    },
+    "bob_checkpoint": {
+      "txHash": "0xc6ce2ef8c3dce0e137f77ec56aca80d1f575bfd75197fc1135458a6a261adb15"
+    },
+    "commit_verify": {
+      "onChain": {
+        "x": "6196138634592495499460853149941251436295638976610406071251272299664417460866",
+        "y": "11665069610306179573796053030994309577939563090639236950742639003542285618398"
+      },
+      "local": {
+        "x": "6196138634592495499460853149941251436295638976610406071251272299664417460866",
+        "y": "11665069610306179573796053030994309577939563090639236950742639003542285618398"
+      },
+      "match": true
+    },
+    "post_batch_checkpoint": {
+      "txHash": "0x53b65ee81fee80b607beb66c3aad911900792bca1fea50c52a66df22bf2b2631"
+    },
+    "post_batch_transfer": {
+      "txHash": "0x7126fd74403b67cc8b678d2fab85657db1999f62e34d8dd63e7a62ff3d15efce",
+      "amount": "5000000000000000",
+      "failed": false,
+      "error": null,
+      "bobResidual": "25000000000000000",
+      "expectedResidual": "25000000000000000",
+      "residualDelta": "0",
+      "residualCloseEnough": true
+    }
+  },
+  "verdict": "PASS",
+  "finished": "2026-06-10T04:23:29.692Z",
+  "summary": {
+    "adminReset": true,
+    "aliceWrapped": true,
+    "tipsDelivered": true,
+    "inboxDrained": true,
+    "blindingOverflows": false,
+    "preBatchFailed": true,
+    "batchClaimSucceeded": true,
+    "commitVerified": true,
+    "postBatchSendSucceeded": true,
+    "bobFinalBalance": "25000000000000000",
+    "verdict": "PASS"
+  }
+}
