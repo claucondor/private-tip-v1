@@ -60,6 +60,9 @@ const BOB_KEY   = "0x98ce0bff00e393fa28b89bf60f4d463add1d914bd869f432dac191d2e3c
 
 // JanusERC20 proxy (mUSDC wrapper)
 const JANUS_ERC20_PROXY = ADDRESSES.janusERC20;
+
+// BabyJub prime-order subgroup. Blinding must stay in [0, SUBORDER).
+const SUBORDER = 2736030358979909402780800718157159386076813972158567259200215660948447373041n;
 // MockUSDC underlying ERC20
 const MOCK_USDC_ADDR    = ADDRESSES.mockUSDC;
 
@@ -255,7 +258,7 @@ async function main() {
   const snap1 = await recoverSnapFromReceipt(wrap1.txHash, aliceJub.privkey);
   if (!snap1) throw new Error("Step 6: WrapWithSnapshot event not found");
   balance  += snap1.balance;
-  blinding += snap1.blinding;
+  blinding = (blinding + snap1.blinding) % SUBORDER;
   process.stderr.write(`[S1-mUSDC] Wrap1: cumBalance=${balance}, blinding=${blinding.toString().slice(0,12)}...\n`);
 
   const cp1      = await writeCheckpoint(cpClient, alice, aliceJub, balance, blinding);
@@ -277,7 +280,7 @@ async function main() {
   const snap2 = await recoverSnapFromReceipt(wrap2.txHash, aliceJub.privkey);
   if (!snap2) throw new Error("Step 7: WrapWithSnapshot event not found");
   balance  += snap2.balance;
-  blinding += snap2.blinding;
+  blinding = (blinding + snap2.blinding) % SUBORDER;
   process.stderr.write(`[S1-mUSDC] Wrap2: cumBalance=${balance}, blinding=${blinding.toString().slice(0,12)}...\n`);
 
   const cp2      = await writeCheckpoint(cpClient, alice, aliceJub, balance, blinding);
@@ -299,7 +302,7 @@ async function main() {
   const snap3 = await recoverSnapFromReceipt(wrap3.txHash, aliceJub.privkey);
   if (!snap3) throw new Error("Step 8: WrapWithSnapshot event not found");
   balance  += snap3.balance;
-  blinding += snap3.blinding;
+  blinding = (blinding + snap3.blinding) % SUBORDER;
   process.stderr.write(`[S1-mUSDC] Wrap3: cumBalance=${balance}, blinding=${blinding.toString().slice(0,12)}...\n`);
 
   const cp3      = await writeCheckpoint(cpClient, alice, aliceJub, balance, blinding);
