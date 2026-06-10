@@ -8,22 +8,34 @@
 				"testnet": "8c5303eaa26202d6"
 			}
 		},
-		"IPrivateTipImpl": {
-			"source": "./cadence/contracts/IPrivateTipImpl.cdc",
+		"JanusFT": {
+			"source": "/home/oydual3/openjanus-contracts/packages/janus-ft/contracts/cadence/JanusFT.cdc",
 			"aliases": {
-				"testnet": "b9ac529c14a4c5a1"
+				"testnet": "4b6bc58bc8bf5dcc"
+			}
+		},
+		"MockFT": {
+			"source": "/home/oydual3/openjanus-contracts/packages/janus-ft/contracts/cadence/mocks/MockFT.cdc",
+			"aliases": {
+				"testnet": "4b6bc58bc8bf5dcc"
 			}
 		},
 		"PrivateTip": {
 			"source": "./cadence/contracts/PrivateTip.cdc",
 			"aliases": {
-				"testnet": "b9ac529c14a4c5a1"
+				"testnet": "4b6bc58bc8bf5dcc"
 			}
 		},
-		"PrivateTipImpl": {
-			"source": "./cadence/contracts/PrivateTipImpl.cdc",
+		"ShieldedCheckpoint": {
+			"source": "/home/oydual3/openjanus-contracts/packages/shielded-recovery/contracts/cadence/ShieldedCheckpoint.cdc",
 			"aliases": {
-				"testnet": "b9ac529c14a4c5a1"
+				"testnet": "4b6bc58bc8bf5dcc"
+			}
+		},
+		"ShieldedInbox": {
+			"source": "/home/oydual3/openjanus-contracts/packages/shielded-recovery/contracts/cadence/ShieldedInbox.cdc",
+			"aliases": {
+				"testnet": "4b6bc58bc8bf5dcc"
 			}
 		}
 	},
@@ -96,6 +108,13 @@
 				"location": "emulator-account.pkey"
 			}
 		},
+		"openjanus-v08": {
+			"address": "4b6bc58bc8bf5dcc",
+			"key": {
+				"type": "file",
+				"location": "/home/oydual3/.flow/openjanus-v08.pkey"
+			}
+		},
 		"openjanus-privatetip-router": {
 			"address": "b9ac529c14a4c5a1",
 			"key": {
@@ -143,9 +162,7 @@
 	},
 	"deployments": {
 		"testnet": {
-			"openjanus-privatetip-router": [
-				"IPrivateTipImpl",
-				"PrivateTipImpl",
+			"openjanus-v08": [
 				"PrivateTip"
 			]
 		}
