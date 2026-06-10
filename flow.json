@@ -109,18 +109,20 @@
 				"location": "emulator-account.pkey"
 			}
 		},
-		"openjanus-v08": {
-			"address": "4b6bc58bc8bf5dcc",
-			"key": {
-				"type": "file",
-				"location": "/home/oydual3/.flow/openjanus-v08.pkey"
-			}
-		},
 		"openjanus-privatetip-router": {
 			"address": "b9ac529c14a4c5a1",
 			"key": {
 				"type": "file",
 				"location": "/home/oydual3/.flow/openjanus-privatetip-router.pkey"
+			}
+		},
+		"openjanus-v08": {
+			"address": "4b6bc58bc8bf5dcc",
+			"key": {
+				"type": "file",
+				"signatureAlgorithm": "ECDSA_secp256k1",
+				"hashAlgorithm": "SHA2_256",
+				"location": "/home/oydual3/.flow/openjanus-v08.pkey"
 			}
 		},
 		"testnet-bob": {
