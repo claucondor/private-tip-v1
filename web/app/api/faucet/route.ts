@@ -148,9 +148,9 @@ transaction(amount: UFix64, to: Address) {
 const FLOW_EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 const EVM_CHAIN_ID = 545;
 
-// mUSDC ERC20 address on Flow EVM testnet (canonical from janus-erc20-v0.4 deployment).
+// mUSDC ERC20 address on Flow EVM testnet — v0.8 underlying (was 0x686E… v0.7).
 // Faucet sends underlying mUSDC directly (not the shielded proxy).
-const MOCK_USDC_ADDR = "0x686E8d90A7B608540cAF46E527fD8a5631A1b658";
+const MOCK_USDC_ADDR = "0xd49Ff950279841aaEcf642E85C3a0bBc1FB4B524";
 
 const ERC20_TRANSFER_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
