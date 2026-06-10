@@ -152,22 +152,15 @@ export default function StatusPage() {
     setActivationStep("step2_pending");
     setActivationError(null);
     try {
-      const { activateAccount } = await import("@/lib/tip-actions");
-      const { ethers } = await import("ethers");
+      const { activateAccount, loadMemoPrivkey } = await import("@/lib/tip-actions");
+      const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
 
-      // Flow Wallet exposes the user's COA via window.ethereum (EIP-1193).
-      const w = window as unknown as { ethereum?: unknown };
-      if (!w.ethereum) {
-        throw new Error(
-          "EVM provider not available — make sure your Flow Wallet supports EVM (window.ethereum)."
-        );
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const browserProvider = new ethers.BrowserProvider(w.ethereum as any);
-      // JsonRpcSigner is structurally compatible with ethers.Wallet for publishMemoKey + FCL install ops.
-      const evmSigner = (await browserProvider.getSigner()) as never;
+      // FCL cross-VM tx — single Flow Wallet popup, no MetaMask, no Rainbow, no window.ethereum.
+      const privkey = loadMemoPrivkey(userAddress);
+      if (!privkey) throw new Error("Session key missing — complete Step 1 first.");
+      const pubkey = await pubkeyFromPrivkey(privkey);
 
-      const activation = await activateAccount(userAddress, evmSigner);
+      const activation = await activateAccount(userAddress, { privkey, pubkey });
       const txLabel = activation.memoKeyTxHash
         ? `MemoKey: ${activation.memoKeyTxHash.slice(0, 10)}…`
         : activation.installTxId

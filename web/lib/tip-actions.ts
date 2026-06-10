@@ -5,10 +5,10 @@
 ///     (on-chain, per-user encrypted store). No localStorage for balance/blinding.
 ///   - Incoming notes arrive via ShieldedInbox; drain with drainAndDecrypt().
 ///   - EVM write ops that need msg.sender (checkpoint updates, inbox drain) require
-///     an ethers.Wallet. Pages construct this via window.ethereum BrowserProvider
-///     (wired in Phase 4-6).
-///   - Cadence-only ops (wrap, send, unwrap, inbox install, checkpoint install)
-///     go through FCL + COA; no ethers.Wallet needed.
+///     an ethers.Wallet. Pages construct this via createEvmWallet (COA-key-derived).
+///   - Cadence-only ops AND account activation go through FCL + COA; no window.ethereum.
+///   - activateAccount() uses a single FCL cross-VM tx (TX_PUBLISH_MEMOKEY_XVM) —
+///     no MetaMask, no Rainbow, no ethers.BrowserProvider for the activation path.
 ///
 /// Deprecated v0.7 patterns removed:
 ///   - TX_SMART_SETUP / smartSetupAccount — replaced by cadenceTx.installInboxAndCheckpoint()
@@ -321,8 +321,9 @@ export function loadMemoPrivkey(flowAddr: string): bigint | null {
 
 export interface ActivateAccountResult {
   /**
-   * Transaction hash of the MemoKey publish EVM tx.
-   * null if skipped (key already published).
+   * Transaction ID of the Cross-VM Cadence tx that published the BabyJub pubkey
+   * to both Cadence storage and the EVM MemoKeyRegistry via the user's COA.
+   * null if skipped (key already published — idempotent check).
    */
   memoKeyTxHash: string | null;
   /**
@@ -334,52 +335,61 @@ export interface ActivateAccountResult {
 }
 
 /**
- * 3-step account activation (v0.8, all idempotent):
- * 1. Derive BabyJub keypair from wallet signature.
- * 2. Publish MemoKey to MemoKeyRegistry via EVM (evmSigner).
- * 3. Install ShieldedInbox + ShieldedCheckpoint Cadence resources via FCL.
+ * Account activation (v0.8, all idempotent). Single Flow Wallet path — NO window.ethereum.
  *
- * Steps 2 and 3 are skipped if already done (idempotent).
+ * 1. Publish BabyJub pubkey to Cadence storage + EVM MemoKeyRegistry via a single
+ *    FCL cross-VM Cadence transaction (TX_PUBLISH_MEMOKEY_XVM). The user's COA is
+ *    msg.sender for the EVM call — no MetaMask, no Rainbow, no ethers.BrowserProvider.
+ * 2. Install ShieldedInbox + ShieldedCheckpoint Cadence resources via FCL (idempotent).
  *
- * @param flowAddr  Caller's Cadence address.
- * @param evmSigner Ethers wallet (COA-derived) for EVM MemoKey publish.
+ * @param flowAddr Caller's Cadence address.
+ * @param keypair  BabyJub keypair (privkey + pubkey). Derive via getOrDeriveMemoPrivkey
+ *                 + pubkeyFromPrivkey before calling this.
  */
 export async function activateAccount(
   flowAddr: string,
-  evmSigner: ethers.Wallet
+  keypair: { privkey: bigint; pubkey: Point },
 ): Promise<ActivateAccountResult> {
-  // Step 1: Derive + cache keypair
-  let kp = await (async () => {
-    const cached = getCachedMemoPrivkey(flowAddr);
-    if (cached !== null) {
-      const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
-      const pubkey = await pubkeyFromPrivkey(cached);
-      return { privkey: cached, pubkey };
-    }
-    const derived = await deriveMemoKeyFromWallet();
-    cacheMemoPrivkey(flowAddr, derived.privkey);
-    return derived;
-  })();
+  const { TX_PUBLISH_MEMOKEY_XVM } = await import("./cadence-tx");
+  const fcl = await getFcl();
 
-  // Step 2: Publish MemoKey to EVM MemoKeyRegistry (idempotent — check first)
+  // Step 1: Publish BabyJub pubkey to Cadence storage + EVM MemoKeyRegistry.
+  // Single Flow Wallet popup — COA is msg.sender, no ethers.BrowserProvider needed.
+  // Idempotent at the contract level (re-publishing same key is a harmless overwrite),
+  // but we skip if already published to avoid unnecessary gas.
   let memoKeyTxHash: string | null = null;
+  const coaAddr = await sdkGetCoaEvmAddress(flowAddr, "testnet").catch(() => null);
   const adapter = sdk.token("flow");
-  const existing = await adapter.getMemoKey(evmSigner.address);
+  const existing = coaAddr
+    ? await adapter.getMemoKey(coaAddr).catch(() => null)
+    : null;
   if (!existing || (existing.x === 0n && existing.y === 0n)) {
-    const result = await adapter.publishMemoKey(kp, evmSigner);
-    memoKeyTxHash = result.txHash;
+    const memoKeyTxId: string = await fcl.mutate({
+      cadence: TX_PUBLISH_MEMOKEY_XVM,
+      args: (arg: (v: string, t: unknown) => unknown, t: { UInt256: unknown }) => [
+        arg(keypair.pubkey.x.toString(), t.UInt256),
+        arg(keypair.pubkey.y.toString(), t.UInt256),
+      ],
+      proposer: fcl.authz,
+      payer: fcl.authz,
+      authorizations: [fcl.authz],
+      limit: 9999,
+    });
+    await fcl.tx(memoKeyTxId).onceSealed();
+    memoKeyTxHash = memoKeyTxId;
   }
 
-  // Step 3: Install ShieldedInbox + ShieldedCheckpoint via FCL Cadence tx
+  // Step 2: Install ShieldedInbox + ShieldedCheckpoint via FCL Cadence tx (idempotent)
   let installTxId: string | null = null;
   const cpClient = new ShieldedCheckpointClient();
   const ibClient = new ShieldedInboxClient();
   const [cpExists, ibCount] = await Promise.all([
-    cpClient.exists(evmSigner.address),
-    ibClient.count(evmSigner.address).then(() => true).catch(() => false),
+    coaAddr ? cpClient.exists(coaAddr) : Promise.resolve(false),
+    coaAddr
+      ? ibClient.count(coaAddr).then(() => true).catch(() => false)
+      : Promise.resolve(false),
   ]);
   if (!cpExists || !ibCount) {
-    const fcl = await getFcl();
     installTxId = await fcl.mutate({
       cadence: cadenceTx.installInboxAndCheckpoint(),
       args: () => [],
@@ -391,7 +401,7 @@ export async function activateAccount(
     await fcl.tx(installTxId).onceSealed();
   }
 
-  return { memoKeyTxHash, installTxId, pubkey: kp.pubkey };
+  return { memoKeyTxHash, installTxId, pubkey: keypair.pubkey };
 }
 
 // ─── v0.8 Core: getShieldedState ─────────────────────────────────────────────
