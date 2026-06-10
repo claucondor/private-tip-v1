@@ -59,10 +59,6 @@ function FaucetPageInner() {
   const [hasMockFTVault, setHasMockFTVault] = useState<boolean | null>(null);
   const [isSettingUpVault, setIsSettingUpVault] = useState(false);
 
-  // JanusFT registry state: null = unknown/checking, "none" | "current" | "stale" once known
-  const [janusFTRegistryState, setJanusFTRegistryState] = useState<"none" | "current" | "stale" | null>(null);
-  const [isInstallingRegistry, setIsInstallingRegistry] = useState(false);
-
   useEffect(() => {
     if (userAddress && !recipient) setRecipient(userAddress);
   }, [userAddress, recipient]);
@@ -86,36 +82,18 @@ function FaucetPageInner() {
     }
   }, []);
 
-  // Re-check JanusFT registry state — Phase 3 will rewrite using activateAccount().
-  // Phase 1 left this here intentionally because it consumes lib functions whose rewrite happens later.
-  const recheckRegistryState = useCallback(async (_addr: string) => {
-    // checkJanusFTRegistryState removed in v0.8; registry install is now part of activateAccount().
-    setJanusFTRegistryState("none");
-  }, []);
-
   useEffect(() => {
     if (selectedToken === "mockft" && recipient && /^0x[a-fA-F0-9]{16}$/.test(recipient)) {
       recheckMockFTVault(recipient);
-      // Only check registry state for the connected user (not arbitrary addresses)
-      if (userAddress && userAddress === recipient) {
-        recheckRegistryState(recipient);
-      }
     } else if (selectedToken !== "mockft") {
       setHasMockFTVault(null);
-      setJanusFTRegistryState(null);
     }
-  }, [selectedToken, recipient, userAddress, recheckMockFTVault, recheckRegistryState]);
+  }, [selectedToken, recipient, recheckMockFTVault]);
 
   const getState = (token: TokenId): ClaimState =>
     states[token] ?? { status: "idle" };
   const setState = (token: TokenId, s: ClaimState) =>
     setStates((prev) => ({ ...prev, [token]: s }));
-
-  // Phase 3 will rewrite — signInstallJanusFTRegistryTx removed in Phase 1.
-  // Phase 1 left this here intentionally because it consumes lib functions whose rewrite happens later.
-  const handleInstallRegistry = useCallback(async () => {
-    throw new Error("Not implemented in Phase 1 — wait for Phase 3 (activateAccount)");
-  }, []);
 
   const handleSetupVault = useCallback(async () => {
     if (!userAddress) {
@@ -272,63 +250,6 @@ function FaucetPageInner() {
           <div className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-white/10 bg-white/5 text-foreground/40 text-sm">
             <Loader2 className="w-4 h-4 animate-spin" />
             Checking MockFT vault…
-          </div>
-        )}
-
-        {/* JanusFT shielded registry section — only when wallet connected + mockft selected */}
-        {selectedToken === "mockft" && hasMockFTVault === true && userAddress && userAddress === recipient && (
-          <div className="space-y-2">
-            <div className="text-xs text-foreground/50 bg-blue-950/20 border border-blue-500/20 rounded px-3 py-2">
-              <span className="font-medium text-blue-300">Shielded wrap setup:</span>{" "}
-              Before your first MockFT wrap, you need a JanusFT registry installed
-              on your account. This is separate from the regular vault above.
-              {janusFTRegistryState === "stale" && (
-                <span className="block mt-1 text-amber-300 font-medium">
-                  A v0.6 registry was found. It must be replaced before wrapping.
-                  Your previous shielded MockFT balance (if any) remains frozen in the
-                  legacy contract and cannot be recovered.
-                </span>
-              )}
-            </div>
-
-            {/* Checking registry state spinner */}
-            {janusFTRegistryState === null && (
-              <div className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-white/10 bg-white/5 text-foreground/40 text-sm">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Checking JanusFT registry…
-              </div>
-            )}
-
-            {/* Already current — show checkmark */}
-            {janusFTRegistryState === "current" && (
-              <div className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-[#00EF8B]/30 bg-[#00EF8B]/5 text-[#00EF8B] text-sm font-medium">
-                <Wrench className="w-4 h-4" />
-                Shielded wrap registry already activated ✓
-              </div>
-            )}
-
-            {/* Needs install or replace */}
-            {(janusFTRegistryState === "none" || janusFTRegistryState === "stale") && (
-              <button
-                onClick={handleInstallRegistry}
-                disabled={isInstallingRegistry}
-                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-blue-500/50 bg-blue-500/10 text-blue-300 font-medium hover:bg-blue-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {isInstallingRegistry ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    {janusFTRegistryState === "stale" ? "Replacing registry…" : "Installing registry…"}
-                  </>
-                ) : (
-                  <>
-                    <Wrench className="w-4 h-4" />
-                    {janusFTRegistryState === "stale"
-                      ? "Replace v0.6 registry (required)"
-                      : "Activate MockFT shielded wrap"}
-                  </>
-                )}
-              </button>
-            )}
           </div>
         )}
 
