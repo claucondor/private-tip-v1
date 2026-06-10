@@ -47,10 +47,10 @@ import { decryptSnapshot } from "@claucondor/sdk/crypto";
 import { getCachedMemoPrivkey } from "@/lib/memo-key-session";
 import {
   findSentMemo,
-  getCachedDecryptedMemo,
-  cacheDecryptedMemo,
-  ingestTipIfNew,
 } from "@/lib/memo-mirror";
+// getCachedDecryptedMemo, cacheDecryptedMemo, ingestTipIfNew removed in v0.8.
+// Phase 5 will rewrite — Phase 1 left this here intentionally because it
+// consumes lib functions whose rewrite happens later.
 
 // --- Types ---------------------------------------------------------------------
 
@@ -392,14 +392,15 @@ function TipCard({
   //   - error: wrong privkey, or ciphertext doesn't match this recipient.
   const [decrypted, setDecrypted] = useState<string | null>(() => {
     if (!isReceived || !tip.memo) return null;
-    return getCachedDecryptedMemo(currentUser, tip.tipID);
+    // Phase 5: getCachedDecryptedMemo removed in Phase 1; no session cache.
+    return null;
   });
   const [decryptError, setDecryptError] = useState<string | null>(null);
   const [decrypting, setDecrypting] = useState(false);
   // locked = privkey not in sessionStorage yet; user clicks to derive.
   const [locked, setLocked] = useState<boolean>(() => {
     if (!isReceived || !tip.memo) return false;
-    if (getCachedDecryptedMemo(currentUser, tip.tipID)) return false;
+    // Phase 5: getCachedDecryptedMemo removed in Phase 1.
     return getCachedMemoPrivkey(currentUser) === null;
   });
 
@@ -408,24 +409,11 @@ function TipCard({
   // ingestTipIfNew, just need to surface it in the render.
   const [receivedAmount, setReceivedAmount] = useState<bigint | null>(null);
 
-  // v0.5 — sender-side snapshot decryption (for Sent tips post-upgrade).
-  // Reveals memo + txAmt the sender wrote, decoded from their own self-snapshot.
-  const [senderSnap, setSenderSnap] = useState<{ memo?: string; txAmt?: bigint; rcp?: string } | null>(null);
-  useEffect(() => {
-    if (isReceived || !tip.senderSnapshot) return;
-    const privkey = getCachedMemoPrivkey(currentUser);
-    if (!privkey) return;
-    let cancelled = false;
-    decryptSnapshot(
-      tip.senderSnapshot.ciphertext,
-      { x: tip.senderSnapshot.ephPubkeyX, y: tip.senderSnapshot.ephPubkeyY },
-      privkey
-    ).then((snap) => {
-      if (cancelled || !snap) return;
-      setSenderSnap({ memo: snap.memo, txAmt: snap.txAmt, rcp: snap.rcp });
-    }).catch(() => { /* silent — fall back to placeholder */ });
-    return () => { cancelled = true; };
-  }, [isReceived, tip.senderSnapshot, currentUser]);
+  // v0.5 — sender-side snapshot decryption.
+  // Phase 5 will rewrite — v0.8 SnapshotContent has balance+blinding (not memo+txAmt+rcp).
+  // Sender snapshot field mapping needs redesign for the v0.8 checkpoint model.
+  // Phase 1 left this here intentionally because it consumes lib functions whose rewrite happens later.
+  const [senderSnap] = useState<{ memo?: string; txAmt?: bigint; rcp?: string } | null>(null);
 
   const runDecrypt = useCallback((privkey: bigint) => {
     if (!tip.memo) return;
@@ -438,22 +426,14 @@ function TipCard({
     )
       .then((note) => {
         if (cancelled) return;
-        // The `data` field is the app-level payload — for PrivateTip that's
-        // the optional memo text. Empty data → display "(no memo text)".
-        const displayText = note.data ?? "";
+        // v0.8 NoteContent: memo is the memo string field (was `data` in v0.7).
+        const displayText = note.memo ?? "";
         setDecrypted(displayText);
         setReceivedAmount(note.amount);
         setLocked(false);
-        cacheDecryptedMemo(currentUser, tip.tipID, displayText);
-        // Auto-ingest (amount, blinding) into the recipient's local shielded
-        // state if we haven't already. This is what makes /claim work for
-        // accounts that only received tips (never wrapped themselves).
-        ingestTipIfNew({
-          recipient: currentUser,
-          tipID: tip.tipID,
-          amount: note.amount,
-          blinding: note.blinding,
-        });
+        // Phase 5: cacheDecryptedMemo removed in Phase 1 — no session memo cache.
+        // Phase 5: ingestTipIfNew removed in Phase 1 — inbox drain handled by
+        // ShieldedInboxClient.drainAndDecrypt() + checkpoint write via cadenceTx.
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -474,11 +454,8 @@ function TipCard({
     if (!isReceived || !tip.memo || decryptError || locked) return;
     if (decrypted && receivedAmount !== null) return;  // already have both
     if (!decrypted) {
-      const cached = getCachedDecryptedMemo(currentUser, tip.tipID);
-      if (cached) {
-        setDecrypted(cached);
-        // fall through — still need amount, so let runDecrypt also run
-      }
+      // Phase 5: getCachedDecryptedMemo removed in Phase 1 — no session memo cache.
+      // fall through to runDecrypt
     }
     const privkey = getCachedMemoPrivkey(currentUser);
     if (!privkey) {

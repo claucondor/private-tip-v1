@@ -15,9 +15,9 @@ import {
   FT_CONFIGS,
   checkReceiverCapability,
   signSetupTx,
-  checkJanusFTRegistryState,
-  signInstallJanusFTRegistryTx,
 } from "@/lib/ft-setup";
+// checkJanusFTRegistryState and signInstallJanusFTRegistryTx removed in v0.8.
+// Phase 3 will rewrite using activateAccount() from tip-actions.ts.
 
 type ClaimState =
   | { status: "idle" }
@@ -86,15 +86,11 @@ function FaucetPageInner() {
     }
   }, []);
 
-  // Re-check JanusFT registry state (for shielded wrap activation).
-  const recheckRegistryState = useCallback(async (addr: string) => {
-    setJanusFTRegistryState(null);
-    try {
-      const state = await checkJanusFTRegistryState(addr);
-      setJanusFTRegistryState(state);
-    } catch {
-      setJanusFTRegistryState("none");
-    }
+  // Re-check JanusFT registry state — Phase 3 will rewrite using activateAccount().
+  // Phase 1 left this here intentionally because it consumes lib functions whose rewrite happens later.
+  const recheckRegistryState = useCallback(async (_addr: string) => {
+    // checkJanusFTRegistryState removed in v0.8; registry install is now part of activateAccount().
+    setJanusFTRegistryState("none");
   }, []);
 
   useEffect(() => {
@@ -115,28 +111,11 @@ function FaucetPageInner() {
   const setState = (token: TokenId, s: ClaimState) =>
     setStates((prev) => ({ ...prev, [token]: s }));
 
+  // Phase 3 will rewrite — signInstallJanusFTRegistryTx removed in Phase 1.
+  // Phase 1 left this here intentionally because it consumes lib functions whose rewrite happens later.
   const handleInstallRegistry = useCallback(async () => {
-    if (!userAddress) {
-      toast.error("Connect your wallet first");
-      return;
-    }
-    setIsInstallingRegistry(true);
-    try {
-      const { txId } = await signInstallJanusFTRegistryTx();
-      toast.success(
-        janusFTRegistryState === "stale"
-          ? "JanusFT registry replaced ✓"
-          : "JanusFT registry activated ✓",
-        { description: `tx: ${txId.slice(0, 12)}…` }
-      );
-      await recheckRegistryState(userAddress);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Install failed";
-      toast.error(msg);
-    } finally {
-      setIsInstallingRegistry(false);
-    }
-  }, [userAddress, janusFTRegistryState, recheckRegistryState]);
+    throw new Error("Not implemented in Phase 1 — wait for Phase 3 (activateAccount)");
+  }, []);
 
   const handleSetupVault = useCallback(async () => {
     if (!userAddress) {

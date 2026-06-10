@@ -46,7 +46,9 @@ import {
   getOrDeriveMemoPrivkey,
   type Point,
 } from "@/lib/tip-actions";
-import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveTokenShieldedState } from "@/lib/store";
+// loadShieldedState and saveShieldedState removed from @/lib/store in v0.8.
+// Phase 4/5/6 will rewrite — Phase 1 left this here intentionally because it
+// consumes lib functions whose rewrite happens later.
 import { TokenSelector } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
 import { parseTokenAmount, formatTokenAmount, getTokenMeta } from "@/lib/tokens";
@@ -58,21 +60,21 @@ import { PedersenCommitFormation } from "@/components/animations/PedersenCommitF
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
-// --- Local-storage helpers (v0.6 multi-token key format) ----------------------
+// --- Local-storage helpers (Phase 1 stubs) ------------------------------------
+// Phase 4/5/6 will rewrite these using ShieldedCheckpointClient.readAndDecrypt()
+// and cadenceTx.updateCheckpointViaCoa(). localStorage-backed state removed in v0.8.
 
 interface ShieldedState {
   balanceWei: string;
   blinding: string;
 }
 
-function loadShieldedState(addr: string, tokenId: TokenId = "flow"): ShieldedState | null {
-  const s = loadTokenShieldedState(addr, tokenId);
-  if (!s) return null;
-  return { balanceWei: s.balanceRaw, blinding: s.blinding };
+function loadShieldedState(_addr: string, _tokenId: TokenId = "flow"): ShieldedState | null {
+  return null;
 }
 
-function saveShieldedState(addr: string, state: ShieldedState, tokenId: TokenId = "flow"): void {
-  saveTokenShieldedState(addr, tokenId, { balanceRaw: state.balanceWei, blinding: state.blinding });
+function saveShieldedState(_addr: string, _state: ShieldedState, _tokenId: TokenId = "flow"): void {
+  // no-op in Phase 1
 }
 
 // --- Status types ------------------------------------------------------------

@@ -182,6 +182,7 @@ export async function parseWrapSnapshot(
         const ephX = BigInt(parsed.args.ephPubkeyX);
         const ephY = BigInt(parsed.args.ephPubkeyY);
         const snap = await decryptSnapshot(encBytes, { x: ephX, y: ephY }, memoPrivkey);
+        if (!snap) continue;
         return { balance: snap.balance, blinding: snap.blinding };
       }
     } catch {
@@ -352,7 +353,7 @@ export async function activateAccount(
     const cached = getCachedMemoPrivkey(flowAddr);
     if (cached !== null) {
       const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
-      const pubkey = pubkeyFromPrivkey(cached);
+      const pubkey = await pubkeyFromPrivkey(cached);
       return { privkey: cached, pubkey };
     }
     const derived = await deriveMemoKeyFromWallet();
