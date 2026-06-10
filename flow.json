@@ -23,6 +23,7 @@
 		"PrivateTip": {
 			"source": "./cadence/contracts/PrivateTip.cdc",
 			"aliases": {
+				"testing": "0000000000000014",
 				"testnet": "4b6bc58bc8bf5dcc"
 			}
 		},

@@ -6,28 +6,26 @@
 ///
 /// Coverage
 /// --------
-///  1.  Contract deployment succeeds + nextTipID starts at 1
+///  1.  Contract deployment succeeds
 ///  2.  totalTips() returns 0 on fresh deploy
-///  3.  recordTip increments tip ID correctly (first tip = ID 1)
-///  4.  recordTip emits TipRecorded event
-///  5.  getTip retrieves correct metadata
-///  6.  getTip returns nil for unknown ID
-///  7.  getTipsBySender returns correct array
-///  8.  getTipsByRecipient returns correct array
-///  9.  getTipsBySender returns empty for unknown sender
-/// 10.  getTipsByRecipient returns empty for unknown recipient
-/// 11.  Multiple tips from same sender — chronological order preserved
-/// 12.  Multiple tips to same recipient — chronological order preserved
-/// 13.  Multi-token: FLOW + mUSDC + MockFT tips all indexed correctly
-/// 14.  totalTips() matches number of recorded tips
-/// 15.  adminReset wipes all state and resets ID to 1
-/// 16.  adminReset panics when called without AdminProof (access denied)
+///  3.  recordTip increments tip count correctly (first tip = ID 1)
+///  4.  getTip retrieves tip after recordTip
+///  5.  getTip returns nil for unknown ID
+///  6.  getTipsBySender returns correct array
+///  7.  getTipsByRecipient returns correct array
+///  8.  getTipsBySender returns empty for unknown sender
+///  9.  getTipsByRecipient returns empty for unknown recipient
+/// 10.  Multiple tips from same sender — array size matches
+/// 11.  Multiple tips to same recipient — array size matches
+/// 12.  Multi-token tips all indexed correctly
+/// 13.  totalTips matches number of recorded tips (incremental)
+/// 14.  adminReset wipes state and resets ID counter to 1
+/// 15.  adminReset panics when called without AdminProof (access denied)
+/// 16.  Post-reset: new tips start from ID 1 again
 ///
-/// Test strategy:
-///   PrivateTip has no contract-level imports (standalone metadata index).
-///   Tests cover all public functions using inline Cadence transaction code
-///   so this suite runs fully in the in-memory test environment without
-///   requiring testnet or additional contract deployments.
+/// PrivateTip has no contract-level imports (standalone metadata index).
+/// Tests cover all public functions via helpers/record_tip.cdc +
+/// helpers/admin_reset.cdc — no external contract deployments needed.
 
 import Test
 import BlockchainHelpers
@@ -36,21 +34,22 @@ import BlockchainHelpers
 // Test accounts
 // ---------------------------------------------------------------------------
 
-/// deployer gets the PrivateTip.AdminProof resource (saved in init).
-access(all) let deployer = Test.getAccount(0x0000000000000013)
+/// deployer gets the PrivateTip.AdminProof resource (saved during init).
+/// Matches the "testing" alias in flow.json: 0000000000000014.
+access(all) let deployer = Test.getAccount(0x0000000000000014)
 access(all) let alice    = Test.createAccount()
 access(all) let bob      = Test.createAccount()
 access(all) let carol    = Test.createAccount()
-/// eve has no AdminProof — used to test adminReset access control.
+/// eve has no AdminProof — used to verify adminReset access control.
 access(all) let eve      = Test.createAccount()
 
 // ---------------------------------------------------------------------------
-// Tip fixtures
+// Token contract address fixtures (match testnet v0.8 deployment)
 // ---------------------------------------------------------------------------
 
-access(all) let TOKEN_FLOW:    String = "0xA64340C1d356835A2450306Ffd290Ed52c001Ad3"
-access(all) let TOKEN_MUSDC:   String = "0xFD8F82bE1782AF1F85f4673065e94fb3F8D5387d"
-access(all) let TOKEN_MOCKFT:  String = "0x4b6bc58bc8bf5dcc"
+access(all) let TOKEN_FLOW:   String = "0xA64340C1d356835A2450306Ffd290Ed52c001Ad3"
+access(all) let TOKEN_MUSDC:  String = "0xFD8F82bE1782AF1F85f4673065e94fb3F8D5387d"
+access(all) let TOKEN_MOCKFT: String = "0x4b6bc58bc8bf5dcc"
 
 // ---------------------------------------------------------------------------
 // Block height captured after setup (for Test.reset between tests)
@@ -78,12 +77,9 @@ access(all) fun beforeEach() {
 }
 
 // ---------------------------------------------------------------------------
-// Helper transactions (inline Cadence code — no external imports needed
-// because PrivateTip has no contract-level dependencies)
+// Helper: record a tip via helpers/record_tip.cdc
 // ---------------------------------------------------------------------------
 
-/// Record a tip from `sender` to `recipient` with the given token details.
-/// Returns the tipID emitted from the TipRecorded event.
 access(all) fun recordTip(
     sender:        Test.TestAccount,
     recipient:     Address,
@@ -91,26 +87,7 @@ access(all) fun recordTip(
     tokenSymbol:   String
 ) {
     let tx = Test.Transaction(
-        code: """
-            import "PrivateTip"
-
-            transaction(recipient: Address, tokenContract: String, tokenSymbol: String) {
-                let senderRef: auth(BorrowValue) &Account
-
-                prepare(signer: auth(BorrowValue) &Account) {
-                    self.senderRef = signer
-                }
-
-                execute {
-                    PrivateTip.recordTip(
-                        sender:        self.senderRef,
-                        recipient:     recipient,
-                        tokenContract: tokenContract,
-                        tokenSymbol:   tokenSymbol
-                    )
-                }
-            }
-        """,
+        code:        Test.readFile("helpers/record_tip.cdc"),
         authorizers: [sender.address],
         signers:     [sender],
         arguments:   [recipient, tokenContract, tokenSymbol]
@@ -119,32 +96,8 @@ access(all) fun recordTip(
     Test.expect(result, Test.beSucceeded())
 }
 
-/// Execute adminReset signed by `signer`.
-access(all) fun doAdminReset(signer: Test.TestAccount) {
-    let tx = Test.Transaction(
-        code: """
-            import "PrivateTip"
-
-            transaction {
-                prepare(signer: auth(BorrowValue) &Account) {
-                    let adminProof = signer.storage.borrow<auth(PrivateTip.Admin) &PrivateTip.AdminProof>(
-                        from: PrivateTip.AdminStoragePath
-                    ) ?? panic("not admin")
-
-                    PrivateTip.adminReset(admin: adminProof)
-                }
-            }
-        """,
-        authorizers: [signer.address],
-        signers:     [signer],
-        arguments:   []
-    )
-    let result = Test.executeTransaction(tx)
-    Test.expect(result, Test.beSucceeded())
-}
-
 // ---------------------------------------------------------------------------
-// Helper scripts (inline Cadence code)
+// Helper scripts using cadence/scripts/ files
 // ---------------------------------------------------------------------------
 
 access(all) fun getTotalTips(): UInt64 {
@@ -184,17 +137,18 @@ access(all) fun getTipsByRecipient(recipient: Address): [AnyStruct] {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1 — Contract deployment
+// Test 1 — Contract deployment succeeds
 // ---------------------------------------------------------------------------
 
 access(all) fun testContractDeployment() {
-    // totalTips() on a fresh contract returns 0.
+    // If setup() passed (no panic), deployment succeeded.
+    // Verify the initial state by calling totalTips().
     let total = getTotalTips()
     Test.assertEqual(0 as UInt64, total)
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 — totalTips on fresh contract
+// Test 2 — totalTips returns 0 on fresh deploy
 // ---------------------------------------------------------------------------
 
 access(all) fun testTotalTipsInitiallyZero() {
@@ -202,84 +156,75 @@ access(all) fun testTotalTipsInitiallyZero() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 — recordTip increments tipID
+// Test 3 — recordTip increments tip count
 // ---------------------------------------------------------------------------
 
-access(all) fun testRecordTipIncrementsTipID() {
-    // Before: 0 tips
+access(all) fun testRecordTipIncrementsTipCount() {
     Test.assertEqual(0 as UInt64, getTotalTips())
 
-    // Record first tip
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
-
-    // After: 1 tip, totalTips = 1
     Test.assertEqual(1 as UInt64, getTotalTips())
 
-    // Record second tip
     recordTip(sender: alice, recipient: carol.address, tokenContract: TOKEN_MUSDC, tokenSymbol: "mUSDC")
     Test.assertEqual(2 as UInt64, getTotalTips())
 }
 
 // ---------------------------------------------------------------------------
-// Test 4 — TipRecorded event is emitted
+// Test 4 — getTip retrieves tip after recordTip
 // ---------------------------------------------------------------------------
 
-access(all) fun testTipRecordedEventEmitted() {
+access(all) fun testGetTipReturnsMetadata() {
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
 
-    let events = Test.eventsOfType(Type<AnyStruct>())
-    // Event count should include at least one TipRecorded event.
-    // We check via the script that tip 1 now exists.
     let tip = getTip(tipID: 1)
-    Test.assert(tip != nil, message: "tip 1 should exist after recordTip")
+    Test.assert(tip != nil, message: "getTip(1) should return TipMetadata after recordTip")
 }
 
 // ---------------------------------------------------------------------------
-// Test 5 — getTip retrieves correct metadata
+// Test 5 — getTip returns nil for unknown ID
 // ---------------------------------------------------------------------------
 
-access(all) fun testGetTipReturnsCorrectMetadata() {
-    recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
-
-    let raw = getTip(tipID: 1)
-    Test.assert(raw != nil, message: "getTip(1) should return metadata")
+access(all) fun testGetTipReturnsNilForUnknown() {
+    let tip = getTip(tipID: 999)
+    Test.assertEqual(nil, tip)
 }
 
 // ---------------------------------------------------------------------------
-// Test 6 — getTip returns nil for unknown ID
+// Test 6 — getTipsBySender returns correct array
 // ---------------------------------------------------------------------------
 
-access(all) fun testGetTipReturnsNilForUnknownID() {
-    let raw = getTip(tipID: 999)
-    Test.assertEqual(nil, raw)
+access(all) fun testGetTipsBySenderCorrect() {
+    recordTip(sender: alice, recipient: bob.address,   tokenContract: TOKEN_FLOW,  tokenSymbol: "FLOW")
+    recordTip(sender: alice, recipient: carol.address, tokenContract: TOKEN_MUSDC, tokenSymbol: "mUSDC")
+    // carol sends one tip — should NOT appear in alice's index
+    recordTip(sender: carol, recipient: bob.address,   tokenContract: TOKEN_FLOW,  tokenSymbol: "FLOW")
+
+    let aliceTips = getTipsBySender(sender: alice.address)
+    Test.assertEqual(2, aliceTips.length)
+
+    let carolTips = getTipsBySender(sender: carol.address)
+    Test.assertEqual(1, carolTips.length)
 }
 
 // ---------------------------------------------------------------------------
-// Test 7 — getTipsBySender returns correct array
+// Test 7 — getTipsByRecipient returns correct array
 // ---------------------------------------------------------------------------
 
-access(all) fun testGetTipsBySender() {
-    recordTip(sender: alice, recipient: bob.address,   tokenContract: TOKEN_FLOW,   tokenSymbol: "FLOW")
-    recordTip(sender: alice, recipient: carol.address, tokenContract: TOKEN_MUSDC,  tokenSymbol: "mUSDC")
-
-    let tips = getTipsBySender(sender: alice.address)
-    Test.assertEqual(2, tips.length)
-}
-
-// ---------------------------------------------------------------------------
-// Test 8 — getTipsByRecipient returns correct array
-// ---------------------------------------------------------------------------
-
-access(all) fun testGetTipsByRecipient() {
+access(all) fun testGetTipsByRecipientCorrect() {
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW,  tokenSymbol: "FLOW")
     recordTip(sender: carol, recipient: bob.address, tokenContract: TOKEN_MUSDC, tokenSymbol: "mUSDC")
+    // tip to carol — should NOT appear in bob's index
+    recordTip(sender: alice, recipient: carol.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
 
-    let tips = getTipsByRecipient(recipient: bob.address)
-    Test.assertEqual(2, tips.length)
+    let bobTips = getTipsByRecipient(recipient: bob.address)
+    Test.assertEqual(2, bobTips.length)
+
+    let carolTips = getTipsByRecipient(recipient: carol.address)
+    Test.assertEqual(1, carolTips.length)
 }
 
 // ---------------------------------------------------------------------------
-// Test 9 — getTipsBySender returns empty for unknown sender
+// Test 8 — getTipsBySender returns empty for unknown sender
 // ---------------------------------------------------------------------------
 
 access(all) fun testGetTipsBySenderUnknown() {
@@ -288,7 +233,7 @@ access(all) fun testGetTipsBySenderUnknown() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 10 — getTipsByRecipient returns empty for unknown recipient
+// Test 9 — getTipsByRecipient returns empty for unknown recipient
 // ---------------------------------------------------------------------------
 
 access(all) fun testGetTipsByRecipientUnknown() {
@@ -297,26 +242,23 @@ access(all) fun testGetTipsByRecipientUnknown() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 11 — Multiple tips from same sender, chronological order
+// Test 10 — Multiple tips from same sender
 // ---------------------------------------------------------------------------
 
-access(all) fun testMultipleTipsSameSenderOrdered() {
+access(all) fun testMultipleTipsSameSender() {
     recordTip(sender: alice, recipient: bob.address,   tokenContract: TOKEN_FLOW,   tokenSymbol: "FLOW")
     recordTip(sender: alice, recipient: carol.address, tokenContract: TOKEN_MUSDC,  tokenSymbol: "mUSDC")
     recordTip(sender: alice, recipient: bob.address,   tokenContract: TOKEN_MOCKFT, tokenSymbol: "MockFT")
 
     let tips = getTipsBySender(sender: alice.address)
     Test.assertEqual(3, tips.length)
-
-    // Total should also be 3
-    Test.assertEqual(3 as UInt64, getTotalTips())
 }
 
 // ---------------------------------------------------------------------------
-// Test 12 — Multiple tips to same recipient, chronological order
+// Test 11 — Multiple tips to same recipient
 // ---------------------------------------------------------------------------
 
-access(all) fun testMultipleTipsSameRecipientOrdered() {
+access(all) fun testMultipleTipsSameRecipient() {
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW,   tokenSymbol: "FLOW")
     recordTip(sender: carol, recipient: bob.address, tokenContract: TOKEN_MUSDC,  tokenSymbol: "mUSDC")
     recordTip(sender: eve,   recipient: bob.address, tokenContract: TOKEN_MOCKFT, tokenSymbol: "MockFT")
@@ -326,31 +268,24 @@ access(all) fun testMultipleTipsSameRecipientOrdered() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 13 — Multi-token tips indexed correctly
+// Test 12 — Multi-token tips all indexed correctly
 // ---------------------------------------------------------------------------
 
-access(all) fun testMultiTokenTips() {
+access(all) fun testMultiTokenTipsIndexed() {
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW,   tokenSymbol: "FLOW")
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_MUSDC,  tokenSymbol: "mUSDC")
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_MOCKFT, tokenSymbol: "MockFT")
 
-    // All 3 tips should appear in sender index
-    let bySender = getTipsBySender(sender: alice.address)
-    Test.assertEqual(3, bySender.length)
-
-    // All 3 tips should appear in recipient index
-    let byRecipient = getTipsByRecipient(recipient: bob.address)
-    Test.assertEqual(3, byRecipient.length)
-
-    // Total should be 3
+    Test.assertEqual(3, getTipsBySender(sender: alice.address).length)
+    Test.assertEqual(3, getTipsByRecipient(recipient: bob.address).length)
     Test.assertEqual(3 as UInt64, getTotalTips())
 }
 
 // ---------------------------------------------------------------------------
-// Test 14 — totalTips matches number of recorded tips
+// Test 13 — totalTips matches incrementally
 // ---------------------------------------------------------------------------
 
-access(all) fun testTotalTipsAccurate() {
+access(all) fun testTotalTipsIncremental() {
     Test.assertEqual(0 as UInt64, getTotalTips())
 
     recordTip(sender: alice, recipient: bob.address,   tokenContract: TOKEN_FLOW,  tokenSymbol: "FLOW")
@@ -364,62 +299,65 @@ access(all) fun testTotalTipsAccurate() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 15 — adminReset wipes state and resets ID counter
+// Test 14 — adminReset wipes state
 // ---------------------------------------------------------------------------
 
 access(all) fun testAdminResetClearsState() {
-    // Record some tips
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
     recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
     Test.assertEqual(2 as UInt64, getTotalTips())
 
-    // Admin reset (signed by deployer who holds AdminProof)
-    doAdminReset(signer: deployer)
+    // Admin reset — deployer account holds AdminProof
+    let tx = Test.Transaction(
+        code:        Test.readFile("helpers/admin_reset.cdc"),
+        authorizers: [deployer.address],
+        signers:     [deployer],
+        arguments:   []
+    )
+    let result = Test.executeTransaction(tx)
+    Test.expect(result, Test.beSucceeded())
 
-    // State should be clear
+    // State is cleared
     Test.assertEqual(0 as UInt64, getTotalTips())
-
-    // getTip(1) should return nil (previous tip gone)
-    let tip = getTip(tipID: 1)
-    Test.assertEqual(nil, tip)
-
-    // getTipsBySender should return empty
-    let tips = getTipsBySender(sender: alice.address)
-    Test.assertEqual(0, tips.length)
-
-    // After reset, next tip should get ID 1 again
-    recordTip(sender: carol, recipient: bob.address, tokenContract: TOKEN_MUSDC, tokenSymbol: "mUSDC")
-    Test.assertEqual(1 as UInt64, getTotalTips())
-    let newTip = getTip(tipID: 1)
-    Test.assert(newTip != nil, message: "first tip after reset should be ID 1")
+    Test.assertEqual(nil, getTip(tipID: 1))
+    Test.assertEqual(0, getTipsBySender(sender: alice.address).length)
 }
 
 // ---------------------------------------------------------------------------
-// Test 16 — adminReset panics without AdminProof (access denied)
+// Test 15 — adminReset panics without AdminProof
 // ---------------------------------------------------------------------------
 
 access(all) fun testAdminResetPanicsWithoutAdminProof() {
-    // eve does not hold an AdminProof resource — the borrow will return nil,
-    // triggering the panic guard in admin_reset_privatetip.cdc.
+    // eve does not hold AdminProof — borrow returns nil → panic
     let tx = Test.Transaction(
-        code: """
-            import "PrivateTip"
-
-            transaction {
-                prepare(signer: auth(BorrowValue) &Account) {
-                    let adminProof = signer.storage.borrow<auth(PrivateTip.Admin) &PrivateTip.AdminProof>(
-                        from: PrivateTip.AdminStoragePath
-                    ) ?? panic("not admin")
-
-                    PrivateTip.adminReset(admin: adminProof)
-                }
-            }
-        """,
+        code:        Test.readFile("helpers/admin_reset.cdc"),
         authorizers: [eve.address],
         signers:     [eve],
         arguments:   []
     )
     let result = Test.executeTransaction(tx)
-    // Must fail because eve has no AdminProof
     Test.expect(result, Test.beFailed())
+}
+
+// ---------------------------------------------------------------------------
+// Test 16 — Post-reset new tips start from ID 1
+// ---------------------------------------------------------------------------
+
+access(all) fun testPostResetTipsStartFromIDOne() {
+    // Record, reset, then record again
+    recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
+    recordTip(sender: alice, recipient: bob.address, tokenContract: TOKEN_FLOW, tokenSymbol: "FLOW")
+
+    let resetTx = Test.Transaction(
+        code:        Test.readFile("helpers/admin_reset.cdc"),
+        authorizers: [deployer.address],
+        signers:     [deployer],
+        arguments:   []
+    )
+    Test.expect(Test.executeTransaction(resetTx), Test.beSucceeded())
+
+    // Record new tip — should get ID 1
+    recordTip(sender: carol, recipient: bob.address, tokenContract: TOKEN_MUSDC, tokenSymbol: "mUSDC")
+    Test.assertEqual(1 as UInt64, getTotalTips())
+    Test.assert(getTip(tipID: 1) != nil, message: "first tip post-reset should be ID 1")
 }
