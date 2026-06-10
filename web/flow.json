@@ -11,25 +11,37 @@
 		"JanusFlow": {
 			"source": "",
 			"aliases": {
-				"testnet": "5dcbeb41055ec57e"
+				"testnet": "4b6bc58bc8bf5dcc"
 			}
 		},
-		"IPrivateTipImpl": {
-			"source": "./cadence/contracts/IPrivateTipImpl.cdc",
+		"JanusFT": {
+			"source": "",
 			"aliases": {
-				"testnet": "b9ac529c14a4c5a1"
+				"testnet": "4b6bc58bc8bf5dcc"
+			}
+		},
+		"MockFT": {
+			"source": "",
+			"aliases": {
+				"testnet": "4b6bc58bc8bf5dcc"
+			}
+		},
+		"ShieldedCheckpoint": {
+			"source": "",
+			"aliases": {
+				"testnet": "4b6bc58bc8bf5dcc"
+			}
+		},
+		"ShieldedInbox": {
+			"source": "",
+			"aliases": {
+				"testnet": "4b6bc58bc8bf5dcc"
 			}
 		},
 		"PrivateTip": {
-			"source": "./cadence/contracts/PrivateTip.cdc",
+			"source": "",
 			"aliases": {
-				"testnet": "b9ac529c14a4c5a1"
-			}
-		},
-		"PrivateTipImpl": {
-			"source": "./cadence/contracts/PrivateTipImpl.cdc",
-			"aliases": {
-				"testnet": "b9ac529c14a4c5a1"
+				"testnet": "4b6bc58bc8bf5dcc"
 			}
 		}
 	},
@@ -101,59 +113,7 @@
 				"type": "file",
 				"location": "emulator-account.pkey"
 			}
-		},
-		"openjanus-privatetip-router": {
-			"address": "b9ac529c14a4c5a1",
-			"key": {
-				"type": "file",
-				"location": "/home/oydual3/.flow/openjanus-privatetip-router.pkey"
-			}
-		},
-		"testnet-bob": {
-			"address": "d807a3992d7be612",
-			"key": {
-				"type": "file",
-				"location": "/home/oydual3/.flow/testnet-bob.pkey"
-			}
-		},
-		"testnet-charlie": {
-			"address": "3c601a443c81e6cd",
-			"key": {
-				"type": "file",
-				"location": "/home/oydual3/.flow/testnet-charlie.pkey"
-			}
-		},
-		"testnet-claucondor": {
-			"address": "7599043aea001283",
-			"key": {
-				"type": "file",
-				"signatureAlgorithm": "ECDSA_secp256k1",
-				"hashAlgorithm": "SHA2_256",
-				"location": "/home/oydual3/.flow/testnet-claucondor.pkey"
-			}
-		},
-		"testnet-dave": {
-			"address": "d32d9100e1fe983b",
-			"key": {
-				"type": "file",
-				"location": "/home/oydual3/.flow/testnet-dave.pkey"
-			}
-		},
-		"testnet-eve": {
-			"address": "374a28ddf00498e4",
-			"key": {
-				"type": "file",
-				"location": "/home/oydual3/.flow/testnet-eve.pkey"
-			}
 		}
 	},
-	"deployments": {
-		"testnet": {
-			"openjanus-privatetip-router": [
-				"IPrivateTipImpl",
-				"PrivateTipImpl",
-				"PrivateTip"
-			]
-		}
-	}
+	"deployments": {}
 }
