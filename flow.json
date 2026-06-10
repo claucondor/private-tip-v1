@@ -125,6 +125,15 @@
 				"location": "/home/oydual3/.flow/openjanus-v08.pkey"
 			}
 		},
+		"openjanus-v08-faucet": {
+			"address": "d1a02aa46d9151bb",
+			"key": {
+				"type": "file",
+				"signatureAlgorithm": "ECDSA_P256",
+				"hashAlgorithm": "SHA3_256",
+				"location": "/home/oydual3/.flow/openjanus-v08-faucet.pkey"
+			}
+		},
 		"testnet-bob": {
 			"address": "d807a3992d7be612",
 			"key": {
