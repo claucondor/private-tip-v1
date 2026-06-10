@@ -160,14 +160,8 @@ export default function PortfolioPage() {
         setRow(t.id, { publicBalance: bal, loading: false });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Failed";
-        // "No balance capability" / "missing storage" → vault not installed yet
-        // — treat as zero balance, not as error. User can claim from /faucet.
-        if (/no balance capability|missing storage|No vault/i.test(msg)) {
-          setRow(t.id, { publicBalance: 0n, loading: false });
-        } else {
-          console.error(`[portfolio] fetchPublicBalances failed for ${t.id}:`, err);
-          setRow(t.id, { loading: false, error: msg });
-        }
+        console.error(`[portfolio] fetchPublicBalances failed for ${t.id}:`, err);
+        setRow(t.id, { loading: false, error: msg });
       }
     }
   }, [setRow]);
