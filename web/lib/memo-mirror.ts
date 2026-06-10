@@ -1,17 +1,19 @@
-/// Sender-side memo mirror.
+/// Sender-side memo mirror (v0.8).
 ///
 /// On-chain memos are ECIES-encrypted to the recipient's MemoKey pubkey, so
 /// the sender cannot decrypt them after the fact. To let the sender see their
 /// own outgoing memos in /tips, we persist the plaintext locally (per-sender,
 /// in localStorage) at send time and look it up when rendering "Sent" cards.
 ///
-/// Match strategy: tipID assigned by PrivateTip.recordTip is a sequence we
-/// don't capture client-side, so we join on (recipient, timestamp ± window).
-/// On-chain timestamps come from Cadence block time (Unix seconds), which
-/// lands within a few seconds of the user's local clock.
-
-import { loadShieldedState, saveShieldedState } from "./store";
-import type { TokenId } from "./tokens";
+/// Match strategy: join on (recipient, timestamp ± window). On-chain timestamps
+/// come from Cadence block time (Unix seconds), which lands within a few seconds
+/// of the user's local clock.
+///
+/// Removed in v0.8 (replaced by ShieldedInboxClient.drainAndDecrypt):
+///   - ingestTipIfNew — accumulation now done by drainAndDecrypt + checkpoint
+///   - cacheDecryptedMemo / getCachedDecryptedMemo — keyed by tipID which is
+///     app-specific and not part of the v0.8 protocol
+///   - loadIngestedSet / saveIngestedSet — backed ingestTipIfNew
 
 const MIRROR_KEY_PREFIX = "openjanus:memo-mirror:";
 const MATCH_WINDOW_SEC = 120;
@@ -87,130 +89,4 @@ export function findSentMemo(opts: {
 export function clearSentMemos(sender: string): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem(key(sender));
-}
-
-// ─── Recipient-side decrypted memo cache ────────────────────────────────────
-//
-// Decryption (ECIES + AES-GCM) is non-trivial; we run it once per tipID and
-// stash the plaintext locally so re-renders, refreshes, and tab switches are
-// instant. Cache is per-recipient and per-tipID.
-
-const DECRYPT_CACHE_PREFIX = "openjanus:memo-decrypt:";
-
-function decryptCacheKey(recipient: string): string {
-  return `${DECRYPT_CACHE_PREFIX}${recipient.toLowerCase()}`;
-}
-
-function loadDecryptCache(recipient: string): Record<string, string> {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = localStorage.getItem(decryptCacheKey(recipient));
-    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveDecryptCache(
-  recipient: string,
-  cache: Record<string, string>
-): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(decryptCacheKey(recipient), JSON.stringify(cache));
-}
-
-export function getCachedDecryptedMemo(
-  recipient: string,
-  tipID: number | string
-): string | null {
-  const cache = loadDecryptCache(recipient);
-  return cache[String(tipID)] ?? null;
-}
-
-export function cacheDecryptedMemo(
-  recipient: string,
-  tipID: number | string,
-  plaintext: string
-): void {
-  const cache = loadDecryptCache(recipient);
-  cache[String(tipID)] = plaintext;
-  saveDecryptCache(recipient, cache);
-}
-
-// ─── Shielded state auto-ingest from decrypted notes ────────────────────────
-//
-// When a recipient successfully decrypts a tip's ShieldedNote they get
-// `(amount, blinding)` — the values they need to keep their local shielded
-// state consistent with the on-chain Pedersen commitment. We accumulate them
-// here in localStorage (same key shape as /send and /wrap), tracking which
-// tipIDs have already been ingested so multiple renders don't double-count.
-//
-// Key format: the store module writes keys in v2 format:
-//   openjanus:shielded:v2:<addr>:<tokenId>:<proxyFingerprint>
-// sweepStaleShieldedCache() deletes any openjanus:shielded: key that does NOT
-// match v2 format. ingestTipIfNew delegates to the store helpers so the key
-// written here always survives the sweep.
-
-const INGESTED_PREFIX = "openjanus:tip-ingested:";
-
-function ingestedKey(addr: string): string {
-  return `${INGESTED_PREFIX}${addr.toLowerCase()}`;
-}
-
-function loadIngestedSet(addr: string): Set<string> {
-  if (typeof window === "undefined") return new Set();
-  try {
-    const raw = localStorage.getItem(ingestedKey(addr));
-    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
-  } catch {
-    return new Set();
-  }
-}
-function saveIngestedSet(addr: string, set: Set<string>): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(ingestedKey(addr), JSON.stringify([...set]));
-}
-
-/**
- * If this tipID hasn't been ingested yet, add (amount, blinding) into the
- * recipient's local shielded state and remember the tipID. Writes to the v2
- * key format (via store.ts saveShieldedState) so the entry survives the
- * sweepStaleShieldedCache() call on every app mount.
- *
- * tokenId defaults to "flow" — PrivateTip currently only supports FLOW tips.
- * Pass a different tokenId if tip support is extended to other tokens.
- *
- * Returns whether ingestion happened (true) or was skipped as duplicate (false).
- */
-export function ingestTipIfNew(opts: {
-  recipient: string;
-  tipID: number | string;
-  amount: bigint;
-  blinding: bigint;
-  tokenId?: TokenId;
-}): boolean {
-  const tipKey = String(opts.tipID);
-  const tokenId: TokenId = opts.tokenId ?? "flow";
-
-  const ingested = loadIngestedSet(opts.recipient);
-  if (ingested.has(tipKey)) return false;
-
-  // Delegate to the store helpers (loadShieldedState / saveShieldedState are
-  // imported at the top of this file via static ESM import). This ensures the
-  // written key is always in v2 format and survives sweepStaleShieldedCache().
-  const current = loadShieldedState(opts.recipient, tokenId) ?? {
-    balanceRaw: "0",
-    blinding: "0",
-  };
-  const newBalance = BigInt(current.balanceRaw) + opts.amount;
-  const newBlinding = BigInt(current.blinding) + opts.blinding;
-  saveShieldedState(opts.recipient, tokenId, {
-    balanceRaw: newBalance.toString(),
-    blinding: newBlinding.toString(),
-    lastUpdatedMs: Date.now(),
-  });
-
-  ingested.add(tipKey);
-  saveIngestedSet(opts.recipient, ingested);
-  return true;
 }
