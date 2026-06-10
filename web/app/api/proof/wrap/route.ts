@@ -2,37 +2,22 @@
 ///
 /// Required because buildAmountDiscloseProof uses snarkjs with wasm/zkey
 /// file I/O (Node.js only). The browser generates blinding, POSTs here,
-/// and receives the proof + commitment + nonce to pass into adapter.wrapViaCoa.
+/// and receives the proof + publicInputs to pass into adapter.wrapViaCoa.
 ///
-/// v0.7.4: Nonce is now a random 256-bit value generated server-side if not
-/// explicitly provided. This eliminates the localStorage counter strategy
-/// which caused "nonce already used" reverts when localStorage was cleared.
+/// The SDK resolves artifact paths automatically via PACKAGE_ROOT walk-up —
+/// no hardcoded paths here. Changing the zkey only requires an SDK update.
 ///
-/// Body: { amount: string, blinding: string, nonce?: string }  (decimal strings, NET amount)
+/// Body:   { amount: string, blinding: string, nonce?: string }  (decimal strings)
 /// Response: {
-///   proof: string[8],                          // uint256[8] as decimal strings
-///   txCommit: [string, string],                // [Cx, Cy] decimal strings
-///   publicInputs: [string, string, string, string], // [amount, Cx, Cy, nonce]
-///   nonce: string,                             // generated (or echo of provided) nonce
+///   proof: string[8],                // uint256[8] as decimal strings
+///   publicInputs: string[4],         // [amount, Cx, Cy, nonce] as decimal strings
+///   nonce: string,                   // echo of nonce used (may be server-generated)
 /// }
 
 import { NextRequest, NextResponse } from "next/server";
-import { buildAmountDiscloseProof } from "@claucondor/sdk/crypto";
-import { randomNonce256 } from "@claucondor/sdk";
-import path from "path";
+import { buildAmountDiscloseProof, randomNonce256 } from "@claucondor/sdk";
 
 export const runtime = "nodejs";
-
-const SDK_ROOT = path.resolve(
-  process.cwd(),
-  "node_modules",
-  "@claucondor",
-  "sdk",
-  "circuits",
-  "aggregate"
-);
-const AMOUNT_WASM = path.join(SDK_ROOT, "amount_disclose_aggregate.wasm");
-const AMOUNT_ZKEY = path.join(SDK_ROOT, "amount_disclose_aggregate_test.zkey");
 
 export async function POST(req: NextRequest) {
   try {
@@ -46,19 +31,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // nonce: use explicit value if provided (tests/replay), else SDK's
-    // randomNonce256 which rejection-samples within BN254 scalar field
-    // (avoids verifier reject when nonce > field modulus).
+    // Use explicit nonce if provided (tests/replay), else SDK random within BN254 field.
     const nonceBig = nonce !== undefined ? BigInt(nonce) : randomNonce256();
 
-    const result = await buildAmountDiscloseProof(
-      { amount: BigInt(amount), blinding: BigInt(blinding), nonce: nonceBig },
-      { wasmPath: AMOUNT_WASM, zkeyPath: AMOUNT_ZKEY }
-    );
+    const result = await buildAmountDiscloseProof({
+      amount: BigInt(amount),
+      blinding: BigInt(blinding),
+      nonce: nonceBig,
+    });
 
     return NextResponse.json({
       proof: Array.from(result.proof).map((p) => p.toString()),
-      txCommit: [result.txCommit[0].toString(), result.txCommit[1].toString()],
       publicInputs: result.publicInputs.map((p) => p.toString()),
       nonce: nonceBig.toString(),
     });
