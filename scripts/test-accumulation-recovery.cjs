@@ -56,6 +56,9 @@ const BOB_KEY    = "0x98ce0bff00e393fa28b89bf60f4d463add1d914bd869f432dac191d2e3
 
 const JANUS_FLOW_PROXY = ADDRESSES.janusFlow;
 
+// BabyJub prime-order subgroup. Blinding must stay in [0, SUBORDER).
+const SUBORDER = 2736030358979909402780800718157159386076813972158567259200215660948447373041n;
+
 // Event signature for WrapWithSnapshot (to recover state post-wrap)
 const WRAP_EVENT_SIG = "event WrapWithSnapshot(address indexed user, uint256 amount, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY)";
 const wrapIface = new ethers.Interface([WRAP_EVENT_SIG]);
@@ -234,7 +237,7 @@ async function main() {
   if (!snap1) throw new Error("Step 3: WrapWithSnapshot event not found");
   // First wrap: cumulative = marginal (prev state was 0)
   balance  += snap1.balance;
-  blinding += snap1.blinding;
+  blinding = (blinding + snap1.blinding) % SUBORDER;
   process.stderr.write(`[S1] Wrap1: cumulative balance=${balance}, blinding=${blinding.toString().slice(0,12)}...\n`);
 
   const cp1 = await writeCheckpoint(cpClient, alice, aliceJub, balance, blinding);
@@ -256,7 +259,7 @@ async function main() {
   if (!snap2) throw new Error("Step 4: WrapWithSnapshot event not found");
   // Accumulate: cumulative = wrap1 + wrap2
   balance  += snap2.balance;
-  blinding += snap2.blinding;
+  blinding = (blinding + snap2.blinding) % SUBORDER;
   process.stderr.write(`[S1] Wrap2: cumulative balance=${balance}, blinding=${blinding.toString().slice(0,12)}...\n`);
 
   const cp2 = await writeCheckpoint(cpClient, alice, aliceJub, balance, blinding);
@@ -278,7 +281,7 @@ async function main() {
   if (!snap3) throw new Error("Step 5: WrapWithSnapshot event not found");
   // Accumulate: cumulative = wrap1 + wrap2 + wrap3
   balance  += snap3.balance;
-  blinding += snap3.blinding;
+  blinding = (blinding + snap3.blinding) % SUBORDER;
   process.stderr.write(`[S1] Wrap3: cumulative balance=${balance}, blinding=${blinding.toString().slice(0,12)}...\n`);
 
   const cp3 = await writeCheckpoint(cpClient, alice, aliceJub, balance, blinding);
