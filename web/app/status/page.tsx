@@ -152,9 +152,29 @@ export default function StatusPage() {
     setActivationStep("step2_pending");
     setActivationError(null);
     try {
-      const { smartSetupAccount } = await import("@/lib/tip-actions");
-      const { txId } = await smartSetupAccount({ flowAddr: userAddress });
-      toast.success(`Activated! Tx: ${txId.slice(0, 10)}…`);
+      const { activateAccount } = await import("@/lib/tip-actions");
+      const { ethers } = await import("ethers");
+
+      // Flow Wallet exposes the user's COA via window.ethereum (EIP-1193).
+      const w = window as unknown as { ethereum?: unknown };
+      if (!w.ethereum) {
+        throw new Error(
+          "EVM provider not available — make sure your Flow Wallet supports EVM (window.ethereum)."
+        );
+      }
+      const browserProvider = new ethers.BrowserProvider(
+        w.ethereum as Parameters<typeof ethers.BrowserProvider>[0]
+      );
+      // JsonRpcSigner is structurally compatible with ethers.Wallet for publishMemoKey + FCL install ops.
+      const evmSigner = (await browserProvider.getSigner()) as never;
+
+      const activation = await activateAccount(userAddress, evmSigner);
+      const txLabel = activation.memoKeyTxHash
+        ? `MemoKey: ${activation.memoKeyTxHash.slice(0, 10)}…`
+        : activation.installTxId
+          ? `Install: ${activation.installTxId.slice(0, 10)}…`
+          : "Already activated (idempotent)";
+      toast.success(`Activated! ${txLabel}`);
       setActivationStep("done");
       // Refresh status check
       await runCheck(userAddress);
