@@ -9,6 +9,14 @@ const nextConfig: NextConfig = {
     "circomlibjs",
     "ffjavascript",
   ],
+  // Force Vercel to ship the SDK circuit artifacts (wasm + zkey) alongside
+  // the proof API routes. Marking the SDK as external skips tracing of its
+  // data files; without this, /api/proof/* throws ENOENT at runtime.
+  outputFileTracingIncludes: {
+    "/api/proof/**": [
+      "./node_modules/@claucondor/sdk/circuits/**",
+    ],
+  },
   // Turbopack config (Next.js 16 — used by `next build` and `next dev`).
   // @claucondor/sdk/dist/crypto/index.js uses `await import('fs')` inside
   // server-only async helpers. These code paths never run in the browser, but
