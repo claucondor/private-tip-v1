@@ -111,11 +111,8 @@ transaction(amount: UFix64, to: Address) {
 `;
 
 // MockFT transfer from faucet Cadence vault to recipient.
-// 0x7599043aea001283 is the underlying MockFT FungibleToken contract (deployer = claucondor).
-// This is TOKEN_REGISTRY.mockft.ftAddress (unchanged in v0.7.2).
-// The JanusFT wrapper (cadenceAddress) changed to 0xc4e8f99915893a2f in v0.7.2 — but the
-// faucet only sends raw MockFT tokens, not wrapped/shielded ones, so we use ftAddress here.
-const MOCKFT_CADENCE_ADDR = "0x7599043aea001283";
+// v0.8: MockFT deployed at 0x4b6bc58bc8bf5dcc (TOKEN_REGISTRY.mockft.ftAddress).
+const MOCKFT_CADENCE_ADDR = "0x4b6bc58bc8bf5dcc";
 const MOCKFT_CONTRACT = "MockFT";
 
 const TRANSFER_MOCKFT_TX = `
