@@ -162,9 +162,8 @@ export default function StatusPage() {
           "EVM provider not available — make sure your Flow Wallet supports EVM (window.ethereum)."
         );
       }
-      const browserProvider = new ethers.BrowserProvider(
-        w.ethereum as Parameters<typeof ethers.BrowserProvider>[0]
-      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const browserProvider = new ethers.BrowserProvider(w.ethereum as any);
       // JsonRpcSigner is structurally compatible with ethers.Wallet for publishMemoKey + FCL install ops.
       const evmSigner = (await browserProvider.getSigner()) as never;
 
