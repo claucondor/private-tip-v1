@@ -31,11 +31,9 @@ import {
   getRecipientMemoPubkey,
 } from "@/lib/tip-actions";
 import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei } from "@claucondor/sdk";
-import {
-  loadShieldedState,
-  type ShieldedTokenState,
-} from "@/lib/store";
-import { recoverShieldedState } from "@/lib/recovery";
+import type { ShieldedTokenState } from "@/lib/store";
+// Phase 4 will rewrite /portfolio to use ShieldedCheckpointClient.readAndDecrypt() —
+// loadShieldedState / saveShieldedState / recoverShieldedState removed in Phase 1 (v0.8).
 import { TokenBadge } from "@/components/TokenSelector";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -87,14 +85,11 @@ export default function PortfolioPage() {
     []
   );
 
-  // Load from localStorage cache first.
+  // Phase 4 will rehydrate from ShieldedCheckpoint on mount.
+  // loadShieldedState (localStorage) removed in Phase 1 — rows start with null shieldedState.
   useEffect(() => {
     if (!userAddress) return;
-    const updated = initialRows().map((r) => ({
-      ...r,
-      shieldedState: loadShieldedState(userAddress, r.tokenId),
-    }));
-    setRows(updated);
+    setRows(initialRows());
   }, [userAddress]);
 
   // Determine page state: needs_wallet / needs_activation / needs_unlock / ready
@@ -171,42 +166,16 @@ export default function PortfolioPage() {
     }
   }, [setRow]);
 
-  // Scan on-chain snapshots for fresh shielded state.
-  const refreshShieldedState = useCallback(async (addr: string, coa: string) => {
-    if (!userAddress) return;
-    let memoPrivkey: bigint;
-    try {
-      memoPrivkey = await getOrDeriveMemoPrivkey(userAddress);
-    } catch {
-      toast.error("Wallet signature required to decrypt shielded balances");
-      return;
-    }
-
-    for (const t of SUPPORTED_TOKENS) {
-      setRow(t.id, { loading: true });
-      try {
-        const entry = TOKEN_REGISTRY[t.id];
-        const queryAddr = entry.variant === "cadence-ft" ? addr : coa;
-        const snap = await recoverShieldedState(queryAddr, memoPrivkey, t.id);
-        if (snap) {
-          const state: ShieldedTokenState = {
-            balanceRaw: snap.balance.toString(),
-            blinding: snap.blinding.toString(),
-            lastUpdatedMs: snap.timestampMs,
-          };
-          setRow(t.id, { shieldedState: state, loading: false });
-          // Also persist to localStorage.
-          const { saveShieldedState } = await import("@/lib/store");
-          saveShieldedState(userAddress, t.id, state);
-        } else {
-          setRow(t.id, { shieldedState: null, loading: false });
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Scan failed";
-        setRow(t.id, { loading: false, error: msg });
-      }
-    }
-  }, [userAddress, setRow]);
+  // Phase 4 will rewrite this to use ShieldedCheckpointClient.readAndDecrypt() per token.
+  // recoverShieldedState (v0.7 event-scan) removed in Phase 1 — runtime error guards this path.
+  const refreshShieldedState = useCallback(async (_addr: string, _coa: string) => {
+    // Phase 4 will rewrite /portfolio to use getShieldedState() from tip-actions.ts —
+    // Phase 1 left this here intentionally because it consumes lib functions
+    // whose rewrite happens in Phase 4.
+    throw new Error(
+      "refreshShieldedState: not implemented in Phase 1 — wait for Phase 4 (/portfolio rewrite)"
+    );
+  }, []);
 
   // Load everything on connect. Deliberately omits `loadingAll` from deps —
   // it's set INSIDE load() and would create a re-entry loop where the
