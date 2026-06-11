@@ -479,7 +479,7 @@ export async function activateAccount(
 import JanusFT from 0x4b6bc58bc8bf5dcc
 import JanusFlow from 0x5dcbeb41055ec57e
 import ShieldedInbox from 0x4b6bc58bc8bf5dcc
-import ShieldedCheckpoint from 0x4b6bc58bc8bf5dcc
+import ShieldedCheckpoint from 0xd1a02aa46d9151bb
 import EVM from 0x8c5303eaa26202d6
 
 transaction(memoPubX: UInt256, memoPubY: UInt256) {
