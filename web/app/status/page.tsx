@@ -28,6 +28,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
+import CheckpointStatus from "@/components/CheckpointStatus";
 
 interface StatusResult {
   accountExists: boolean;
@@ -249,9 +250,12 @@ export default function StatusPage() {
   return (
     <div className="max-w-2xl mx-auto px-4 py-12">
       <div className="mb-8">
-        <div className="inline-flex items-center gap-2 mb-3 px-2 py-1 rounded-full border border-[#D4AF37]/30 bg-[#D4AF37]/5 text-[10px] uppercase tracking-wider text-[#D4AF37] font-mono">
-          <ShieldCheck className="w-3 h-3" />
-          Privacy status
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <div className="inline-flex items-center gap-2 px-2 py-1 rounded-full border border-[#D4AF37]/30 bg-[#D4AF37]/5 text-[10px] uppercase tracking-wider text-[#D4AF37] font-mono">
+            <ShieldCheck className="w-3 h-3" />
+            Privacy status
+          </div>
+          <CheckpointStatus userAddress={userAddress} />
         </div>
         <h1
           className="text-4xl font-bold tracking-tight"
@@ -346,6 +350,7 @@ export default function StatusPage() {
                   sessionHasKey={sessionHasKey}
                   hasMemoKeyOnChain={result?.hasMemoKey ?? false}
                   error={activationError}
+                  userAddress={userAddress ?? undefined}
                   onStep1={handleActivateStep1}
                   onStep2={handleActivateStep2}
                   onUnlock={handleUnlock}
@@ -389,6 +394,7 @@ export default function StatusPage() {
                 sessionHasKey={sessionHasKey}
                 hasMemoKeyOnChain={true}
                 error={activationError}
+                userAddress={userAddress ?? undefined}
                 onStep1={handleActivateStep1}
                 onStep2={handleActivateStep2}
                 onUnlock={handleUnlock}
@@ -483,6 +489,7 @@ function InlineActivation({
   sessionHasKey,
   hasMemoKeyOnChain,
   error,
+  userAddress,
   onStep1,
   onStep2,
   onUnlock,
@@ -491,6 +498,7 @@ function InlineActivation({
   sessionHasKey: boolean;
   hasMemoKeyOnChain: boolean;
   error: string | null;
+  userAddress?: string;
   onStep1: () => void;
   onStep2: () => void;
   onUnlock: () => void;
@@ -541,15 +549,20 @@ function InlineActivation({
     );
   }
 
-  // Case: activation done
+  // Case: activation done — show Step 3 verification + action links
   if (step === "done") {
     return (
-      <div className="rounded-lg border border-[#00EF8B]/25 bg-[#00EF8B]/6 px-4 py-3 text-sm">
-        <p className="font-medium text-[#00EF8B] flex items-center gap-1.5">
-          <Check className="w-3.5 h-3.5" />
-          Activated — your private inbox is ready to receive tips.
-        </p>
-        <div className="flex flex-wrap gap-3 mt-2">
+      <div className="space-y-3">
+        <div className="rounded-lg border border-[#00EF8B]/25 bg-[#00EF8B]/6 px-4 py-3 text-sm">
+          <p className="font-medium text-[#00EF8B] flex items-center gap-1.5">
+            <Check className="w-3.5 h-3.5" />
+            Activated — verifying on-chain state…
+          </p>
+        </div>
+        {userAddress && (
+          <Step3Verification userAddress={userAddress} onRetryStep2={onStep2} />
+        )}
+        <div className="flex flex-wrap gap-3 pt-1">
           <Link
             href="/send"
             className="inline-flex items-center gap-1 text-xs text-[#00EF8B] hover:text-[#00EF8B]/80"
@@ -580,7 +593,7 @@ function InlineActivation({
           className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[#00EF8B]/40 bg-[#00EF8B]/10 text-[#00EF8B] text-sm font-medium hover:bg-[#00EF8B]/20 transition-colors"
         >
           <Key className="w-3.5 h-3.5" />
-          Activate (Step 2 of 2) — Publish your public key on-chain
+          Activate (Step 2 of 3) — Publish your public key on-chain
         </button>
         {error && <p className="text-xs text-red-400">{error}</p>}
       </div>
@@ -612,7 +625,7 @@ function InlineActivation({
       <div className="rounded-lg border border-[#D4AF37]/25 bg-[#D4AF37]/6 px-4 py-3 text-sm">
         <p className="font-medium text-[#D4AF37] mb-1 flex items-center gap-1.5">
           <Key className="w-3.5 h-3.5" />
-          Activate your private inbox (2 steps)
+          Activate your private inbox (3 steps)
         </p>
         <ul className="text-foreground/60 text-xs space-y-1 leading-relaxed">
           <li>
@@ -621,7 +634,12 @@ function InlineActivation({
           </li>
           <li>
             <strong className="text-foreground/80">Step 2:</strong> Publish your public key on-chain
-            (COA + MemoKey). One transaction, gas-only.
+            — publishMemoKey (EVM/COA) + installInboxAndCheckpoint (Cadence), both atomic in one
+            Flow Wallet transaction, gas-only.
+          </li>
+          <li>
+            <strong className="text-foreground/80">Step 3:</strong> Verify — read-only check that
+            MemoKey, Checkpoint, and Inbox are all set up correctly on-chain.
           </li>
         </ul>
         <p className="text-foreground/50 text-xs mt-2">
@@ -637,10 +655,133 @@ function InlineActivation({
         {step === "step1_pending" ? (
           <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Waiting for wallet signature…</>
         ) : (
-          <><Key className="w-3.5 h-3.5" /> Activate (Step 1 of 2) — Sign to derive your private key</>
+          <><Key className="w-3.5 h-3.5" /> Activate (Step 1 of 3) — Sign to derive your private key</>
         )}
       </button>
       {error && <p className="text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 — read-only verification
+// ---------------------------------------------------------------------------
+
+function Step3Verification({
+  userAddress,
+  onRetryStep2,
+}: {
+  userAddress: string;
+  onRetryStep2: () => void;
+}) {
+  const [checking, setChecking] = useState(true);
+  const [memoKeyOk, setMemoKeyOk] = useState<boolean | null>(null);
+  const [checkpointOk, setCheckpointOk] = useState<boolean | null>(null);
+  const [inboxOk, setInboxOk] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getRecipientMemoPubkey, getCoaEvmAddress: resolveCoaAddr } =
+          await import("@/lib/tip-actions");
+        const { ShieldedCheckpointClient, ShieldedInboxClient } =
+          await import("@claucondor/sdk");
+
+        const coaAddr = await resolveCoaAddr(userAddress).catch(() => null);
+        const hasCoaAddr = coaAddr && coaAddr !== "0x" && coaAddr.length >= 5;
+
+        const [memoPub, cpExists, ibCountOk] = await Promise.all([
+          getRecipientMemoPubkey(userAddress).catch(() => null),
+          hasCoaAddr
+            ? new ShieldedCheckpointClient().exists(coaAddr!).catch(() => false)
+            : Promise.resolve(false),
+          hasCoaAddr
+            ? new ShieldedInboxClient()
+                .count(coaAddr!)
+                .then(() => true)
+                .catch(() => false)
+            : Promise.resolve(false),
+        ]);
+
+        if (cancelled) return;
+        setMemoKeyOk(memoPub !== null && !(memoPub.x === 0n && memoPub.y === 0n));
+        setCheckpointOk(cpExists as boolean);
+        setInboxOk(ibCountOk as boolean);
+      } catch {
+        if (!cancelled) {
+          setMemoKeyOk(false);
+          setCheckpointOk(false);
+          setInboxOk(false);
+        }
+      } finally {
+        if (!cancelled) setChecking(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userAddress]);
+
+  const allGood = memoKeyOk && checkpointOk && inboxOk;
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-white/10 bg-[#0A1628]/60 px-4 py-3">
+        <p className="text-xs font-medium text-foreground/60 mb-2 flex items-center gap-1.5">
+          {checking ? (
+            <Loader2 className="w-3 h-3 animate-spin text-foreground/40" />
+          ) : allGood ? (
+            <Check className="w-3 h-3 text-[#00EF8B]" />
+          ) : (
+            <X className="w-3 h-3 text-red-400" />
+          )}
+          Step 3 — On-chain verification
+        </p>
+        <div className="space-y-1.5">
+          <VerifyRow label="MemoKey published" ok={memoKeyOk} loading={checking} />
+          <VerifyRow label="Checkpoint installed" ok={checkpointOk} loading={checking} />
+          <VerifyRow label="Inbox reachable" ok={inboxOk} loading={checking} />
+        </div>
+      </div>
+      {!checking && !allGood && (
+        <button
+          onClick={onRetryStep2}
+          className="inline-flex items-center gap-2 px-3 py-1.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/8 text-amber-200 text-xs font-medium hover:bg-[#D4AF37]/15 transition-colors"
+        >
+          <Key className="w-3 h-3" />
+          Re-run Step 2
+        </button>
+      )}
+    </div>
+  );
+}
+
+function VerifyRow({
+  label,
+  ok,
+  loading,
+}: {
+  label: string;
+  ok: boolean | null;
+  loading: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      {loading || ok === null ? (
+        <Loader2 className="w-3 h-3 animate-spin text-foreground/40 shrink-0" />
+      ) : ok ? (
+        <span className="shrink-0 w-3.5 h-3.5 rounded-full bg-[#00EF8B]/15 flex items-center justify-center">
+          <Check className="w-2 h-2 text-[#00EF8B]" />
+        </span>
+      ) : (
+        <span className="shrink-0 w-3.5 h-3.5 rounded-full bg-red-500/15 flex items-center justify-center">
+          <X className="w-2 h-2 text-red-400" />
+        </span>
+      )}
+      <span className={ok === false && !loading ? "text-foreground/50" : "text-foreground/80"}>
+        {label}
+      </span>
     </div>
   );
 }
