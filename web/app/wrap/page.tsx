@@ -206,8 +206,24 @@ function WrapPageInner() {
         if (cancelled) return;
         setNeedsMemoKey(memoPub === null || !hasSessionPrivkey);
 
-        const s = loadShieldedState(userAddress, selectedToken);
-        if (s) setShielded(s);
+        // Read shielded state from on-chain per-token checkpoint (v0.8.2).
+        // Was previously a stub returning null — caused "Nothing here yet" UI even when wrap happened.
+        const { getCachedMemoPrivkey: getCachedMemoPrivkey2 } = await import("@/lib/memo-key-session");
+        const memoPrivkeyForRead = getCachedMemoPrivkey2(userAddress);
+        if (memoPrivkeyForRead !== null) {
+          const tokenEntry = TOKEN_REGISTRY[selectedToken];
+          // cadence-ft uses Cadence addr as token key; EVM tokens use proxy
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tokenProxyForRead = tokenEntry.variant === "cadence-ft"
+            ? (tokenEntry as any).cadenceAddress as string
+            : (tokenEntry as any).proxy as string;
+          const cpState = tokenEntry.variant === "cadence-ft"
+            ? null  // MockFT checkpoint reads handled differently — skip on-mount
+            : await getShieldedStateForCoa(coa, memoPrivkeyForRead, tokenProxyForRead).catch(() => null);
+          if (!cancelled && cpState) {
+            setShielded({ balanceWei: cpState.balance.toString(), blinding: cpState.blinding.toString() });
+          }
+        }
 
         // Read fee rate from chain (non-fatal)
         const bps = await fetchFeeBps(selectedToken);
@@ -240,9 +256,20 @@ function WrapPageInner() {
     if (!userAddress || !coaHex) return;
     if (wrapState.status === "loading") return; // still in initial load
 
-    // Reset shielded balance for new token
-    const s = loadShieldedState(userAddress, selectedToken);
-    setShielded(s);
+    // Reset shielded balance for new token — read from per-token checkpoint
+    (async () => {
+      const { getCachedMemoPrivkey: gck } = await import("@/lib/memo-key-session");
+      const memoPrivkeyForRead = gck(userAddress);
+      const tokenEntry = TOKEN_REGISTRY[selectedToken];
+      if (memoPrivkeyForRead === null || tokenEntry.variant === "cadence-ft") {
+        setShielded(null);
+        return;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tokenProxyForRead = (tokenEntry as any).proxy as string;
+      const cpState = await getShieldedStateForCoa(coaHex, memoPrivkeyForRead, tokenProxyForRead).catch(() => null);
+      setShielded(cpState ? { balanceWei: cpState.balance.toString(), blinding: cpState.blinding.toString() } : null);
+    })();
 
     // Fetch fee for new token
     fetchFeeBps(selectedToken)
