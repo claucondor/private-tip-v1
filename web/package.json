@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
-    "@claucondor/sdk": "file:vendor/claucondor-sdk-0.8.1-alpha.4.tgz",
+    "@claucondor/sdk": "file:vendor/claucondor-sdk-0.8.1-alpha.5.tgz",
     "@onflow/react-sdk": "^0.20.0",
     "@openjanus/commitment": "file:openjanus-commitment-0.1.0.tgz",
     "class-variance-authority": "^0.7.1",
