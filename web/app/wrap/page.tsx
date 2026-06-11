@@ -413,10 +413,8 @@ function WrapPageInner() {
       const wrapTokenEntry = TOKEN_REGISTRY[selectedToken];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const wrapTokenProxy = wrapTokenEntry.variant !== "cadence-ft" ? (wrapTokenEntry as any).proxy as string : null;
-      if (!wrapTokenProxy) {
-        // cadence-ft: Cadence-side checkpoint is singleton — per-token EVM upgrade pending v0.8.3.
-        console.warn("[wrap] MockFT uses singleton Cadence checkpoint — per-token upgrade pending v0.8.3");
-      }
+      // cadence-ft (MockFT): no EVM proxy — checkpoint lives on the Cadence side,
+      // handled inside the combined Cadence tx. EVM-side prevState read does not apply.
       const prevState = wrapTokenProxy
         ? await getShieldedStateForCoa(coaAddr, memoPrivkey, wrapTokenProxy).catch(() => null)
         : null;
