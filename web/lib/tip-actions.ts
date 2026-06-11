@@ -446,58 +446,41 @@ export async function activateAccount(
   flowAddr: string,
   keypair: { privkey: bigint; pubkey: Point },
 ): Promise<ActivateAccountResult> {
-  const { TX_PUBLISH_MEMOKEY_XVM } = await import("./cadence-tx");
   const fcl = await getFcl();
 
-  // Step 1: Publish BabyJub pubkey to Cadence storage + EVM MemoKeyRegistry.
-  // Single Flow Wallet popup — COA is msg.sender, no ethers.BrowserProvider needed.
-  // Idempotent at the contract level (re-publishing same key is a harmless overwrite),
-  // but we skip if already published to avoid unnecessary gas.
-  let memoKeyTxHash: string | null = null;
+  // Idempotent check: skip entirely only if BOTH memoKey AND resources are present.
   const coaAddr = await sdkGetCoaEvmAddress(flowAddr, "testnet").catch(() => null);
   const adapter = sdk.token("flow");
-  const existing = coaAddr
-    ? await adapter.getMemoKey(coaAddr).catch(() => null)
-    : null;
-  if (!existing || (existing.x === 0n && existing.y === 0n)) {
-    const memoKeyTxId: string = await fcl.mutate({
-      cadence: TX_PUBLISH_MEMOKEY_XVM,
-      args: (arg: (v: string, t: unknown) => unknown, t: { UInt256: unknown }) => [
-        arg(keypair.pubkey.x.toString(), t.UInt256),
-        arg(keypair.pubkey.y.toString(), t.UInt256),
-      ],
-      proposer: fcl.authz,
-      payer: fcl.authz,
-      authorizations: [fcl.authz],
-      limit: 9999,
-    });
-    await fcl.tx(memoKeyTxId).onceSealed();
-    memoKeyTxHash = memoKeyTxId;
-  }
-
-  // Step 2: Install ShieldedInbox + ShieldedCheckpoint via FCL Cadence tx (idempotent)
-  let installTxId: string | null = null;
-  const cpClient = new ShieldedCheckpointClient();
-  const ibClient = new ShieldedInboxClient();
-  const [cpExists, ibCount] = await Promise.all([
-    coaAddr ? cpClient.exists(coaAddr) : Promise.resolve(false),
+  const [existingKey, cpExists, ibCountOk] = await Promise.all([
+    coaAddr ? adapter.getMemoKey(coaAddr).catch(() => null) : Promise.resolve(null),
+    coaAddr ? new ShieldedCheckpointClient().exists(coaAddr) : Promise.resolve(false),
     coaAddr
-      ? ibClient.count(coaAddr).then(() => true).catch(() => false)
+      ? new ShieldedInboxClient().count(coaAddr).then(() => true).catch(() => false)
       : Promise.resolve(false),
   ]);
-  if (!cpExists || !ibCount) {
-    installTxId = await fcl.mutate({
-      cadence: cadenceTx.installInboxAndCheckpoint(),
-      args: () => [],
-      proposer: fcl.authz,
-      payer: fcl.authz,
-      authorizations: [fcl.authz],
-      limit: 9999,
-    });
-    await fcl.tx(installTxId).onceSealed();
+
+  const memoKeyPublished = existingKey && !(existingKey.x === 0n && existingKey.y === 0n);
+  if (memoKeyPublished && cpExists && ibCountOk) {
+    // Fully configured — skip wallet popup.
+    return { memoKeyTxHash: null, installTxId: null, pubkey: keypair.pubkey };
   }
 
-  return { memoKeyTxHash, installTxId, pubkey: keypair.pubkey };
+  // Submit a single atomic FCL tx: memoKey publish + inbox + checkpoint install.
+  const { TX_ACTIVATE_ACCOUNT_ATOMIC } = await import("./cadence-tx");
+  const atomicTxId: string = await fcl.mutate({
+    cadence: TX_ACTIVATE_ACCOUNT_ATOMIC,
+    args: (arg: (v: string, t: unknown) => unknown, t: { UInt256: unknown }) => [
+      arg(keypair.pubkey.x.toString(), t.UInt256),
+      arg(keypair.pubkey.y.toString(), t.UInt256),
+    ],
+    proposer: fcl.authz,
+    payer: fcl.authz,
+    authorizations: [fcl.authz],
+    limit: 9999,
+  });
+  await fcl.tx(atomicTxId).onceSealed();
+
+  return { memoKeyTxHash: atomicTxId, installTxId: atomicTxId, pubkey: keypair.pubkey };
 }
 
 // ─── v0.8 Core: getShieldedState ─────────────────────────────────────────────
