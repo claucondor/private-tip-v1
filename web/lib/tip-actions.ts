@@ -601,11 +601,21 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     publicInputs: proofData.publicInputs.map(BigInt),
   };
 
-  // Detect "fresh slot" — if the on-chain JanusFlow commitment is the identity
-  // point (admin reset / first-ever wrap), the local checkpoint state (if any)
-  // is stale and must be ignored. Otherwise accumulation produces a C_new that
-  // does not match what the on-chain proof verifier expects.
-  const onChainCommit = await adapter.getCommitment(coaEvmAddr);
+  // Detect "fresh slot" — if the on-chain commitment is the identity point
+  // (admin reset / first-ever wrap), any local checkpoint state is stale and
+  // must be ignored. Otherwise accumulation produces a C_new that does not
+  // match what the on-chain proof verifier expects.
+  //
+  // Address type depends on the token variant:
+  //   - native / erc20: EVM contracts → COA EVM address (20 bytes)
+  //   - cadence-ft:     Cadence contract → user's Cadence address (8 bytes)
+  const stateAddrForCommit =
+    entry.variant === "cadence-ft" && userCadenceAddr
+      ? userCadenceAddr
+      : coaEvmAddr;
+  const onChainCommit = await adapter
+    .getCommitment(stateAddrForCommit)
+    .catch(() => ({ x: 0n, y: 1n }));
   const isFreshSlot = onChainCommit.x === 0n && onChainCommit.y === 1n;
   const effectivePrevBalance = isFreshSlot ? 0n : prevBalance;
   const effectivePrevBlinding = isFreshSlot ? 0n : prevBlinding;
