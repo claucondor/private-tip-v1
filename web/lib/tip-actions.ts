@@ -601,9 +601,19 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     publicInputs: proofData.publicInputs.map(BigInt),
   };
 
+  // Detect "fresh slot" — if the on-chain JanusFlow commitment is the identity
+  // point (admin reset / first-ever wrap), the local checkpoint state (if any)
+  // is stale and must be ignored. Otherwise accumulation produces a C_new that
+  // does not match what the on-chain proof verifier expects.
+  const onChainCommit = await adapter.getCommitment(coaEvmAddr);
+  const isFreshSlot = onChainCommit.x === 0n && onChainCommit.y === 1n;
+  const effectivePrevBalance = isFreshSlot ? 0n : prevBalance;
+  const effectivePrevBlinding = isFreshSlot ? 0n : prevBlinding;
+  const effectivePrevCursor = isFreshSlot ? 0n : prevCursor;
+
   // Accumulate marginal state into cumulative checkpoint state (needed for all paths).
-  const newBalance = prevBalance + netAmount;
-  const newBlinding = (prevBlinding + marginalBlinding) % BABYJUB_SUBORDER;
+  const newBalance = effectivePrevBalance + netAmount;
+  const newBlinding = (effectivePrevBlinding + marginalBlinding) % BABYJUB_SUBORDER;
 
   if (entry.variant === "native") {
     // ── Atomic path: wrap + checkpoint in a single FCL tx ──────────────────────
@@ -648,7 +658,7 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
         arg(Array.from(cpSnap.ciphertext).map(String), t.Array(t.UInt8)),
         arg(cpSnap.ephemeralPubkey.x.toString(), t.UInt256),
         arg(cpSnap.ephemeralPubkey.y.toString(), t.UInt256),
-        arg(prevCursor.toString(), t.UInt64),
+        arg(effectivePrevCursor.toString(), t.UInt64),
       ],
       proposer: fcl.authz,
       payer: fcl.authz,
