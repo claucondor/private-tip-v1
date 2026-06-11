@@ -94,10 +94,10 @@ export default function PortfolioPage() {
     setRows(initialRows());
   }, [userAddress]);
 
-  // Phase 4: reads on-chain ShieldedCheckpoint via VoidSigner staticCall (no raw EVM key).
-  // There is ONE checkpoint per COA address — all tokens share this slot.
-  // Each token row shows the same shielded balance (the single checkpoint value).
-  // Declared BEFORE the page-state useEffect and handleUnlock so both can reference it.
+  // Phase 4 (v0.8.2): reads on-chain ShieldedCheckpoint via VoidSigner staticCall.
+  // Per-token reads: FLOW + mUSDC each have their own EVM checkpoint slot.
+  // MockFT (cadence-ft) is still on the singleton Cadence checkpoint — shown as "—"
+  // with a tooltip until v0.8.3 Cadence governance upgrade lands.
   const refreshShieldedState = useCallback(async (addr: string, coa: string) => {
     const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
     const memoPrivkey = getCachedMemoPrivkey(addr);
@@ -106,9 +106,6 @@ export default function PortfolioPage() {
       return;
     }
 
-    // Read checkpoint (VoidSigner — no private key needed).
-    const cpState = await getShieldedStateForCoa(coa, memoPrivkey);
-
     // Read inbox pending count (view call — no signer needed).
     let inboxCount = 0;
     try {
@@ -116,21 +113,41 @@ export default function PortfolioPage() {
       inboxCount = Number(await ibClient.count(coa));
     } catch { /* non-fatal */ }
 
+    // Per-token checkpoint reads — each EVM token has its own slot.
     for (const t of SUPPORTED_TOKENS) {
-      if (cpState) {
+      const entry = TOKEN_REGISTRY[t.id];
+
+      if (entry.variant === "cadence-ft") {
+        // MockFT: Cadence per-token checkpoint deferred to v0.8.3 (governance window).
+        // Show "—" with limitation indicator — do NOT read singleton (would show wrong token's data).
         setRow(t.id, {
-          shieldedState: {
-            balanceRaw: cpState.balance.toString(),
-            blinding: cpState.blinding.toString(),
-            checkpointVersion: cpState.version.toString(),
-            lastUpdatedBlock: "0",
-            inboxPendingCount: inboxCount,
-          },
+          shieldedState: null,
           loading: false,
           error: null,
         });
-      } else {
-        setRow(t.id, { shieldedState: null, loading: false, error: null });
+        continue;
+      }
+
+      // EVM token (native or erc20): per-token read from new ShieldedCheckpoint.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tokenAddr = (entry as any).proxy as string;
+      try {
+        const cpState = await getShieldedStateForCoa(coa, memoPrivkey, tokenAddr).catch(() => null);
+        setRow(t.id, {
+          shieldedState: cpState
+            ? {
+                balanceRaw: cpState.balance.toString(),
+                blinding: cpState.blinding.toString(),
+                checkpointVersion: cpState.version.toString(),
+                lastUpdatedBlock: "0",
+                inboxPendingCount: inboxCount,
+              }
+            : null,
+          loading: false,
+          error: null,
+        });
+      } catch {
+        setRow(t.id, { loading: false, error: null });
       }
     }
   }, [setRow, setPageState]);
@@ -497,13 +514,27 @@ export default function PortfolioPage() {
                     <Lock className="w-3 h-3 text-[#00EF8B]/60" />
                     <span className="text-[10px] text-[#00EF8B]/60 uppercase tracking-wide">Shielded</span>
                   </div>
-                  {hasShielded && shieldedBal !== null ? (
-                    <p className="text-sm font-mono text-[#00EF8B]">
-                      {formatTokenAmount(shieldedBal, row.tokenId, 4)} {token.symbol}
-                    </p>
-                  ) : (
-                    <p className="text-sm font-mono text-foreground/30">0.0000</p>
-                  )}
+                  {(() => {
+                    const entry = TOKEN_REGISTRY[row.tokenId];
+                    if (entry.variant === "cadence-ft") {
+                      // MockFT: Cadence per-token checkpoint deferred — show limitation badge.
+                      return (
+                        <p
+                          className="text-sm font-mono text-foreground/30 cursor-help"
+                          title="Cadence per-token checkpoint deferred — see release notes for v0.8.3"
+                        >
+                          — <span className="text-[9px] text-amber-500/60 font-sans">(beta — Cadence path)</span>
+                        </p>
+                      );
+                    }
+                    return hasShielded && shieldedBal !== null ? (
+                      <p className="text-sm font-mono text-[#00EF8B]">
+                        {formatTokenAmount(shieldedBal, row.tokenId, 4)} {token.symbol}
+                      </p>
+                    ) : (
+                      <p className="text-sm font-mono text-foreground/30">0.0000</p>
+                    );
+                  })()}
                 </div>
               </div>
 

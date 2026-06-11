@@ -7,7 +7,7 @@
 /// metadata (no signer required — metadata() is a public view).
 
 import { useState, useEffect } from "react";
-import { ShieldedCheckpointClient, getCoaEvmAddress } from "@claucondor/sdk";
+import { ShieldedCheckpointClient, getCoaEvmAddress, TOKEN_REGISTRY } from "@claucondor/sdk";
 import type { CheckpointMetadata } from "@claucondor/sdk";
 import { Loader2 } from "lucide-react";
 
@@ -48,9 +48,11 @@ export default function CheckpointStatus({
         if (cancelled) return;
 
         const client = new ShieldedCheckpointClient();
+        // v0.8.2: exists/metadata now require a token address. CheckpointStatus shows
+        // FLOW slot by default (TODO C.2: multi-token per-row status display).
         const [exists, metadata] = await Promise.all([
-          client.exists(coaAddr).catch(() => false),
-          client.metadata(coaAddr).catch(() => null),
+          client.exists(coaAddr, TOKEN_REGISTRY.flow.proxy).catch(() => false),
+          client.metadata(coaAddr, TOKEN_REGISTRY.flow.proxy).catch(() => null),
         ]);
 
         if (cancelled) return;

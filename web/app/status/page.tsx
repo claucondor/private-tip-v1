@@ -691,10 +691,11 @@ function Step3Verification({
         const coaAddr = await resolveCoaAddr(userAddress).catch(() => null);
         const hasCoaAddr = coaAddr && coaAddr !== "0x" && coaAddr.length >= 5;
 
+        const { TOKEN_REGISTRY: statusTokenReg } = await import("@claucondor/sdk/network");
         const [memoPub, cpExists, ibCountOk] = await Promise.all([
           getRecipientMemoPubkey(userAddress).catch(() => null),
           hasCoaAddr
-            ? new ShieldedCheckpointClient().exists(coaAddr!).catch(() => false)
+            ? new ShieldedCheckpointClient().exists(coaAddr!, statusTokenReg.flow.proxy).catch(() => false)
             : Promise.resolve(false),
           hasCoaAddr
             ? new ShieldedInboxClient()

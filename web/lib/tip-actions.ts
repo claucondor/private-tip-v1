@@ -161,19 +161,21 @@ export function getReadOnlySigner(evmAddr: string): ethers.VoidSigner {
  * Uses a VoidSigner (the COA address) for the owner-gated staticCall — no
  * private key needed, the EVM node simulates msg.sender = coaAddr.
  *
+ * v0.8.2: checkpoint is now per-token — callers must supply the token's EVM proxy address.
  * Returns null if no checkpoint exists yet (account not activated / first wrap pending).
  */
 export async function getShieldedStateForCoa(
   coaAddr: string,
   memoPrivkey: bigint,
+  tokenAddress: string,
 ): Promise<{ balance: bigint; blinding: bigint; version: bigint; lastConsumedNoteIndex: bigint } | null> {
   const cpClient = new ShieldedCheckpointClient();
-  const exists = await cpClient.exists(coaAddr);
+  const exists = await cpClient.exists(coaAddr, tokenAddress);
   if (!exists) return null;
   const voidSigner = getReadOnlySigner(coaAddr);
-  const snap = await cpClient.readAndDecrypt(voidSigner as unknown as ethers.Wallet, memoPrivkey);
+  const snap = await cpClient.readAndDecrypt(tokenAddress, voidSigner as unknown as ethers.Wallet, memoPrivkey);
   if (!snap) return null;
-  const meta = await cpClient.metadata(coaAddr);
+  const meta = await cpClient.metadata(coaAddr, tokenAddress);
   return {
     balance: snap.balance,
     blinding: snap.blinding,
@@ -187,23 +189,39 @@ export async function getShieldedStateForCoa(
  * This is the browser-safe path — no raw EVM private key needed.
  * The COA is msg.sender for the EVM ShieldedCheckpoint.update() call.
  *
- * @param snapshot   { balance, blinding } to persist.
- * @param cursor     lastConsumedNoteIndex (inbox drain cursor).
+ * v0.8.2: checkpoint is now per-token. Pass the token's EVM proxy address as
+ * `tokenAddress`. For cadence-ft (MockFT) tokens that have no EVM proxy, omit
+ * this param — the update will be skipped with a console.warn (Cadence singleton
+ * path unchanged, per-token upgrade pending v0.8.3).
+ *
+ * @param snapshot    { balance, blinding } to persist.
+ * @param cursor      lastConsumedNoteIndex (inbox drain cursor).
  * @param memoKeypair Caller's BabyJub keypair (pubkey used for ECIES encryption).
- * @returns Cadence tx ID (not an EVM hash).
+ * @param tokenAddress EVM proxy address of the token (e.g. TOKEN_REGISTRY.flow.proxy).
+ * @returns Cadence tx ID (not an EVM hash), or empty string if skipped.
  */
 export async function encryptAndUpdateCheckpointViaCoa(
   snapshot: { balance: bigint; blinding: bigint },
   cursor: bigint,
   memoKeypair: BabyJubKeypair,
+  tokenAddress?: string,
 ): Promise<string> {
+  if (!tokenAddress) {
+    // cadence-ft (MockFT): no EVM proxy — per-token checkpoint not applicable yet.
+    console.warn(
+      "[encryptAndUpdateCheckpointViaCoa] tokenAddress not provided — " +
+      "cadence-ft singleton checkpoint update skipped. " +
+      "Per-token Cadence checkpoint upgrade pending v0.8.3 governance window."
+    );
+    return "";
+  }
   const enc = await encryptSnapshot(snapshot, memoKeypair.pubkey);
   const fcl = await getFcl();
-  const { TX_UPDATE_CHECKPOINT_VIA_COA } = await import("./cadence-tx");
   const txId: string = await fcl.mutate({
-    cadence: TX_UPDATE_CHECKPOINT_VIA_COA,
+    cadence: cadenceTx.updateCheckpointViaCoa(),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
+    args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; UInt256: unknown; UInt64: unknown }) => [
+      arg(tokenAddress, t.String),
       arg(ethers.hexlify(enc.ciphertext).slice(2), t.String),
       arg(enc.ephemeralPubkey.x.toString(), t.UInt256),
       arg(enc.ephemeralPubkey.y.toString(), t.UInt256),
@@ -453,7 +471,7 @@ export async function activateAccount(
   const adapter = sdk.token("flow");
   const [existingKey, cpExists, ibCountOk] = await Promise.all([
     coaAddr ? adapter.getMemoKey(coaAddr).catch(() => null) : Promise.resolve(null),
-    coaAddr ? new ShieldedCheckpointClient().exists(coaAddr) : Promise.resolve(false),
+    coaAddr ? new ShieldedCheckpointClient().exists(coaAddr, TOKEN_REGISTRY.flow.proxy) : Promise.resolve(false),
     coaAddr
       ? new ShieldedInboxClient().count(coaAddr).then(() => true).catch(() => false)
       : Promise.resolve(false),
@@ -466,7 +484,89 @@ export async function activateAccount(
   }
 
   // Submit a single atomic FCL tx: memoKey publish + inbox + checkpoint install.
-  const { TX_ACTIVATE_ACCOUNT_ATOMIC } = await import("./cadence-tx");
+  // TX_ACTIVATE_ACCOUNT_ATOMIC is a local template (no SDK equivalent) — inlined here.
+  const TX_ACTIVATE_ACCOUNT_ATOMIC = `
+import JanusFT from 0x4b6bc58bc8bf5dcc
+import JanusFlow from 0x5dcbeb41055ec57e
+import ShieldedInbox from 0x4b6bc58bc8bf5dcc
+import ShieldedCheckpoint from 0x4b6bc58bc8bf5dcc
+import EVM from 0x8c5303eaa26202d6
+
+transaction(memoPubX: UInt256, memoPubY: UInt256) {
+  prepare(signer: auth(BorrowValue, Storage, SaveValue, LoadValue, IssueStorageCapabilityController, PublishCapability, UnpublishCapability) &Account) {
+
+    // ── 1. Publish MemoKey to Cadence storage ──────────────────────────────────
+    JanusFT.publishMemoKey(
+      account: signer,
+      pubkeyX: memoPubX,
+      pubkeyY: memoPubY
+    )
+
+    // ── 2. Publish MemoKey to EVM MemoKeyRegistry via COA ─────────────────────
+    let coa = signer.storage
+      .borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+      ?? panic("activate_account_atomic: no COA at /storage/evm")
+
+    let memoRegistryAddr = EVM.addressFromString("0x361bD4d037838A3a9c5408AE465d36077800ee6c")
+
+    let memoCalldata = EVM.encodeABIWithSignature(
+      "publishMemoKey(uint256,uint256)",
+      [memoPubX, memoPubY]
+    )
+
+    let memoResult = coa.call(
+      to: memoRegistryAddr,
+      data: memoCalldata,
+      gasLimit: 100000,
+      value: EVM.Balance(attoflow: 0)
+    )
+
+    assert(
+      memoResult.status == EVM.Status.successful,
+      message: "EVM MemoKeyRegistry.publishMemoKey failed — errorCode: "
+        .concat(memoResult.errorCode.toString())
+        .concat(" ")
+        .concat(memoResult.errorMessage)
+    )
+
+    // ── NoteInbox ──────────────────────────────────────────────────────────────
+    let inboxStoragePath = /storage/shieldedInbox
+    let inboxPublicPath  = /public/shieldedInbox
+
+    let inboxType = signer.storage.type(at: inboxStoragePath)
+    if inboxType != Type<@ShieldedInbox.NoteInbox>() {
+      if inboxType != nil {
+        let stale <- signer.storage.load<@AnyResource>(from: inboxStoragePath)
+          ?? panic("install_inbox_and_checkpoint: stale inbox resource vanished")
+        destroy stale
+      }
+      let inbox <- ShieldedInbox.createInbox(owner: signer.address)
+      signer.storage.save(<- inbox, to: inboxStoragePath)
+    }
+    signer.capabilities.unpublish(inboxPublicPath)
+    let inboxCap = signer.capabilities.storage.issue<&{ShieldedInbox.Receiver}>(inboxStoragePath)
+    signer.capabilities.publish(inboxCap, at: inboxPublicPath)
+
+    // ── Checkpoint ──────────────────────────────────────────────────────────────
+    let cpStoragePath = /storage/shieldedCheckpoint
+    let cpPublicPath  = /public/shieldedCheckpoint
+
+    let cpType = signer.storage.type(at: cpStoragePath)
+    if cpType != Type<@ShieldedCheckpoint.Checkpoint>() {
+      if cpType != nil {
+        let stale <- signer.storage.load<@AnyResource>(from: cpStoragePath)
+          ?? panic("install_inbox_and_checkpoint: stale checkpoint resource vanished")
+        destroy stale
+      }
+      let cp <- ShieldedCheckpoint.createCheckpoint(owner: signer.address)
+      signer.storage.save(<- cp, to: cpStoragePath)
+    }
+    signer.capabilities.unpublish(cpPublicPath)
+    let cpCap = signer.capabilities.storage.issue<&{ShieldedCheckpoint.Metadata}>(cpStoragePath)
+    signer.capabilities.publish(cpCap, at: cpPublicPath)
+  }
+}
+`;
   const atomicTxId: string = await fcl.mutate({
     cadence: TX_ACTIVATE_ACCOUNT_ATOMIC,
     args: (arg: (v: string, t: unknown) => unknown, t: { UInt256: unknown }) => [
@@ -494,13 +594,14 @@ export async function activateAccount(
  */
 export async function getShieldedState(
   evmSigner: ethers.Wallet,
-  memoPrivkey: bigint
+  memoPrivkey: bigint,
+  tokenAddress: string = TOKEN_REGISTRY.flow.proxy,
 ): Promise<ShieldedTokenState | null> {
   const cpClient = new ShieldedCheckpointClient();
-  const snapshot = await cpClient.readAndDecrypt(evmSigner, memoPrivkey);
+  const snapshot = await cpClient.readAndDecrypt(tokenAddress, evmSigner, memoPrivkey);
   if (!snapshot) return null;
 
-  const meta = await cpClient.metadata(evmSigner.address);
+  const meta = await cpClient.metadata(evmSigner.address, tokenAddress);
   const ibClient = new ShieldedInboxClient();
   const pendingCount = await ibClient.count(evmSigner.address);
 
@@ -655,11 +756,11 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     const wrapCalldataHex = wrapCalldata.slice(2);
 
     // 4. Submit one FCL tx: wrap + checkpoint atomically.
-    const { TX_WRAP_FLOW_ATOMIC } = await import("./cadence-tx");
+    // cadenceTx.wrapFlowAtomic(tokenAddrHex) from SDK — uses new per-token ShieldedCheckpoint.
     const fcl = await getFcl();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const atomicTxId: string = await fcl.mutate({
-      cadence: TX_WRAP_FLOW_ATOMIC,
+      cadence: cadenceTx.wrapFlowAtomic(TOKEN_REGISTRY.flow.proxy),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       args: (arg: (v: unknown, t: unknown) => unknown, t: { UFix64: unknown; UInt: unknown; String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
         arg(toUFix64(grossAmount), t.UFix64),
@@ -694,21 +795,30 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     wrapTxId = wr.txHash;
   } else {
     // cadence-ft (MockFT): FCL Cadence tx with user's Cadence address + COA EVM address
+    // console.warn: Cadence-side checkpoint update still writes to singleton (v0.8.3 governance).
+    console.warn(
+      "[wrapToken] MockFT (cadence-ft) uses singleton Cadence checkpoint — " +
+      "EVM per-token checkpoint update skipped. Upgrade pending v0.8.3 governance window."
+    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, userCadenceAddr, prebuiltProof });
     wrapTxId = wr.txHash;
   }
 
   // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
+  // For erc20: pass token EVM proxy address. For cadence-ft: pass undefined → skipped with warn.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
   const cpTxId = await encryptAndUpdateCheckpointViaCoa(
     { balance: newBalance, blinding: newBlinding },
-    prevCursor,
+    effectivePrevCursor,
     memoKeypair,
+    tokenProxy,
   );
 
   return {
     txHash: wrapTxId,
-    checkpointTxHash: cpTxId,
+    checkpointTxHash: cpTxId || wrapTxId,
     newBalance,
     newBlinding,
   };
@@ -822,11 +932,12 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     const transferCalldataHex = transferCalldata.slice(2);
 
     // 6. Submit one FCL tx: shieldedTransfer + checkpoint atomically.
-    const { TX_SEND_TIP_ATOMIC } = await import("./cadence-tx");
+    // cadenceTx.sendTipAtomic(tokenAddrHex) from SDK — uses new per-token ShieldedCheckpoint.
+    // TODO(C.2): pass actual tokenId proxy for mUSDC/MockFT paths.
     const fcl = await getFcl();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const atomicTxId: string = await fcl.mutate({
-      cadence: TX_SEND_TIP_ATOMIC,
+      cadence: cadenceTx.sendTipAtomic(TOKEN_PROXIES.flow),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
         arg(transferCalldataHex, t.String),
@@ -872,12 +983,16 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
   }
 
   // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
+  // TODO(C.2): route per-tokenId for mUSDC — for now FLOW proxy is default, cadence-ft skipped.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sendTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
   const newBalance = sendResult.newBalance ?? (currentBalance - amount);
   const newBlinding = sendResult.newBlinding ?? generateBlinding();
   const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(
     { balance: newBalance, blinding: newBlinding },
     inboxCursor,
     memoKeypair,
+    sendTokenProxy,
   );
 
   // Persist memo for sender-side /tips view
@@ -1006,11 +1121,12 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
     );
 
     // 6. Submit one FCL tx: unwrap + checkpoint atomically.
-    const { TX_UNWRAP_FLOW_ATOMIC } = await import("./cadence-tx");
+    // cadenceTx.unwrapFlowAtomic(tokenAddrHex) from SDK — uses new per-token ShieldedCheckpoint.
+    // TODO(C.2): pass actual tokenId proxy for mUSDC/MockFT paths.
     const fcl = await getFcl();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const atomicTxId: string = await fcl.mutate({
-      cadence: TX_UNWRAP_FLOW_ATOMIC,
+      cadence: cadenceTx.unwrapFlowAtomic(TOKEN_REGISTRY.flow.proxy),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
         arg(unwrapCalldataHex, t.String),
@@ -1064,12 +1180,16 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
   }
 
   // Residual state — use FCL COA checkpoint update (no raw EVM key).
+  // TODO(C.2): route per-tokenId for mUSDC — for now FLOW proxy is default, cadence-ft skipped.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const unwrapTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
   const residualBalance = currentBalance - claimedAmount;
   const residualBlinding = generateBlinding();
   const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(
     { balance: residualBalance, blinding: residualBlinding },
     inboxCursor,
     memoKeypair,
+    unwrapTokenProxy,
   );
 
   return {

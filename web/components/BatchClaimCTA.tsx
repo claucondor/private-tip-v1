@@ -34,6 +34,7 @@ import {
   getCoaEvmAddress,
   getShieldedStateForCoa,
 } from "@/lib/tip-actions";
+import { cadenceTx, TOKEN_REGISTRY } from "@claucondor/sdk";
 import { FLOWSCAN_CADENCE_TX } from "@/lib/explorer";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -132,7 +133,9 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
       }
 
       // Step 4: Read current checkpoint state (prevBalance + prevBlinding).
-      const prevState = await getShieldedStateForCoa(coaAddr, memoPrivkey);
+      // TODO(C.3): route per-tokenId when batch-claim supports multi-token.
+      // For now BatchClaimCTA is FLOW-only (Phase 4 scope) — use FLOW proxy as token key.
+      const prevState = await getShieldedStateForCoa(coaAddr, memoPrivkey, TOKEN_REGISTRY.flow.proxy);
       const oldBalance  = prevState?.balance ?? 0n;
       const oldBlinding = prevState?.blinding ?? 0n;
       const prevCursor  = prevState?.lastConsumedNoteIndex ?? 0n;
@@ -184,11 +187,12 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
         memoKeypair.pubkey,
       );
 
-      const { TX_CLAIM_BATCH_ATOMIC } = await import("@/lib/cadence-tx");
+      // cadenceTx.claimBatchAtomic(tokenAddrHex) from SDK — uses per-token ShieldedCheckpoint.
+      // TODO(C.3): pass per-token address when multi-token claim is wired. FLOW default for now.
       const fcl = await import("@onflow/fcl");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const atomicTxId: string = await (fcl as any).mutate({
-        cadence: TX_CLAIM_BATCH_ATOMIC,
+        cadence: cadenceTx.claimBatchAtomic(TOKEN_REGISTRY.flow.proxy),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (inner: unknown) => unknown; UInt256: unknown; UInt8: unknown; UInt64: unknown }) => [
           arg(publicInputs.map(String), t.Array(t.UInt256)),

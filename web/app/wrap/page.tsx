@@ -408,9 +408,18 @@ function WrapPageInner() {
       }
 
       // Step 2: Read previous shielded state from on-chain checkpoint (VoidSigner staticCall).
-      // Returns null if no checkpoint yet (first wrap) — prevBalance=0, prevBlinding=0, cursor=0.
+      // v0.8.2: per-token read. cadence-ft (MockFT) has no EVM proxy — treat as fresh start.
       const coaAddr = coaHex!;
-      const prevState = await getShieldedStateForCoa(coaAddr, memoPrivkey);
+      const wrapTokenEntry = TOKEN_REGISTRY[selectedToken];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wrapTokenProxy = wrapTokenEntry.variant !== "cadence-ft" ? (wrapTokenEntry as any).proxy as string : null;
+      if (!wrapTokenProxy) {
+        // cadence-ft: Cadence-side checkpoint is singleton — per-token EVM upgrade pending v0.8.3.
+        console.warn("[wrap] MockFT uses singleton Cadence checkpoint — per-token upgrade pending v0.8.3");
+      }
+      const prevState = wrapTokenProxy
+        ? await getShieldedStateForCoa(coaAddr, memoPrivkey, wrapTokenProxy).catch(() => null)
+        : null;
       const prevBalance = prevState?.balance ?? 0n;
       const prevBlinding = prevState?.blinding ?? 0n;
       const prevCursor = prevState?.lastConsumedNoteIndex ?? 0n;
