@@ -17,6 +17,7 @@ import {
   Shield,
   Coins,
   EyeOff,
+  AlertTriangle,
 } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -31,12 +32,14 @@ import {
   JANUS_FLOW_EVM,
   fetchFeeBps,
   getOrDeriveMemoPrivkey,
+  TOKEN_PROXIES,
   type Point,
 } from "@/lib/tip-actions";
 // loadShieldedState and saveShieldedState removed from @/lib/store in v0.8.
 // Phase 4/5/6 will rewrite — Phase 1 left this here intentionally because it
 // consumes lib functions whose rewrite happens later.
 import { TokenSelector } from "@/components/TokenSelector";
+import { BatchClaimCTA } from "@/components/BatchClaimCTA";
 import { type TokenId, getTokenMeta, formatTokenAmount, parseTokenAmount } from "@/lib/tokens";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
 
@@ -276,6 +279,46 @@ function ClaimPageInner() {
         </div>
       </motion.div>
 
+      {/* Token selector — drives balance display, batch-claim CTA, and unwrap form */}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: EASE, delay: 0.04 }}
+        className="mb-4"
+      >
+        <TokenSelector
+          value={selectedToken}
+          onChange={(id) => { setSelectedToken(id); setShielded(loadShieldedState(userAddress ?? "", id)); }}
+          disabled={isSubmitting}
+          label="Token to claim / unwrap"
+        />
+      </motion.div>
+
+      {/* MockFT singleton limitation banner */}
+      {selectedToken === "mockft" && (
+        <motion.div
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, ease: EASE }}
+          className="rounded-lg border border-amber-500/20 bg-amber-950/20 px-3 py-2.5 text-sm text-amber-200/80 mb-4 flex items-start gap-2"
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <span>
+            <strong className="text-amber-200">MockFT — Cadence singleton checkpoint.</strong>{" "}
+            Unwrapping MockFT shares a state slot with FLOW/mUSDC until v0.8.3.
+            Proceed with caution.
+          </span>
+        </motion.div>
+      )}
+
+      {/* Batch-claim CTA — consolidate inbox notes into shielded balance before unwrapping */}
+      <BatchClaimCTA
+        userAddress={userAddress}
+        tokenId={selectedToken}
+        tokenAddress={TOKEN_PROXIES[selectedToken]}
+        onClaimed={() => { /* balance reload deferred — use portfolio to confirm */ }}
+      />
+
       {/* Balance card */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}
@@ -347,14 +390,6 @@ function ClaimPageInner() {
           transition={{ duration: 0.4, ease: EASE, delay: 0.1 }}
           className="rounded-xl border border-[#B45309]/25 janus-copper-glow bg-[#0D1E38]/80 p-6 space-y-4 mb-6"
         >
-          {/* Token selector */}
-          <TokenSelector
-            value={selectedToken}
-            onChange={(id) => { setSelectedToken(id); setShielded(loadShieldedState(userAddress ?? "", id)); }}
-            disabled={isSubmitting}
-            label="Token to unwrap"
-          />
-
           <div>
             <label className="text-xs font-medium text-foreground/50 mb-1 block">Amount to unwrap</label>
             <input

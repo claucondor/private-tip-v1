@@ -1120,6 +1120,28 @@ function TabArchitecture() {
           and Tornado Cash in production.
         </Callout>
 
+        {/* v0.8.2 multi-token status callout */}
+        <Callout accent="emerald" label="v0.8.2 — Multi-token isolation fix (current release)">
+          <ul className="space-y-1 text-sm">
+            <li>
+              <strong>PrivateTip uses BabyJubJub elliptic curve commitments + Groth16 ZK proofs.</strong>{" "}
+              Each token maintains its own independent Pedersen commitment on-chain.
+            </li>
+            <li>
+              <strong>Multi-token:</strong> per-token shielded balances stored independently — FLOW, mUSDC,
+              and MockFT never collide in the same EVM storage slot.
+            </li>
+            <li>
+              <strong>Cadence Cross-VM:</strong> Flow&apos;s COA mechanism lets EVM contracts be controlled
+              from Cadence transactions — one atomic call, no second wallet popup.
+            </li>
+            <li>
+              <strong>v0.8.2 fixes the per-token isolation bug.</strong> v0.8.3 will close the remaining
+              Cadence FT (MockFT) per-token checkpoint gap.
+            </li>
+          </ul>
+        </Callout>
+
         {/* Architecture layers callout */}
         <div className="mt-8 rounded-xl border border-border bg-card p-4">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Layer diagram</p>
@@ -1249,7 +1271,7 @@ export default function LearnPage() {
           <span>·</span>
           <span>4 tabs</span>
           <span>·</span>
-          <span>Updated May 2026</span>
+          <span>Updated June 2026 (v0.8.2)</span>
           <span>·</span>
           <Link href="/" className="flex items-center gap-1 hover:text-foreground transition-colors">
             ← Back

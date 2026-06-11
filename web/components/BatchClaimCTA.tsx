@@ -21,7 +21,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Inbox, Loader2, CheckCircle, XCircle } from "lucide-react";
+import { Inbox, Loader2, CheckCircle, XCircle, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { ethers } from "ethers";
 import {
@@ -36,6 +36,7 @@ import {
 } from "@/lib/tip-actions";
 import { cadenceTx, TOKEN_REGISTRY } from "@claucondor/sdk";
 import { FLOWSCAN_CADENCE_TX } from "@/lib/explorer";
+import { type TokenId, getTokenMeta } from "@/lib/tokens";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -52,19 +53,32 @@ interface BatchClaimCTAProps {
   userAddress: string | null;
   /** Called after a successful batch claim so the parent can refresh balances. */
   onClaimed?: () => void;
+  /** Token to batch-claim for. Defaults to FLOW. */
+  tokenId?: TokenId;
+  /** EVM proxy address of the token. Defaults to JanusFlow proxy. */
+  tokenAddress?: string;
 }
 
-export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
+export function BatchClaimCTA({
+  userAddress,
+  onClaimed,
+  tokenId = "flow",
+  tokenAddress = TOKEN_REGISTRY.flow.proxy,
+}: BatchClaimCTAProps) {
   const [coaAddr, setCoaAddr]       = useState<string | null>(null);
   const [inboxCount, setInboxCount] = useState<number>(0);
   const [status, setStatus]         = useState<ClaimStatus>("checking");
   const [error, setError]           = useState<string | null>(null);
   const [claimTxId, setClaimTxId]  = useState<string | null>(null);
 
+  const tokenMeta = getTokenMeta(tokenId);
+  // MockFT (cadence-ft): EVM batch-claim is deferred to v0.8.3.
+  const isDeferred = tokenId === "mockft";
+
   // ── Initial count check ────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!userAddress) {
+    if (!userAddress || isDeferred) {
       setStatus("idle");
       return;
     }
@@ -76,10 +90,14 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
         if (cancelled) return;
         setCoaAddr(coa);
 
+        // peekAll + filter by depositor for per-token inbox count
         const ibClient = new ShieldedInboxClient(SHIELDED_INBOX_ADDRESS);
-        const count = Number(await ibClient.count(coa));
+        const allNotes = await ibClient.peekAll(coa).catch(() => []);
+        const tokenNotes = allNotes.filter(
+          (n) => n.depositor.toLowerCase() === tokenAddress.toLowerCase()
+        );
         if (!cancelled) {
-          setInboxCount(count);
+          setInboxCount(tokenNotes.length);
           setStatus("idle");
         }
       } catch {
@@ -87,7 +105,7 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
       }
     })();
     return () => { cancelled = true; };
-  }, [userAddress]);
+  }, [userAddress, tokenAddress, isDeferred]);
 
   // ── Batch claim handler ────────────────────────────────────────────────────
 
@@ -103,11 +121,14 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
         throw new Error("Private key not in session — unlock first from the portfolio page.");
       }
 
-      // Step 2: Peek pending notes (view call — no signature).
+      // Step 2: Peek pending notes and filter to the selected token's depositor.
       const ibClient = new ShieldedInboxClient(SHIELDED_INBOX_ADDRESS);
-      const rawNotes = await ibClient.peekAll(coaAddr);
+      const allNotes = await ibClient.peekAll(coaAddr);
+      const rawNotes = allNotes.filter(
+        (n) => n.depositor.toLowerCase() === tokenAddress.toLowerCase()
+      );
       if (rawNotes.length === 0) {
-        toast.info("No pending notes found.");
+        toast.info(`No pending ${tokenMeta.symbol} notes found.`);
         setInboxCount(0);
         setStatus("idle");
         return;
@@ -132,10 +153,8 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
         throw new Error("None of the pending notes could be decrypted with your memo key.");
       }
 
-      // Step 4: Read current checkpoint state (prevBalance + prevBlinding).
-      // TODO(C.3): route per-tokenId when batch-claim supports multi-token.
-      // For now BatchClaimCTA is FLOW-only (Phase 4 scope) — use FLOW proxy as token key.
-      const prevState = await getShieldedStateForCoa(coaAddr, memoPrivkey, TOKEN_REGISTRY.flow.proxy);
+      // Step 4: Read current checkpoint state — per-token routing via tokenAddress.
+      const prevState = await getShieldedStateForCoa(coaAddr, memoPrivkey, tokenAddress);
       const oldBalance  = prevState?.balance ?? 0n;
       const oldBlinding = prevState?.blinding ?? 0n;
       const prevCursor  = prevState?.lastConsumedNoteIndex ?? 0n;
@@ -187,12 +206,11 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
         memoKeypair.pubkey,
       );
 
-      // cadenceTx.claimBatchAtomic(tokenAddrHex) from SDK — uses per-token ShieldedCheckpoint.
-      // TODO(C.3): pass per-token address when multi-token claim is wired. FLOW default for now.
+      // cadenceTx.claimBatchAtomic(tokenAddress) — per-token routing via prop.
       const fcl = await import("@onflow/fcl");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const atomicTxId: string = await (fcl as any).mutate({
-        cadence: cadenceTx.claimBatchAtomic(TOKEN_REGISTRY.flow.proxy),
+        cadence: cadenceTx.claimBatchAtomic(tokenAddress),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (inner: unknown) => unknown; UInt256: unknown; UInt8: unknown; UInt64: unknown }) => [
           arg(publicInputs.map(String), t.Array(t.UInt256)),
@@ -216,7 +234,9 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
       setClaimTxId(atomicTxId);
       setInboxCount(0);
       setStatus("success");
-      toast.success(`Batch claim complete — ${decrypted.length} note${decrypted.length !== 1 ? "s" : ""} consolidated.`);
+      toast.success(
+        `Batch claim complete — ${decrypted.length} ${tokenMeta.symbol} note${decrypted.length !== 1 ? "s" : ""} consolidated.`
+      );
       onClaimed?.();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -224,11 +244,31 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
       setStatus("error");
       toast.error("Batch claim failed", { description: msg });
     }
-  }, [userAddress, coaAddr, onClaimed]);
+  }, [userAddress, coaAddr, onClaimed, tokenAddress, tokenMeta.symbol]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  // Hide if not logged in, still checking, or no pending notes
+  // MockFT: EVM batch-claim deferred to v0.8.3 (Cadence FT path requires per-token Cadence upgrade)
+  if (isDeferred && userAddress) {
+    return (
+      <div className="rounded-xl border border-amber-500/25 bg-amber-950/20 p-4 mb-4">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-semibold text-amber-200 mb-1">
+              MockFT batch claim — deferred (see v0.8.3)
+            </p>
+            <p className="text-xs text-amber-300/70">
+              MockFT uses the Cadence FT path. EVM batch-claim is unavailable for this token in v0.8.2.
+              Per-token Cadence checkpoint support ships in v0.8.3.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Hide if not logged in, still checking, or too few notes
   if (!userAddress || status === "checking" || (status === "idle" && inboxCount < MIN_NOTES_TO_SHOW)) {
     return null;
   }
@@ -248,7 +288,7 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
             <div>
               <p className="text-sm font-semibold text-foreground mb-1">Batch claim complete</p>
               <p className="text-xs text-foreground/50 mb-2">
-                Notes consolidated into your shielded balance.
+                {tokenMeta.symbol} notes consolidated into your shielded balance.
               </p>
               {claimTxId && (
                 <a
@@ -284,10 +324,10 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
               <Inbox className="w-5 h-5 text-[#8B5CF6] shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-semibold text-foreground mb-0.5">
-                  {inboxCount} tip{inboxCount !== 1 ? "s" : ""} waiting in your inbox
+                  {inboxCount} {tokenMeta.symbol} tip{inboxCount !== 1 ? "s" : ""} waiting in your inbox
                 </p>
                 <p className="text-xs text-foreground/50">
-                  Batch-claim them to add to your shielded FLOW balance.
+                  Batch-claim them to add to your shielded {tokenMeta.symbol} balance.
                   {" "}<span className="text-foreground/30">(~90s proof generation)</span>
                 </p>
               </div>
