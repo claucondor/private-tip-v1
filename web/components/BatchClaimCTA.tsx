@@ -9,13 +9,12 @@
 ///   1. peekAll  — view read of pending notes (no signature)
 ///   2. decrypt  — ECIES decrypt each note locally with memoPrivkey
 ///   3. proof    — POST /api/proof/batch-claim (Node.js, 60-90s)
-///   4. drain    — FCL COA tx: ShieldedInbox.drainAll() removes notes from mailbox
-///   5. claim    — FCL COA tx: JanusToken.claimBatch(publicInputs, proof)
-///   6. update   — FCL COA tx: ShieldedCheckpoint.update() persists new encrypted state
-///   7. callback — triggers portfolio refresh via onClaimed()
+///   4. claim    — FCL COA tx: claimBatchAtomic (EVM) or claimBatchFtAtomic (FT)
+///                 drainAll + claimBatch + ShieldedCheckpoint.update in ONE tx
+///   5. callback — triggers portfolio refresh via onClaimed()
 ///
-/// Scope (Phase 4): FLOW token only. mUSDC / MockFT claim requires per-token routing
-/// (the batch-claim verifier address differs) — deferred to Phase 7.
+/// Token routing: FLOW + mUSDC → cadenceTx.claimBatchAtomic
+///                MockFT (cadence-ft) → cadenceTx.claimBatchFtAtomic
 
 "use client";
 
@@ -204,28 +203,57 @@ export function BatchClaimCTA({
         memoKeypair.pubkey,
       );
 
-      // cadenceTx.claimBatchAtomic(tokenAddress) — per-token routing via prop.
-      const fcl = await import("@onflow/fcl");
+      // Route: cadence-ft (MockFT) → claimBatchFtAtomic; EVM tokens → claimBatchAtomic.
+      const isCadenceFt = TOKEN_REGISTRY[tokenId].variant === "cadence-ft";
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const atomicTxId: string = await (fcl as any).mutate({
-        cadence: cadenceTx.claimBatchAtomic(tokenAddress),
+      const ftContractAddr = isCadenceFt ? (TOKEN_REGISTRY[tokenId] as any).cadenceAddress as string : tokenAddress;
+
+      const fcl = await import("@onflow/fcl");
+      let atomicTxId: string;
+      if (isCadenceFt) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (inner: unknown) => unknown; UInt256: unknown; UInt8: unknown; UInt64: unknown }) => [
-          arg(publicInputs.map(String), t.Array(t.UInt256)),
-          arg(proof.map(String), t.Array(t.UInt256)),
-          arg(ethers.hexlify(cpEnc.ciphertext).slice(2), t.String),
-          arg(cpEnc.ephemeralPubkey.x.toString(), t.UInt256),
-          arg(cpEnc.ephemeralPubkey.y.toString(), t.UInt256),
-          arg(newCursor.toString(), t.UInt64),
-        ],
+        atomicTxId = await (fcl as any).mutate({
+          cadence: cadenceTx.claimBatchFtAtomic(tokenAddress, ftContractAddr),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; Array: (inner: unknown) => unknown; UInt256: unknown; String: unknown; UInt64: unknown }) => [
+            arg(userAddress, t.Address),
+            arg(publicInputs.map(String), t.Array(t.UInt256)),
+            arg(proof.map(String), t.Array(t.UInt256)),
+            arg(ethers.hexlify(cpEnc.ciphertext).slice(2), t.String),
+            arg(cpEnc.ephemeralPubkey.x.toString(), t.UInt256),
+            arg(cpEnc.ephemeralPubkey.y.toString(), t.UInt256),
+            arg(newCursor.toString(), t.UInt64),
+          ],
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          proposer: (fcl as any).authz,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          payer: (fcl as any).authz,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          authorizations: [(fcl as any).authz],
+          limit: 9999,
+        });
+      } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        proposer: (fcl as any).authz,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        payer: (fcl as any).authz,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        authorizations: [(fcl as any).authz],
-        limit: 9999,
-      });
+        atomicTxId = await (fcl as any).mutate({
+          cadence: cadenceTx.claimBatchAtomic(tokenAddress),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (inner: unknown) => unknown; UInt256: unknown; UInt64: unknown }) => [
+            arg(publicInputs.map(String), t.Array(t.UInt256)),
+            arg(proof.map(String), t.Array(t.UInt256)),
+            arg(ethers.hexlify(cpEnc.ciphertext).slice(2), t.String),
+            arg(cpEnc.ephemeralPubkey.x.toString(), t.UInt256),
+            arg(cpEnc.ephemeralPubkey.y.toString(), t.UInt256),
+            arg(newCursor.toString(), t.UInt64),
+          ],
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          proposer: (fcl as any).authz,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          payer: (fcl as any).authz,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          authorizations: [(fcl as any).authz],
+          limit: 9999,
+        });
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (fcl as any).tx(atomicTxId).onceSealed();
 

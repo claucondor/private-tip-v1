@@ -399,6 +399,10 @@ const JANUS_FLOW_IFACE = new ethers.Interface([
   "function unwrap(uint256 claimedAmount, address recipient, uint256[2] txCommit, uint256[8] amountProof, uint256[6] transferPublicInputs, uint256[8] transferProof, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY)",
 ]);
 
+const ERC20_IFACE = new ethers.Interface([
+  "function approve(address spender, uint256 amount) returns (bool)",
+]);
+
 // UFix64 helper — converts attoflow (wei) bigint to Flow UFix64 string (8 dec places)
 function toUFix64(attoflow: bigint): string {
   const FLOW_SCALE_F = 10n ** 18n;
@@ -776,37 +780,104 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     };
   }
 
-  // ── Non-atomic path: ERC20 / cadence-ft — keep 2-tx flow ───────────────────
-  let wrapTxId: string;
   if (entry.variant === "erc20") {
-    // EVM ERC20: COA calls approve + wrapWithProof atomically via SDK
+    // ── Atomic path: ERC20 approve + wrap + checkpoint in one FCL tx ─────────
+    const margSnapErc20 = await encryptSnapshot(
+      { balance: netAmount, blinding: marginalBlinding },
+      memoKeypair.pubkey,
+    );
+    const cpSnapErc20 = await encryptSnapshot(
+      { balance: newBalance, blinding: newBlinding },
+      memoKeypair.pubkey,
+    );
+    const proof = prebuiltProof.proof;
+    const wrapCalldataErc20 = JANUS_FLOW_IFACE.encodeFunctionData("wrapWithProof", [
+      prebuiltProof.nonce,
+      [prebuiltProof.txCommit[0], prebuiltProof.txCommit[1]],
+      [proof[0], proof[1]],
+      [[proof[2], proof[3]], [proof[4], proof[5]]],
+      [proof[6], proof[7]],
+      ethers.hexlify(margSnapErc20.ciphertext),
+      margSnapErc20.ephemeralPubkey.x,
+      margSnapErc20.ephemeralPubkey.y,
+    ]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, prebuiltProof });
-    wrapTxId = wr.txHash;
-  } else {
-    // cadence-ft (MockFT): FCL Cadence tx with user's Cadence address + COA EVM address
+    const erc20ProxyHex = (entry as any).proxy as string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, userCadenceAddr, prebuiltProof });
-    wrapTxId = wr.txHash;
+    const erc20UnderlyingHex = (entry as any).underlying as string;
+    const approveCalldata = ERC20_IFACE.encodeFunctionData("approve", [erc20ProxyHex, grossAmount]);
+    const fclErc20 = await getFcl();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const atomicErc20WrapId: string = await fclErc20.mutate({
+      cadence: cadenceTx.wrapErc20Atomic(erc20ProxyHex),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; UInt256: unknown; UInt64: unknown }) => [
+        arg(approveCalldata.slice(2), t.String),
+        arg(wrapCalldataErc20.slice(2), t.String),
+        arg(erc20UnderlyingHex, t.String),
+        arg(erc20ProxyHex, t.String),
+        arg(ethers.hexlify(cpSnapErc20.ciphertext).slice(2), t.String),
+        arg(cpSnapErc20.ephemeralPubkey.x.toString(), t.UInt256),
+        arg(cpSnapErc20.ephemeralPubkey.y.toString(), t.UInt256),
+        arg(effectivePrevCursor.toString(), t.UInt64),
+      ],
+      proposer: fclErc20.authz,
+      payer: fclErc20.authz,
+      authorizations: [fclErc20.authz],
+      limit: 9999,
+    });
+    await fclErc20.tx(atomicErc20WrapId).onceSealed();
+    return { txHash: atomicErc20WrapId, checkpointTxHash: atomicErc20WrapId, newBalance, newBlinding };
   }
 
-  // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
-  // For erc20: use EVM proxy. For cadence-ft: use cadenceAddress as token identifier.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : (entry as any).cadenceAddress as string;
-  const cpTxId = await encryptAndUpdateCheckpointViaCoa(
-    { balance: newBalance, blinding: newBlinding },
-    effectivePrevCursor,
-    memoKeypair,
-    tokenProxy,
+  // ── Atomic path: cadence-ft (MockFT) wrap + checkpoint in one FCL tx ────────
+  if (!userCadenceAddr) {
+    throw new Error("wrapToken: userCadenceAddr required for cadence-ft");
+  }
+  const margSnapFt = await encryptSnapshot(
+    { balance: netAmount, blinding: marginalBlinding },
+    memoKeypair.pubkey,
   );
-
-  return {
-    txHash: wrapTxId,
-    checkpointTxHash: cpTxId || wrapTxId,
-    newBalance,
-    newBlinding,
-  };
+  const cpSnapFt = await encryptSnapshot(
+    { balance: newBalance, blinding: newBlinding },
+    memoKeypair.pubkey,
+  );
+  const proofFt = prebuiltProof.proof;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ftTokenAddrHex = (entry as any).cadenceAddress as string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ftContractNameVal = (entry as any).ftContractName as string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ftAddressVal = (entry as any).ftAddress as string;
+  const fclFt = await getFcl();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const atomicFtWrapId: string = await fclFt.mutate({
+    cadence: cadenceTx.wrapFtAtomic(ftTokenAddrHex, ftTokenAddrHex, ftContractNameVal, ftAddressVal),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; UFix64: unknown; UInt256: unknown; Array: (t: unknown) => unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
+      arg(userCadenceAddr, t.Address),
+      arg(toUFix64(grossAmount), t.UFix64),
+      arg(prebuiltProof.nonce.toString(), t.UInt256),
+      arg(prebuiltProof.txCommit[0].toString(), t.UInt256),
+      arg(prebuiltProof.txCommit[1].toString(), t.UInt256),
+      arg([proofFt[0].toString(), proofFt[1].toString()], t.Array(t.UInt256)),
+      arg([[proofFt[2].toString(), proofFt[3].toString()], [proofFt[4].toString(), proofFt[5].toString()]], t.Array(t.Array(t.UInt256))),
+      arg([proofFt[6].toString(), proofFt[7].toString()], t.Array(t.UInt256)),
+      arg(Array.from(margSnapFt.ciphertext).map(String), t.Array(t.UInt8)),
+      arg(margSnapFt.ephemeralPubkey.x.toString(), t.UInt256),
+      arg(margSnapFt.ephemeralPubkey.y.toString(), t.UInt256),
+      arg(ethers.hexlify(cpSnapFt.ciphertext).slice(2), t.String),
+      arg(cpSnapFt.ephemeralPubkey.x.toString(), t.UInt256),
+      arg(cpSnapFt.ephemeralPubkey.y.toString(), t.UInt256),
+      arg(effectivePrevCursor.toString(), t.UInt64),
+    ],
+    proposer: fclFt.authz,
+    payer: fclFt.authz,
+    authorizations: [fclFt.authz],
+    limit: 9999,
+  });
+  await fclFt.tx(atomicFtWrapId).onceSealed();
+  return { txHash: atomicFtWrapId, checkpointTxHash: atomicFtWrapId, newBalance, newBlinding };
 }
 
 // ─── v0.8 Core: sendTip ──────────────────────────────────────────────────────
@@ -851,7 +922,7 @@ export interface SendTipResult {
  */
 export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
   const { tokenId, recipientAddr, amount, memo, coaEvmAddr, memoKeypair,
-    userCadenceAddr, currentBalance, currentBlinding, evmSigner, inboxCursor } = params;
+    userCadenceAddr, currentBalance, currentBlinding, inboxCursor } = params;
 
   if (amount > currentBalance) {
     throw new Error(`sendTip: insufficient shielded balance: have ${currentBalance}, need ${amount}`);
@@ -949,53 +1020,104 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     return { txHash: atomicTxId, checkpointTxHash: atomicTxId, netToRecipient: amount };
   }
 
-  // ── Non-atomic path: ERC20 / cadence-ft ────────────────────────────────────
-  let sendResult: SendResult;
-  if (entry.variant === "erc20") {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    sendResult = await (adapter as any).shieldedTransferViaCoa({
-      recipient: recipientAddr,
-      amount,
-      currentBalance,
-      currentBlinding,
-      memo,
-      coaEvmAddr,
-    });
-  } else {
-    // cadence-ft (MockFT): Cadence FT shielded transfer path.
-    sendResult = await adapter.shieldedTransfer(
-      { recipient: recipientAddr, amount, currentBalance, currentBlinding, memo },
-      evmSigner
-    );
-  }
+  // ── Atomic path: ERC20 / cadence-ft sendTip + checkpoint in one FCL tx ──────
+  // Common: generate blindings + proof (circuit is token-agnostic).
+  const stTransferBlinding = generateBlinding();
+  const stNewBlinding = generateBlinding();
 
-  // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
-  // For erc20: use EVM proxy. For cadence-ft: use cadenceAddress as token identifier.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sendTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : (entry as any).cadenceAddress as string;
-  const newBalance = sendResult.newBalance ?? (currentBalance - amount);
-  const newBlinding = sendResult.newBlinding ?? generateBlinding();
-  const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(
-    { balance: newBalance, blinding: newBlinding },
-    inboxCursor,
-    memoKeypair,
-    sendTokenProxy,
+  const stResp = await fetch("/api/proof/shielded-transfer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      oldBalance:       currentBalance.toString(),
+      oldBlinding:      currentBlinding.toString(),
+      transferAmount:   amount.toString(),
+      transferBlinding: stTransferBlinding.toString(),
+      newBlinding:      stNewBlinding.toString(),
+    }),
+  });
+  if (!stResp.ok) {
+    const errText = await stResp.text().catch(() => stResp.statusText);
+    throw new Error(`sendTip: proof generation failed (${stResp.status}): ${errText}`);
+  }
+  const stProofData = await stResp.json() as { proof: string[]; publicInputs: string[] };
+  const stPublicInputsBn = stProofData.publicInputs.map(BigInt) as [bigint, bigint, bigint, bigint, bigint, bigint];
+  const stProofBn        = stProofData.proof.map(BigInt) as [bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint];
+
+  const stNoteEnc = await encryptNote(
+    { amount, blinding: stTransferBlinding, memo },
+    recipientMemoKey,
+  );
+  const stNewBalance = currentBalance - amount;
+  const stSnapEnc = await encryptSnapshot(
+    { balance: stNewBalance, blinding: stNewBlinding },
+    memoKeypair.pubkey,
   );
 
-  // Persist memo for sender-side /tips view
-  if (memo && userCadenceAddr) {
-    saveSentMemo({
-      sender: userCadenceAddr,
-      recipient: recipientAddr,
-      memo,
+  if (entry.variant === "erc20") {
+    // ERC20: sendTipErc20Atomic — shieldedTransfer + checkpoint in one FCL tx
+    const stCalldata = JANUS_FLOW_IFACE.encodeFunctionData("shieldedTransfer", [
+      recipientAddr,
+      stPublicInputsBn,
+      stProofBn,
+      ethers.hexlify(stNoteEnc.ciphertext),
+      stNoteEnc.ephemeralPubkey.x,
+      stNoteEnc.ephemeralPubkey.y,
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const erc20SendProxy = (entry as any).proxy as string;
+    const fclSendErc20 = await getFcl();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const atomicErc20SendId: string = await fclSendErc20.mutate({
+      cadence: cadenceTx.sendTipErc20Atomic(erc20SendProxy),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; UInt256: unknown; UInt64: unknown }) => [
+        arg(stCalldata.slice(2), t.String),
+        arg(ethers.hexlify(stSnapEnc.ciphertext).slice(2), t.String),
+        arg(stSnapEnc.ephemeralPubkey.x.toString(), t.UInt256),
+        arg(stSnapEnc.ephemeralPubkey.y.toString(), t.UInt256),
+        arg(inboxCursor.toString(), t.UInt64),
+      ],
+      proposer: fclSendErc20.authz,
+      payer: fclSendErc20.authz,
+      authorizations: [fclSendErc20.authz],
+      limit: 9999,
     });
+    await fclSendErc20.tx(atomicErc20SendId).onceSealed();
+    if (memo && userCadenceAddr) saveSentMemo({ sender: userCadenceAddr, recipient: recipientAddr, memo });
+    return { txHash: atomicErc20SendId, checkpointTxHash: atomicErc20SendId, netToRecipient: amount };
   }
 
-  return {
-    txHash: sendResult.txHash,
-    checkpointTxHash,
-    netToRecipient: amount,
-  };
+  // cadence-ft: sendTipFtAtomic — JanusFT.shieldedTransfer + checkpoint in one FCL tx
+  if (!userCadenceAddr) throw new Error("sendTip: userCadenceAddr required for cadence-ft");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ftSendTokenAddr = (entry as any).cadenceAddress as string;
+  const fclSendFt = await getFcl();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const atomicFtSendId: string = await fclSendFt.mutate({
+    cadence: cadenceTx.sendTipFtAtomic(ftSendTokenAddr, ftSendTokenAddr),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; Array: (t: unknown) => unknown; UInt256: unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
+      arg(userCadenceAddr, t.Address),
+      arg(recipientAddr, t.Address),
+      arg(stProofBn.map(String), t.Array(t.UInt256)),
+      arg(stPublicInputsBn.map(String), t.Array(t.UInt256)),
+      arg(Array.from(stNoteEnc.ciphertext).map(String), t.Array(t.UInt8)),
+      arg(stNoteEnc.ephemeralPubkey.x.toString(), t.UInt256),
+      arg(stNoteEnc.ephemeralPubkey.y.toString(), t.UInt256),
+      arg(ethers.hexlify(stSnapEnc.ciphertext).slice(2), t.String),
+      arg(stSnapEnc.ephemeralPubkey.x.toString(), t.UInt256),
+      arg(stSnapEnc.ephemeralPubkey.y.toString(), t.UInt256),
+      arg(inboxCursor.toString(), t.UInt64),
+    ],
+    proposer: fclSendFt.authz,
+    payer: fclSendFt.authz,
+    authorizations: [fclSendFt.authz],
+    limit: 9999,
+  });
+  await fclSendFt.tx(atomicFtSendId).onceSealed();
+  if (memo && userCadenceAddr) saveSentMemo({ sender: userCadenceAddr, recipient: recipientAddr, memo });
+  return { txHash: atomicFtSendId, checkpointTxHash: atomicFtSendId, netToRecipient: amount };
 }
 
 // ─── v0.8 Core: unwrapToken ──────────────────────────────────────────────────
@@ -1037,14 +1159,13 @@ export interface UnwrapTokenResult {
  * Parses the residual state from on-chain event and updates ShieldedCheckpoint.
  */
 export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapTokenResult> {
-  const { tokenId, claimedAmount, recipient, coaEvmAddr, memoKeypair,
-    memoPrivkey, currentBalance, currentBlinding, inboxCursor, evmSigner, userCadenceAddr } = params;
+  const { tokenId, claimedAmount, recipient, coaEvmAddr: _coaEvmAddr, memoKeypair,
+    memoPrivkey: _memoPrivkey, currentBalance, currentBlinding, inboxCursor, userCadenceAddr } = params;
 
   if (claimedAmount > currentBalance) {
     throw new Error(`unwrapToken: insufficient shielded balance: have ${currentBalance}, claimed ${claimedAmount}`);
   }
 
-  const adapter = sdk.token(tokenId);
   const entry = TOKEN_REGISTRY[tokenId];
 
   if (entry.variant === "native") {
@@ -1140,53 +1261,145 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
     };
   }
 
-  // ── Non-atomic path: ERC20 / cadence-ft ────────────────────────────────────
-  let unwrapResult: UnwrapResult;
+  // ── Atomic path: ERC20 / cadence-ft unwrap + checkpoint in one FCL tx ───────
+  // Generate blindings BEFORE proof call so they match the proof circuit inputs.
+  const uwClaimedBlinding = generateBlinding();
+  const uwNewBlinding = generateBlinding(); // residual blinding — NOT re-generated after proof
+
+  const uwResp2 = await fetch("/api/proof/unwrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      oldBalance:      currentBalance.toString(),
+      oldBlinding:     currentBlinding.toString(),
+      claimedAmount:   claimedAmount.toString(),
+      claimedBlinding: uwClaimedBlinding.toString(),
+      newBlinding:     uwNewBlinding.toString(),
+    }),
+  });
+  if (!uwResp2.ok) {
+    const errText = await uwResp2.text().catch(() => uwResp2.statusText);
+    throw new Error(`unwrapToken: proof generation failed (${uwResp2.status}): ${errText}`);
+  }
+  const uwProof2 = await uwResp2.json() as {
+    amountDisclose: { proof: string[]; publicInputs: string[] };
+    transfer:       { proof: string[]; publicInputs: string[] };
+  };
+
+  const uwResidualBalance = currentBalance - claimedAmount;
+  // Blinding fix (was generateBlinding()): use locally-tracked uwNewBlinding that
+  // was fed to the proof circuit — ensures the residual commitment is provably correct.
+  const uwResidualBlinding = uwNewBlinding;
+
   if (entry.variant === "erc20") {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    unwrapResult = await (adapter as any).unwrapViaCoa({
-      claimedAmount,
-      recipient,
-      currentBalance,
-      currentBlinding,
-      coaEvmAddr,
-    });
-  } else if (entry.variant === "cadence-ft" && userCadenceAddr) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    unwrapResult = await (adapter as any).unwrapViaCoa({
-      claimedAmount,
-      recipient,
-      currentBalance,
-      currentBlinding,
-      coaEvmAddr,
-      userCadenceAddr,
-    });
-  } else {
-    unwrapResult = await adapter.unwrap(
-      { claimedAmount, recipient, currentBalance, currentBlinding },
-      evmSigner
+    // ERC20: unwrapErc20Atomic — unwrap + checkpoint in one FCL tx
+    const uwTxCommitErc20: [bigint, bigint] = [
+      BigInt(uwProof2.amountDisclose.publicInputs[1]),
+      BigInt(uwProof2.amountDisclose.publicInputs[2]),
+    ];
+    const uwResidualSnap = await encryptSnapshot(
+      { balance: uwResidualBalance, blinding: uwResidualBlinding },
+      memoKeypair.pubkey,
     );
+    const uwCpSnap = await encryptSnapshot(
+      { balance: uwResidualBalance, blinding: uwResidualBlinding },
+      memoKeypair.pubkey,
+    );
+    const uwCalldata = JANUS_FLOW_IFACE.encodeFunctionData("unwrap", [
+      claimedAmount,
+      recipient,
+      uwTxCommitErc20,
+      uwProof2.amountDisclose.proof.map(BigInt),
+      uwProof2.transfer.publicInputs.map(BigInt),
+      uwProof2.transfer.proof.map(BigInt),
+      ethers.hexlify(uwResidualSnap.ciphertext),
+      uwResidualSnap.ephemeralPubkey.x,
+      uwResidualSnap.ephemeralPubkey.y,
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const erc20UnwrapProxy = (entry as any).proxy as string;
+    const fclUnwrapErc20 = await getFcl();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const atomicErc20UnwrapId: string = await fclUnwrapErc20.mutate({
+      cadence: cadenceTx.unwrapErc20Atomic(erc20UnwrapProxy),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; UInt256: unknown; UInt64: unknown }) => [
+        arg(uwCalldata.slice(2), t.String),
+        arg(ethers.hexlify(uwCpSnap.ciphertext).slice(2), t.String),
+        arg(uwCpSnap.ephemeralPubkey.x.toString(), t.UInt256),
+        arg(uwCpSnap.ephemeralPubkey.y.toString(), t.UInt256),
+        arg(inboxCursor.toString(), t.UInt64),
+      ],
+      proposer: fclUnwrapErc20.authz,
+      payer: fclUnwrapErc20.authz,
+      authorizations: [fclUnwrapErc20.authz],
+      limit: 9999,
+    });
+    await fclUnwrapErc20.tx(atomicErc20UnwrapId).onceSealed();
+    return {
+      txHash: atomicErc20UnwrapId,
+      checkpointTxHash: atomicErc20UnwrapId,
+      netReceived: claimedAmount,
+      newBalance: uwResidualBalance,
+      newBlinding: uwResidualBlinding,
+    };
   }
 
-  // Residual state — use FCL COA checkpoint update (no raw EVM key).
-  // For erc20: use EVM proxy. For cadence-ft: use cadenceAddress as token identifier.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const unwrapTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : (entry as any).cadenceAddress as string;
-  const residualBalance = currentBalance - claimedAmount;
-  const residualBlinding = generateBlinding();
-  const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(
-    { balance: residualBalance, blinding: residualBlinding },
-    inboxCursor,
-    memoKeypair,
-    unwrapTokenProxy,
+  // cadence-ft: unwrapFtAtomic — JanusFT.unwrap + checkpoint in one FCL tx
+  if (!userCadenceAddr) throw new Error("unwrapToken: userCadenceAddr required for cadence-ft");
+  const uwTxCommitFt: [bigint, bigint] = [
+    BigInt(uwProof2.amountDisclose.publicInputs[1]),
+    BigInt(uwProof2.amountDisclose.publicInputs[2]),
+  ];
+  const uwFtResidualSnap = await encryptSnapshot(
+    { balance: uwResidualBalance, blinding: uwResidualBlinding },
+    memoKeypair.pubkey,
   );
-
+  const uwFtCpSnap = await encryptSnapshot(
+    { balance: uwResidualBalance, blinding: uwResidualBlinding },
+    memoKeypair.pubkey,
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ftUnwrapTokenAddr = (entry as any).cadenceAddress as string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ftUnwrapContractName = (entry as any).ftContractName as string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ftUnwrapFtAddress = (entry as any).ftAddress as string;
+  const fclUnwrapFt = await getFcl();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const atomicFtUnwrapId: string = await fclUnwrapFt.mutate({
+    cadence: cadenceTx.unwrapFtAtomic(ftUnwrapTokenAddr, ftUnwrapTokenAddr, ftUnwrapContractName, ftUnwrapFtAddress),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; UFix64: unknown; UInt256: unknown; Array: (t: unknown) => unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
+      arg(userCadenceAddr, t.Address),
+      arg(toUFix64(claimedAmount), t.UFix64),
+      arg(recipient, t.Address),
+      arg(uwTxCommitFt[0].toString(), t.UInt256),
+      arg(uwTxCommitFt[1].toString(), t.UInt256),
+      arg(uwProof2.amountDisclose.proof.map(String), t.Array(t.UInt256)),
+      arg(uwProof2.amountDisclose.publicInputs.map(String), t.Array(t.UInt256)),
+      arg(uwProof2.transfer.proof.map(String), t.Array(t.UInt256)),
+      arg(uwProof2.transfer.publicInputs.map(String), t.Array(t.UInt256)),
+      arg(Array.from(uwFtResidualSnap.ciphertext).map(String), t.Array(t.UInt8)),
+      arg(uwFtResidualSnap.ephemeralPubkey.x.toString(), t.UInt256),
+      arg(uwFtResidualSnap.ephemeralPubkey.y.toString(), t.UInt256),
+      arg(ethers.hexlify(uwFtCpSnap.ciphertext).slice(2), t.String),
+      arg(uwFtCpSnap.ephemeralPubkey.x.toString(), t.UInt256),
+      arg(uwFtCpSnap.ephemeralPubkey.y.toString(), t.UInt256),
+      arg(inboxCursor.toString(), t.UInt64),
+    ],
+    proposer: fclUnwrapFt.authz,
+    payer: fclUnwrapFt.authz,
+    authorizations: [fclUnwrapFt.authz],
+    limit: 9999,
+  });
+  await fclUnwrapFt.tx(atomicFtUnwrapId).onceSealed();
   return {
-    txHash: unwrapResult.txHash,
-    checkpointTxHash,
-    netReceived: unwrapResult.netToRecipient,
-    newBalance: residualBalance,
-    newBlinding: residualBlinding,
+    txHash: atomicFtUnwrapId,
+    checkpointTxHash: atomicFtUnwrapId,
+    netReceived: claimedAmount,
+    newBalance: uwResidualBalance,
+    newBlinding: uwResidualBlinding,
   };
 }
 
