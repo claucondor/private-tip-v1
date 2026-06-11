@@ -12,6 +12,8 @@
 ///   proof: string[8],                // uint256[8] as decimal strings
 ///   publicInputs: string[4],         // [amount, Cx, Cy, nonce] as decimal strings
 ///   nonce: string,                   // echo of nonce used (may be server-generated)
+///   txCommit: string[2],             // [commitX, commitY] — Pedersen commitment point, required for wrapViaCoa prebuiltProof
+///   blinding: string,                // echo of blinding from request — required by caller for accumulation
 /// }
 
 import { NextRequest, NextResponse } from "next/server";
@@ -44,6 +46,10 @@ export async function POST(req: NextRequest) {
       proof: Array.from(result.proof).map((p) => p.toString()),
       publicInputs: result.publicInputs.map((p) => p.toString()),
       nonce: nonceBig.toString(),
+      // txCommit = [commitment.x, commitment.y] — required for wrapViaCoa prebuiltProof
+      txCommit: [result.txCommit[0].toString(), result.txCommit[1].toString()],
+      // echo blinding back so caller can use it for WrapWithSnapshot decryption + accumulation
+      blinding: blinding,
     });
   } catch (err) {
     console.error("[/api/proof/wrap] failed:", err);

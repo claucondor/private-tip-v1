@@ -36,6 +36,7 @@ import {
   computeWrapFee,
   generateBlinding,
   decryptSnapshot,
+  encryptSnapshot,
   encryptNote,
   decryptNote,
   installInboxAndCheckpoint,
@@ -138,6 +139,82 @@ function getProvider(): ethers.JsonRpcProvider {
     _provider = new ethers.JsonRpcProvider(EVM_RPC, EVM_CHAIN_ID);
   }
   return _provider;
+}
+
+// ─── Derived EVM read-only signer (VoidSigner keyed by COA address) ──────────
+
+/**
+ * Create a read-only VoidSigner for the given EVM address.
+ * Used for ShieldedCheckpointClient.readAndDecrypt() which uses staticCall
+ * (msg.sender simulation — no real signature required).
+ *
+ * Do NOT use for write operations; those go through FCL COA Cadence txs.
+ */
+export function getReadOnlySigner(evmAddr: string): ethers.VoidSigner {
+  return new ethers.VoidSigner(evmAddr, getProvider());
+}
+
+// ─── Checkpoint helpers (COA / FCL path) ─────────────────────────────────────
+
+/**
+ * Read the caller's shielded state from their on-chain ShieldedCheckpoint.
+ * Uses a VoidSigner (the COA address) for the owner-gated staticCall — no
+ * private key needed, the EVM node simulates msg.sender = coaAddr.
+ *
+ * Returns null if no checkpoint exists yet (account not activated / first wrap pending).
+ */
+export async function getShieldedStateForCoa(
+  coaAddr: string,
+  memoPrivkey: bigint,
+): Promise<{ balance: bigint; blinding: bigint; version: bigint; lastConsumedNoteIndex: bigint } | null> {
+  const cpClient = new ShieldedCheckpointClient();
+  const exists = await cpClient.exists(coaAddr);
+  if (!exists) return null;
+  const voidSigner = getReadOnlySigner(coaAddr);
+  const snap = await cpClient.readAndDecrypt(voidSigner as unknown as ethers.Wallet, memoPrivkey);
+  if (!snap) return null;
+  const meta = await cpClient.metadata(coaAddr);
+  return {
+    balance: snap.balance,
+    blinding: snap.blinding,
+    version: meta.version,
+    lastConsumedNoteIndex: meta.lastConsumedNoteIndex,
+  };
+}
+
+/**
+ * Encrypt a snapshot and update the ShieldedCheckpoint via COA Cadence tx (FCL).
+ * This is the browser-safe path — no raw EVM private key needed.
+ * The COA is msg.sender for the EVM ShieldedCheckpoint.update() call.
+ *
+ * @param snapshot   { balance, blinding } to persist.
+ * @param cursor     lastConsumedNoteIndex (inbox drain cursor).
+ * @param memoKeypair Caller's BabyJub keypair (pubkey used for ECIES encryption).
+ * @returns Cadence tx ID (not an EVM hash).
+ */
+export async function encryptAndUpdateCheckpointViaCoa(
+  snapshot: { balance: bigint; blinding: bigint },
+  cursor: bigint,
+  memoKeypair: BabyJubKeypair,
+): Promise<string> {
+  const enc = await encryptSnapshot(snapshot, memoKeypair.pubkey);
+  const fcl = await getFcl();
+  const txId: string = await fcl.mutate({
+    cadence: cadenceTx.updateCheckpointViaCoa(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
+      arg(Array.from(enc.ciphertext).map(String), t.Array(t.UInt8)),
+      arg(enc.ephemeralPubkey.x.toString(), t.UInt256),
+      arg(enc.ephemeralPubkey.y.toString(), t.UInt256),
+      arg(cursor.toString(), t.UInt64),
+    ],
+    proposer: fcl.authz,
+    payer: fcl.authz,
+    authorizations: [fcl.authz],
+    limit: 9999,
+  });
+  await fcl.tx(txId).onceSealed();
+  return txId;
 }
 
 // ─── FCL lazy-load ────────────────────────────────────────────────────────────
@@ -451,8 +528,8 @@ export interface WrapTokenParams {
   prevBlinding: bigint;
   /** Previous inbox cursor (from checkpoint metadata). Pass 0n if no drain done. */
   prevCursor: bigint;
-  /** Ethers wallet — needed to update ShieldedCheckpoint after wrap. */
-  evmSigner: ethers.Wallet;
+  /** Ethers wallet — UNUSED in v0.8 (checkpoint writes via FCL COA). Kept for backward compat. */
+  evmSigner?: ethers.Wallet | null;
   /** For cadence-ft (mockft): the user's Cadence address. */
   userCadenceAddr?: string;
 }
@@ -475,59 +552,86 @@ export interface WrapTokenResult {
  *   newBalance = prevBalance + marginalBalance
  *   newBlinding = (prevBlinding + marginalBlinding) % BABYJUB_SUBORDER
  *
- * The WrapWithSnapshot event from the EVM contract carries only the MARGINAL
- * (balance, blinding) for this wrap, not the cumulative total.
+ * Browser-safe path: proof is generated server-side via /api/proof/wrap.
+ * EVM writes go through FCL COA Cadence txs (no raw EVM private key needed).
+ *
+ * For ERC20 (mUSDC): wrapViaCoa handles approve+wrap atomically in one Cadence tx.
+ * For MockFT (cadence-ft): wrapViaCoa uses user's Cadence address and COA address.
  */
 export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResult> {
-  const { tokenId, grossAmount, coaEvmAddr, memoKeypair, memoPrivkey,
-    prevBalance, prevBlinding, prevCursor, evmSigner, userCadenceAddr } = params;
+  const { tokenId, grossAmount, coaEvmAddr, memoKeypair,
+    prevBalance, prevBlinding, prevCursor, userCadenceAddr } = params;
 
   const adapter = sdk.token(tokenId);
   const entry = TOKEN_REGISTRY[tokenId];
 
-  // For ERC20 tokens, pre-approve the JanusERC20 proxy
-  if (entry.variant === "erc20") {
-    const erc20Entry = entry as typeof TOKEN_REGISTRY["mockusdc"];
-    const erc20 = new ethers.Contract(
-      erc20Entry.underlying,
-      ["function approve(address spender, uint256 amount) returns (bool)"],
-      evmSigner
-    );
-    const approveTx = await erc20.approve(erc20Entry.proxy, grossAmount);
-    await approveTx.wait();
-  }
+  // Step 1: Compute net amount and generate marginal blinding locally.
+  const feeBps = await adapter.feeBps();
+  const netAmount = computeNetWrap(grossAmount, feeBps);
+  const marginalBlinding = generateBlinding();
 
-  let wrapResult: WrapResult;
+  // Step 2: Generate AmountDisclose Groth16 proof server-side (Node.js required).
+  // POST to /api/proof/wrap with netAmount + marginalBlinding → get proof + txCommit.
+  const proofResp = await fetch("/api/proof/wrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      amount: netAmount.toString(),
+      blinding: marginalBlinding.toString(),
+    }),
+  });
+  if (!proofResp.ok) {
+    const errText = await proofResp.text().catch(() => proofResp.statusText);
+    throw new Error(`wrapToken: proof generation failed (${proofResp.status}): ${errText}`);
+  }
+  const proofData = await proofResp.json() as {
+    proof: string[];
+    publicInputs: string[];
+    nonce: string;
+    txCommit: string[];
+    blinding: string;
+  };
+  const prebuiltProof = {
+    proof:        proofData.proof.map(BigInt),
+    txCommit:     proofData.txCommit.map(BigInt) as [bigint, bigint],
+    blinding:     marginalBlinding,        // use the locally generated value (server echoes it)
+    nonce:        BigInt(proofData.nonce),
+    publicInputs: proofData.publicInputs.map(BigInt),
+  };
+
+  // Step 3: Submit wrap via FCL/COA Cadence tx.
+  // NOTE: wrapViaCoa handles approve+wrap atomically for ERC20 — no separate approve needed.
+  let wrapTxId: string;
   if (entry.variant === "native" || entry.variant === "erc20") {
-    // FCL/COA path — user signs one Cadence tx in Flow Wallet
+    // EVM tokens: COA calls approve (ERC20 only) + wrapWithProof atomically
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    wrapResult = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr });
+    const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, prebuiltProof });
+    wrapTxId = wr.txHash;
   } else {
-    // cadence-ft (MockFT): JanusFTAdapter wraps via FCL internally
-    wrapResult = await adapter.wrap({ grossAmount }, evmSigner);
+    // cadence-ft (MockFT): FCL Cadence tx with user's Cadence address + COA EVM address
+    // wrapViaCoa looks up memoKey by coaEvmAddr (correct) and passes userCadenceAddr for storage
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, userCadenceAddr, prebuiltProof });
+    wrapTxId = wr.txHash;
   }
 
-  // Parse WrapWithSnapshot event to get the marginal (balance, blinding)
-  const marginal = await parseWrapSnapshot(wrapResult.txHash, memoPrivkey);
-
-  // Accumulate: new state = prev + marginal (field arithmetic mod suborder for blinding)
-  const marginalBalance = marginal?.balance ?? wrapResult.netAmount;
-  const marginalBlinding = marginal?.blinding ?? generateBlinding();
-  const newBalance = prevBalance + marginalBalance;
+  // Step 4: Accumulate marginal state into cumulative checkpoint state.
+  // marginalBalance = netAmount (post-fee), marginalBlinding = locally generated.
+  // No event parsing needed — we have the blinding locally.
+  const newBalance = prevBalance + netAmount;
   const newBlinding = (prevBlinding + marginalBlinding) % BABYJUB_SUBORDER;
 
-  // Update ShieldedCheckpoint with cumulative state
-  const cpClient = new ShieldedCheckpointClient();
-  const cpResult = await cpClient.encryptAndUpdate(
+  // Step 5: Update ShieldedCheckpoint via COA Cadence tx (FCL — no raw EVM key needed).
+  // The COA is msg.sender; the checkpoint slot is keyed to the COA address.
+  const cpTxId = await encryptAndUpdateCheckpointViaCoa(
     { balance: newBalance, blinding: newBlinding },
     prevCursor,
     memoKeypair,
-    evmSigner
   );
 
   return {
-    txHash: wrapResult.txHash,
-    checkpointTxHash: cpResult.txHash,
+    txHash: wrapTxId,
+    checkpointTxHash: cpTxId,
     newBalance,
     newBlinding,
   };
