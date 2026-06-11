@@ -942,8 +942,99 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
   const adapter = sdk.token(tokenId);
   const entry = TOKEN_REGISTRY[tokenId];
 
+  if (entry.variant === "native") {
+    // ── Atomic path: unwrap + checkpoint in a single FCL tx ────────────────────
+    // 1. Generate blindings: claimed portion + residual commitment.
+    const claimedBlinding = generateBlinding();
+    const newBlinding = generateBlinding();
+
+    // 2. Generate unwrap proof server-side (amountDisclose + shieldedTransfer proofs).
+    const uwResp = await fetch("/api/proof/unwrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        oldBalance:     currentBalance.toString(),
+        oldBlinding:    currentBlinding.toString(),
+        claimedAmount:  claimedAmount.toString(),
+        claimedBlinding: claimedBlinding.toString(),
+        newBlinding:    newBlinding.toString(),
+      }),
+    });
+    if (!uwResp.ok) {
+      const errText = await uwResp.text().catch(() => uwResp.statusText);
+      throw new Error(`unwrapToken: proof generation failed (${uwResp.status}): ${errText}`);
+    }
+    const uwProof = await uwResp.json() as {
+      amountDisclose: { proof: string[]; publicInputs: string[] };
+      transfer:       { proof: string[]; publicInputs: string[] };
+    };
+
+    // txCommit comes from amountDisclose publicInputs: [amount, commitX, commitY, nonce]
+    const txCommit: [bigint, bigint] = [
+      BigInt(uwProof.amountDisclose.publicInputs[1]),
+      BigInt(uwProof.amountDisclose.publicInputs[2]),
+    ];
+
+    // 3. Compute residual balance and encrypt residual snapshot (embedded in unwrap calldata).
+    const residualBalance = currentBalance - claimedAmount;
+    const residualSnap = await encryptSnapshot(
+      { balance: residualBalance, blinding: newBlinding },
+      memoKeypair.pubkey,
+    );
+
+    // 4. Build unwrap calldata (complex ABI — pre-encode client-side).
+    const unwrapCalldata = JANUS_FLOW_IFACE.encodeFunctionData("unwrap", [
+      claimedAmount,
+      recipient,
+      txCommit,
+      uwProof.amountDisclose.proof.map(BigInt),
+      uwProof.transfer.publicInputs.map(BigInt),
+      uwProof.transfer.proof.map(BigInt),
+      ethers.hexlify(residualSnap.ciphertext),
+      residualSnap.ephemeralPubkey.x,
+      residualSnap.ephemeralPubkey.y,
+    ]);
+    const unwrapCalldataHex = unwrapCalldata.slice(2);
+
+    // 5. Encrypt checkpoint snapshot with fresh ephemeral keys (different from residualSnap).
+    const cpSnap = await encryptSnapshot(
+      { balance: residualBalance, blinding: newBlinding },
+      memoKeypair.pubkey,
+    );
+
+    // 6. Submit one FCL tx: unwrap + checkpoint atomically.
+    const { TX_UNWRAP_FLOW_ATOMIC } = await import("./cadence-tx");
+    const fcl = await getFcl();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const atomicTxId: string = await fcl.mutate({
+      cadence: TX_UNWRAP_FLOW_ATOMIC,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
+        arg(unwrapCalldataHex, t.String),
+        arg(Array.from(cpSnap.ciphertext).map(String), t.Array(t.UInt8)),
+        arg(cpSnap.ephemeralPubkey.x.toString(), t.UInt256),
+        arg(cpSnap.ephemeralPubkey.y.toString(), t.UInt256),
+        arg(inboxCursor.toString(), t.UInt64),
+      ],
+      proposer: fcl.authz,
+      payer: fcl.authz,
+      authorizations: [fcl.authz],
+      limit: 9999,
+    });
+    await fcl.tx(atomicTxId).onceSealed();
+
+    return {
+      txHash: atomicTxId,
+      checkpointTxHash: atomicTxId,
+      netReceived: claimedAmount,
+      newBalance: residualBalance,
+      newBlinding,
+    };
+  }
+
+  // ── Non-atomic path: ERC20 / cadence-ft ────────────────────────────────────
   let unwrapResult: UnwrapResult;
-  if (entry.variant === "native" || entry.variant === "erc20") {
+  if (entry.variant === "erc20") {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     unwrapResult = await (adapter as any).unwrapViaCoa({
       claimedAmount,
@@ -969,24 +1060,18 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
     );
   }
 
-  // Residual state: claimedAmount reduces balance, new blinding from on-chain event
+  // Residual state — use FCL COA checkpoint update (no raw EVM key).
   const residualBalance = currentBalance - claimedAmount;
-  // Try to get residual blinding from the WrapWithSnapshot-style event (same format for unwrap residual)
-  const residualSnap = await parseWrapSnapshot(unwrapResult.txHash, memoPrivkey).catch(() => null);
-  const residualBlinding = residualSnap?.blinding ?? generateBlinding();
-
-  // Update ShieldedCheckpoint with residual state
-  const cpClient = new ShieldedCheckpointClient();
-  const cpResult = await cpClient.encryptAndUpdate(
+  const residualBlinding = generateBlinding();
+  const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(
     { balance: residualBalance, blinding: residualBlinding },
     inboxCursor,
     memoKeypair,
-    evmSigner
   );
 
   return {
     txHash: unwrapResult.txHash,
-    checkpointTxHash: cpResult.txHash,
+    checkpointTxHash,
     netReceived: unwrapResult.netToRecipient,
     newBalance: residualBalance,
     newBlinding: residualBlinding,
