@@ -4,7 +4,7 @@
  * NO MetaMask, NO Rainbow, NO window.ethereum.
  */
 
-import { MEMO_REGISTRY_ADDRESS } from "@claucondor/sdk/network";
+import { MEMO_REGISTRY_ADDRESS, SHIELDED_CHECKPOINT_ADDRESS } from "@claucondor/sdk/network";
 
 const CADENCE_DEPLOYER = "0x4b6bc58bc8bf5dcc";    // v0.8 openjanus-v08 (JanusFT, MockFT, PrivateTip, ShieldedInbox, ShieldedCheckpoint)
 const JANUSFLOW_CADENCE = "0x5dcbeb41055ec57e";   // v0.8 JanusFlow Cadence (NOT same as CADENCE_DEPLOYER)
@@ -73,5 +73,52 @@ transaction(memoPubX: UInt256, memoPubY: UInt256) {
                 .concat(result.errorMessage)
         )
     }
+}
+`;
+
+/**
+ * Update the user's ShieldedCheckpoint via COA. Local override of the SDK
+ * template — same logic but `gasLimit: 1_500_000` instead of 200_000, because
+ * the SDK default is insufficient for the `update(bytes,uint256,uint256,uint64)`
+ * EVM call (the encryptedSnapshot bytes pushes the cost above 200k).
+ *
+ * Will be folded back into the SDK in the next bump.
+ */
+export const TX_UPDATE_CHECKPOINT_VIA_COA = `
+import EVM from ${EVM_SYSTEM_CONTRACT}
+
+transaction(
+  encryptedSnapshot:     [UInt8],
+  ephPubkeyX:            UInt256,
+  ephPubkeyY:            UInt256,
+  lastConsumedNoteIndex: UInt64
+) {
+  let coa: auth(EVM.Call) &EVM.CadenceOwnedAccount
+
+  prepare(signer: auth(BorrowValue) &Account) {
+    self.coa = signer.storage.borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
+      ?? panic("update_checkpoint_via_coa: no COA at /storage/evm — run setup_coa first")
+  }
+
+  execute {
+    let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
+
+    let calldata = EVM.encodeABIWithSignature(
+      "update(bytes,uint256,uint256,uint64)",
+      [encryptedSnapshot, ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+    )
+
+    let result = self.coa.call(
+      to:       checkpointAddr,
+      data:     calldata,
+      gasLimit: 1500000,
+      value:    EVM.Balance(attoflow: 0)
+    )
+
+    assert(
+      result.status == EVM.Status.successful,
+      message: "ShieldedCheckpoint.update failed: ".concat(result.errorMessage)
+    )
+  }
 }
 `;

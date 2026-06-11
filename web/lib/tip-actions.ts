@@ -200,7 +200,7 @@ export async function encryptAndUpdateCheckpointViaCoa(
   const enc = await encryptSnapshot(snapshot, memoKeypair.pubkey);
   const fcl = await getFcl();
   const txId: string = await fcl.mutate({
-    cadence: cadenceTx.updateCheckpointViaCoa(),
+    cadence: TX_UPDATE_CHECKPOINT_VIA_COA,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
       arg(Array.from(enc.ciphertext).map(String), t.Array(t.UInt8)),
