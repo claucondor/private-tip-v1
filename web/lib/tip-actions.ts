@@ -383,6 +383,24 @@ export { deriveMemoKeyFromWallet } from "./memo-key-derive";
 import { getCachedMemoPrivkey, cacheMemoPrivkey } from "./memo-key-session";
 import { deriveMemoKeyFromWallet } from "./memo-key-derive";
 
+// ─── ABI fragments for client-side EVM calldata encoding (atomic tx pattern) ──
+
+const JANUS_FLOW_IFACE = new ethers.Interface([
+  "function wrapWithProof(uint256 nonce, uint256[2] commit, uint256[2] pA, uint256[2][2] pB, uint256[2] pC, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY) payable",
+  "function shieldedTransfer(address to, uint256[6] publicInputs, uint256[8] proof, bytes encryptedNoteTo, uint256 ephPubkeyToX, uint256 ephPubkeyToY)",
+  "function unwrap(uint256 claimedAmount, address recipient, uint256[2] txCommit, uint256[8] amountProof, uint256[6] transferPublicInputs, uint256[8] transferProof, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY)",
+]);
+
+// UFix64 helper — converts attoflow (wei) bigint to Flow UFix64 string (8 dec places)
+function toUFix64(attoflow: bigint): string {
+  const FLOW_SCALE_F = 10n ** 18n;
+  const UFIX64_FRAC  = 10n ** 10n;
+  const whole        = attoflow / FLOW_SCALE_F;
+  const fracAttoflow = attoflow % FLOW_SCALE_F;
+  const fracUfix64   = fracAttoflow / UFIX64_FRAC;
+  return `${whole}.${fracUfix64.toString().padStart(8, "0")}`;
+}
+
 export async function getOrDeriveMemoPrivkey(flowAddr: string): Promise<bigint> {
   const cached = getCachedMemoPrivkey(flowAddr);
   if (cached !== null) return cached;
@@ -600,30 +618,85 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     publicInputs: proofData.publicInputs.map(BigInt),
   };
 
-  // Step 3: Submit wrap via FCL/COA Cadence tx.
-  // NOTE: wrapViaCoa handles approve+wrap atomically for ERC20 — no separate approve needed.
+  // Accumulate marginal state into cumulative checkpoint state (needed for all paths).
+  const newBalance = prevBalance + netAmount;
+  const newBlinding = (prevBlinding + marginalBlinding) % BABYJUB_SUBORDER;
+
+  if (entry.variant === "native") {
+    // ── Atomic path: wrap + checkpoint in a single FCL tx ──────────────────────
+    // 1. Encrypt the marginal snapshot (embedded in wrapWithProof calldata for the
+    //    on-chain WrapWithSnapshot event — uses marginal balance/blinding only).
+    const margSnap = await encryptSnapshot(
+      { balance: netAmount, blinding: marginalBlinding },
+      memoKeypair.pubkey,
+    );
+
+    // 2. Encrypt the cumulative checkpoint snapshot (persisted to ShieldedCheckpoint).
+    const cpSnap = await encryptSnapshot(
+      { balance: newBalance, blinding: newBlinding },
+      memoKeypair.pubkey,
+    );
+
+    // 3. Build wrapWithProof calldata (client-side ABI encoding).
+    const proof = prebuiltProof.proof;
+    const wrapCalldata = JANUS_FLOW_IFACE.encodeFunctionData("wrapWithProof", [
+      prebuiltProof.nonce,
+      [prebuiltProof.txCommit[0], prebuiltProof.txCommit[1]],
+      [proof[0], proof[1]],                                          // pA
+      [[proof[2], proof[3]], [proof[4], proof[5]]],                  // pB
+      [proof[6], proof[7]],                                          // pC
+      ethers.hexlify(margSnap.ciphertext),
+      margSnap.ephemeralPubkey.x,
+      margSnap.ephemeralPubkey.y,
+    ]);
+    const wrapCalldataHex = wrapCalldata.slice(2);
+
+    // 4. Submit one FCL tx: wrap + checkpoint atomically.
+    const { TX_WRAP_FLOW_ATOMIC } = await import("./cadence-tx");
+    const fcl = await getFcl();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const atomicTxId: string = await fcl.mutate({
+      cadence: TX_WRAP_FLOW_ATOMIC,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      args: (arg: (v: unknown, t: unknown) => unknown, t: { UFix64: unknown; UInt: unknown; String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
+        arg(toUFix64(grossAmount), t.UFix64),
+        arg(grossAmount.toString(), t.UInt),
+        arg(wrapCalldataHex, t.String),
+        arg(Array.from(cpSnap.ciphertext).map(String), t.Array(t.UInt8)),
+        arg(cpSnap.ephemeralPubkey.x.toString(), t.UInt256),
+        arg(cpSnap.ephemeralPubkey.y.toString(), t.UInt256),
+        arg(prevCursor.toString(), t.UInt64),
+      ],
+      proposer: fcl.authz,
+      payer: fcl.authz,
+      authorizations: [fcl.authz],
+      limit: 9999,
+    });
+    await fcl.tx(atomicTxId).onceSealed();
+
+    return {
+      txHash: atomicTxId,
+      checkpointTxHash: atomicTxId,
+      newBalance,
+      newBlinding,
+    };
+  }
+
+  // ── Non-atomic path: ERC20 / cadence-ft — keep 2-tx flow ───────────────────
   let wrapTxId: string;
-  if (entry.variant === "native" || entry.variant === "erc20") {
-    // EVM tokens: COA calls approve (ERC20 only) + wrapWithProof atomically
+  if (entry.variant === "erc20") {
+    // EVM ERC20: COA calls approve + wrapWithProof atomically via SDK
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, prebuiltProof });
     wrapTxId = wr.txHash;
   } else {
     // cadence-ft (MockFT): FCL Cadence tx with user's Cadence address + COA EVM address
-    // wrapViaCoa looks up memoKey by coaEvmAddr (correct) and passes userCadenceAddr for storage
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, userCadenceAddr, prebuiltProof });
     wrapTxId = wr.txHash;
   }
 
-  // Step 4: Accumulate marginal state into cumulative checkpoint state.
-  // marginalBalance = netAmount (post-fee), marginalBlinding = locally generated.
-  // No event parsing needed — we have the blinding locally.
-  const newBalance = prevBalance + netAmount;
-  const newBlinding = (prevBlinding + marginalBlinding) % BABYJUB_SUBORDER;
-
-  // Step 5: Update ShieldedCheckpoint via COA Cadence tx (FCL — no raw EVM key needed).
-  // The COA is msg.sender; the checkpoint slot is keyed to the COA address.
+  // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
   const cpTxId = await encryptAndUpdateCheckpointViaCoa(
     { balance: newBalance, blinding: newBlinding },
     prevCursor,
