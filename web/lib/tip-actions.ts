@@ -203,7 +203,7 @@ export async function encryptAndUpdateCheckpointViaCoa(
   const txId: string = await fcl.mutate({
     cadence: TX_UPDATE_CHECKPOINT_VIA_COA,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
+    args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
       arg(ethers.hexlify(enc.ciphertext).slice(2), t.String),
       arg(enc.ephemeralPubkey.x.toString(), t.UInt256),
       arg(enc.ephemeralPubkey.y.toString(), t.UInt256),

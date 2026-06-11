@@ -190,7 +190,7 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
       const atomicTxId: string = await (fcl as any).mutate({
         cadence: TX_CLAIM_BATCH_ATOMIC,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (inner: unknown) => unknown; UInt256: unknown; UInt8: unknown; UInt64: unknown }) => [
+        args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (inner: unknown) => unknown; UInt256: unknown; UInt8: unknown; UInt64: unknown }) => [
           arg(publicInputs.map(String), t.Array(t.UInt256)),
           arg(proof.map(String), t.Array(t.UInt256)),
           arg(ethers.hexlify(cpEnc.ciphertext).slice(2), t.String),
