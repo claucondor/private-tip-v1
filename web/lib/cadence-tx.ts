@@ -107,7 +107,7 @@ transaction(
 
     let calldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [EVM.EVMBytes(value: encryptedSnapshotHex.decodeHex()), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
 
     let result = self.coa.call(
@@ -185,7 +185,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [EVM.EVMBytes(value: encryptedSnapshotHex.decodeHex()), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = coa.call(
       to: checkpointAddr,
@@ -252,7 +252,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [EVM.EVMBytes(value: encryptedSnapshotHex.decodeHex()), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = self.coa.call(
       to: checkpointAddr,
@@ -314,7 +314,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [EVM.EVMBytes(value: encryptedSnapshotHex.decodeHex()), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = self.coa.call(
       to: checkpointAddr,
@@ -395,7 +395,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [EVM.EVMBytes(value: encryptedSnapshotHex.decodeHex()), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = self.coa.call(
       to: checkpointAddr,
