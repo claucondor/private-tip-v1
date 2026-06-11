@@ -27,91 +27,19 @@ import {
   ShieldedInboxClient,
   decryptNote,
   generateBlinding,
-  cadenceTx,
   encryptSnapshot,
 } from "@claucondor/sdk";
-import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
 import {
   getCoaEvmAddress,
   getShieldedStateForCoa,
-  encryptAndUpdateCheckpointViaCoa,
 } from "@/lib/tip-actions";
 import { FLOWSCAN_CADENCE_TX } from "@/lib/explorer";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SHIELDED_INBOX_ADDRESS = "0x0C787AAcbA9a116EdA4ec05Be41D8474D470bfC6";
-const EVM_SYSTEM_CONTRACT    = "0x8c5303eaa26202d6";
 const BABYJUB_SUBORDER       = 2736030358979909402780800718157159386076813972158567259200215660948447373041n;
 const MIN_NOTES_TO_SHOW      = 5; // show CTA only when inbox has ≥ this many notes
-
-// JanusFlow proxy (FLOW token) — batch claim target for Phase 4.
-const JANUS_FLOW_PROXY = TOKEN_REGISTRY.flow.proxy;
-
-// ─── Inline Cadence tx templates ─────────────────────────────────────────────
-
-/** Cadence tx: drain all pending notes from ShieldedInbox via COA. */
-const TX_DRAIN_INBOX = `
-import EVM from ${EVM_SYSTEM_CONTRACT}
-
-transaction {
-  let coa: auth(EVM.Call) &EVM.CadenceOwnedAccount
-
-  prepare(signer: auth(BorrowValue) &Account) {
-    self.coa = signer.storage.borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
-      ?? panic("drain_inbox: no COA at /storage/evm — activate first")
-  }
-
-  execute {
-    let inboxAddr = EVM.addressFromString("${SHIELDED_INBOX_ADDRESS}")
-    let calldata  = EVM.encodeABIWithSignature("drainAll()", [])
-    // Non-fatal if inbox has no notes (already drained concurrently).
-    let _ = self.coa.call(
-      to:       inboxAddr,
-      data:     calldata,
-      gasLimit: 400000,
-      value:    EVM.Balance(attoflow: 0)
-    )
-  }
-}
-`;
-
-/** Cadence tx: submit batch claim proof to JanusToken.claimBatch() via COA. */
-function TX_CLAIM_BATCH(janusProxy: string): string {
-  return `
-import EVM from ${EVM_SYSTEM_CONTRACT}
-
-transaction(
-  publicInputs: [UInt256],
-  proof:        [UInt256]
-) {
-  let coa: auth(EVM.Call) &EVM.CadenceOwnedAccount
-
-  prepare(signer: auth(BorrowValue) &Account) {
-    self.coa = signer.storage.borrow<auth(EVM.Call) &EVM.CadenceOwnedAccount>(from: /storage/evm)
-      ?? panic("claim_batch: no COA at /storage/evm — activate first")
-  }
-
-  execute {
-    let janusAddr = EVM.addressFromString("${janusProxy}")
-    let calldata  = EVM.encodeABIWithSignature(
-      "claimBatch(uint256[6],uint256[8])",
-      [publicInputs, proof]
-    )
-    let result = self.coa.call(
-      to:       janusAddr,
-      data:     calldata,
-      gasLimit: 600000,
-      value:    EVM.Balance(attoflow: 0)
-    )
-    assert(
-      result.status == EVM.Status.successful,
-      message: "JanusToken.claimBatch failed: ".concat(result.errorMessage)
-    )
-  }
-}
-`;
-}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -237,53 +165,50 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
       };
 
       setStatus("claiming");
-      const fcl = await import("@onflow/fcl");
 
-      // Step 7: Drain inbox via COA (removes notes from ShieldedInbox mailbox).
-      const drainTxId: string = await fcl.mutate({
-        cadence: TX_DRAIN_INBOX,
-        args: () => [],
-        proposer: fcl.authz,
-        payer: fcl.authz,
-        authorizations: [fcl.authz],
-        limit: 9999,
-      });
-      await fcl.tx(drainTxId).onceSealed();
-
-      // Step 8: Submit claimBatch on JanusFlow proxy via COA.
-      const claimTxId: string = await fcl.mutate({
-        cadence: TX_CLAIM_BATCH(JANUS_FLOW_PROXY),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (inner: unknown) => unknown; UInt256: unknown }) => [
-          arg(publicInputs.map(String), t.Array(t.UInt256)),
-          arg(proof.map(String), t.Array(t.UInt256)),
-        ],
-        proposer: fcl.authz,
-        payer: fcl.authz,
-        authorizations: [fcl.authz],
-        limit: 9999,
-      });
-      await fcl.tx(claimTxId).onceSealed();
-
-      // Step 9: Accumulate new balance + update ShieldedCheckpoint.
+      // Step 7+8+9 (atomic): drainAll + claimBatch + ShieldedCheckpoint.update in one FCL tx.
       const totalClaimed = decrypted.reduce((acc, n) => acc + n.amount, 0n);
       const totalBlindingDelta = decrypted.reduce((acc, n) => (acc + n.blinding) % BABYJUB_SUBORDER, 0n);
       const newBalance  = oldBalance + totalClaimed;
       const newBlindingFinal = (oldBlinding + totalBlindingDelta + newBlinding) % BABYJUB_SUBORDER;
+      const newCursor = prevCursor + BigInt(rawNotes.length);
 
       // Load memoKeypair for checkpoint encryption.
       const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
       const pubkey = await pubkeyFromPrivkey(memoPrivkey);
       const memoKeypair = { privkey: memoPrivkey, pubkey };
 
-      const newCursor = prevCursor + BigInt(rawNotes.length);
-      await encryptAndUpdateCheckpointViaCoa(
+      const cpEnc = await encryptSnapshot(
         { balance: newBalance, blinding: newBlindingFinal },
-        newCursor,
-        memoKeypair,
+        memoKeypair.pubkey,
       );
 
-      setClaimTxId(claimTxId);
+      const { TX_CLAIM_BATCH_ATOMIC } = await import("@/lib/cadence-tx");
+      const fcl = await import("@onflow/fcl");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const atomicTxId: string = await (fcl as any).mutate({
+        cadence: TX_CLAIM_BATCH_ATOMIC,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (inner: unknown) => unknown; UInt256: unknown; UInt8: unknown; UInt64: unknown }) => [
+          arg(publicInputs.map(String), t.Array(t.UInt256)),
+          arg(proof.map(String), t.Array(t.UInt256)),
+          arg(Array.from(cpEnc.ciphertext).map(String), t.Array(t.UInt8)),
+          arg(cpEnc.ephemeralPubkey.x.toString(), t.UInt256),
+          arg(cpEnc.ephemeralPubkey.y.toString(), t.UInt256),
+          arg(newCursor.toString(), t.UInt64),
+        ],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        proposer: (fcl as any).authz,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        payer: (fcl as any).authz,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        authorizations: [(fcl as any).authz],
+        limit: 9999,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (fcl as any).tx(atomicTxId).onceSealed();
+
+      setClaimTxId(atomicTxId);
       setInboxCount(0);
       setStatus("success");
       toast.success(`Batch claim complete — ${decrypted.length} note${decrypted.length !== 1 ? "s" : ""} consolidated.`);
