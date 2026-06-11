@@ -82,11 +82,13 @@ export default function CheckpointStatus({
   }
 
   if (!installed) {
+    // No checkpoint yet — not a setup error, just no shielded state.
+    // Checkpoint is created on the user's first wrap+update.
     return (
       <span
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border border-[#D4AF37]/30 bg-[#D4AF37]/5 text-[#D4AF37]/80 ${className}`}
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border border-white/15 bg-white/5 text-foreground/60 ${className}`}
       >
-        No checkpoint — run /status to install
+        No shielded state yet
       </span>
     );
   }

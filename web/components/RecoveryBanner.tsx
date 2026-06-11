@@ -9,7 +9,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { ShieldedCheckpointClient, ShieldedInboxClient, getCoaEvmAddress } from "@claucondor/sdk";
+import { ShieldedInboxClient, getCoaEvmAddress, sdk } from "@claucondor/sdk";
 import { X } from "lucide-react";
 
 interface RecoveryBannerProps {
@@ -39,27 +39,33 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
 
         if (cancelled) return;
 
-        const cpClient = new ShieldedCheckpointClient();
         const ibClient = new ShieldedInboxClient();
+        const adapter = sdk.token("flow");
 
-        const [count, exists] = await Promise.all([
+        // "Activated" == has memokey published. ShieldedCheckpoint EVM only
+        // exists AFTER the first wrap+update — its absence is NOT a setup gap.
+        const [count, memoKey] = await Promise.all([
           hasValidCoa
             ? ibClient.count(coaAddr!).catch(() => 0n)
             : Promise.resolve(0n),
           hasValidCoa
-            ? cpClient.exists(coaAddr!).catch(() => false)
-            : Promise.resolve(false),
+            ? adapter.getMemoKey(coaAddr!).catch(() => null)
+            : Promise.resolve(null),
         ]);
 
         if (cancelled) return;
 
+        const hasMemoKey =
+          !!memoKey && (memoKey.x !== 0n || memoKey.y !== 0n);
+
         if (count > 0n) {
           setPendingCount(count);
           setMode("pending_notes");
-        } else if (!exists) {
+        } else if (!hasMemoKey) {
           setMode("not_activated");
         } else {
-          // count == 0 AND checkpoint exists — nothing to surface
+          // Memokey published + inbox empty — nothing to surface (no checkpoint
+          // doesn't mean "not setup"; it just means no shielded state yet).
           setMode(null);
         }
       } catch {
