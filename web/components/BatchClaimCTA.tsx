@@ -23,6 +23,7 @@ import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Inbox, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { toast } from "sonner";
+import { ethers } from "ethers";
 import {
   ShieldedInboxClient,
   decryptNote,
