@@ -768,8 +768,89 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     throw new Error(`sendTip: recipient ${recipientAddr} has no registered MemoKey`);
   }
 
+  if (entry.variant === "native") {
+    // ── Atomic path: shieldedTransfer + checkpoint in a single FCL tx ──────────
+    // 1. Generate blindings for transfer note and sender's residual commitment.
+    const transferBlinding = generateBlinding();
+    const newBlinding = generateBlinding();
+
+    // 2. Generate shielded-transfer proof server-side (Node.js WASM circuit).
+    const stResp = await fetch("/api/proof/shielded-transfer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        oldBalance:       currentBalance.toString(),
+        oldBlinding:      currentBlinding.toString(),
+        transferAmount:   amount.toString(),
+        transferBlinding: transferBlinding.toString(),
+        newBlinding:      newBlinding.toString(),
+      }),
+    });
+    if (!stResp.ok) {
+      const errText = await stResp.text().catch(() => stResp.statusText);
+      throw new Error(`sendTip: proof generation failed (${stResp.status}): ${errText}`);
+    }
+    const stProof = await stResp.json() as { proof: string[]; publicInputs: string[] };
+    const publicInputsBigint = stProof.publicInputs.map(BigInt) as [bigint, bigint, bigint, bigint, bigint, bigint];
+    const proofBigint        = stProof.proof.map(BigInt) as [bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint];
+
+    // 3. Encrypt note for recipient (ECIES — uses their MemoKey pubkey).
+    const noteEnc = await encryptNote(
+      { amount, blinding: transferBlinding, memo },
+      recipientMemoKey,
+    );
+
+    // 4. Compute sender's new balance and encrypt sender's residual snapshot.
+    const newBalance = currentBalance - amount;
+    const snapEnc = await encryptSnapshot(
+      { balance: newBalance, blinding: newBlinding },
+      memoKeypair.pubkey,
+    );
+
+    // 5. Build shieldedTransfer calldata (complex ABI — pre-encode client-side).
+    const transferCalldata = JANUS_FLOW_IFACE.encodeFunctionData("shieldedTransfer", [
+      recipientAddr,
+      publicInputsBigint,
+      proofBigint,
+      ethers.hexlify(noteEnc.ciphertext),
+      noteEnc.ephemeralPubkey.x,
+      noteEnc.ephemeralPubkey.y,
+    ]);
+    const transferCalldataHex = transferCalldata.slice(2);
+
+    // 6. Submit one FCL tx: shieldedTransfer + checkpoint atomically.
+    const { TX_SEND_TIP_ATOMIC } = await import("./cadence-tx");
+    const fcl = await getFcl();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const atomicTxId: string = await fcl.mutate({
+      cadence: TX_SEND_TIP_ATOMIC,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
+        arg(transferCalldataHex, t.String),
+        arg(TOKEN_PROXIES.flow, t.String),
+        arg(Array.from(snapEnc.ciphertext).map(String), t.Array(t.UInt8)),
+        arg(snapEnc.ephemeralPubkey.x.toString(), t.UInt256),
+        arg(snapEnc.ephemeralPubkey.y.toString(), t.UInt256),
+        arg(inboxCursor.toString(), t.UInt64),
+      ],
+      proposer: fcl.authz,
+      payer: fcl.authz,
+      authorizations: [fcl.authz],
+      limit: 9999,
+    });
+    await fcl.tx(atomicTxId).onceSealed();
+
+    // Persist memo for sender-side /tips view
+    if (memo && userCadenceAddr) {
+      saveSentMemo({ sender: userCadenceAddr, recipient: recipientAddr, memo });
+    }
+
+    return { txHash: atomicTxId, checkpointTxHash: atomicTxId, netToRecipient: amount };
+  }
+
+  // ── Non-atomic path: ERC20 / cadence-ft ────────────────────────────────────
   let sendResult: SendResult;
-  if (entry.variant === "native" || entry.variant === "erc20") {
+  if (entry.variant === "erc20") {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     sendResult = await (adapter as any).shieldedTransferViaCoa({
       recipient: recipientAddr,
@@ -787,25 +868,14 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     );
   }
 
-  // Update ShieldedCheckpoint with the sender's new state
-  let checkpointTxHash: string;
-  if (sendResult.checkpointPayload) {
-    const cpClient = new ShieldedCheckpointClient();
-    const cpResult = await cpClient.update(sendResult.checkpointPayload, inboxCursor, evmSigner);
-    checkpointTxHash = cpResult.txHash;
-  } else {
-    // Fallback: recompute from local blinding if checkpointPayload is missing
-    const newBalance = currentBalance - amount;
-    const newBlinding = sendResult.newBlinding ?? generateBlinding();
-    const cpClient = new ShieldedCheckpointClient();
-    const cpResult = await cpClient.encryptAndUpdate(
-      { balance: newBalance, blinding: newBlinding },
-      inboxCursor,
-      memoKeypair,
-      evmSigner
-    );
-    checkpointTxHash = cpResult.txHash;
-  }
+  // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
+  const newBalance = sendResult.newBalance ?? (currentBalance - amount);
+  const newBlinding = sendResult.newBlinding ?? generateBlinding();
+  const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(
+    { balance: newBalance, blinding: newBlinding },
+    inboxCursor,
+    memoKeypair,
+  );
 
   // Persist memo for sender-side /tips view
   if (memo && userCadenceAddr) {
