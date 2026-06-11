@@ -33,7 +33,8 @@ import {
   getCommitment,
   getCoaBalanceWei,
   getFlowVaultBalanceWei,
-  wrapActionLegacy as wrapAction,
+  wrapToken,
+  getShieldedStateForCoa,
   isValidFlowAmount,
   formatPoint,
   isIdentityPoint,
@@ -46,6 +47,7 @@ import {
   getOrDeriveMemoPrivkey,
   type Point,
 } from "@/lib/tip-actions";
+import { FLOWSCAN_CADENCE_TX } from "@/lib/explorer";
 // loadShieldedState and saveShieldedState removed from @/lib/store in v0.8.
 // Phase 4/5/6 will rewrite — Phase 1 left this here intentionally because it
 // consumes lib functions whose rewrite happens later.
@@ -92,6 +94,7 @@ interface WrapState {
   status: WrapStatus;
   error: string | null;
   txId: string | null;
+  checkpointTxId: string | null;
   wrappedAmount: string | null;
   newCommit: Point | null;
 }
@@ -125,6 +128,7 @@ function WrapPageInner() {
     status: "loading",
     error: null,
     txId: null,
+    checkpointTxId: null,
     wrappedAmount: null,
     newCommit: null,
   });
@@ -209,18 +213,18 @@ function WrapPageInner() {
         const bps = await fetchFeeBps(selectedToken);
         if (!cancelled) setFeeBps(bps);
 
-        setWrapState({ status: "idle", error: null, txId: null, wrappedAmount: null, newCommit: null });
+        setWrapState({ status: "idle", error: null, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes("No COA at /public/evm") || msg.includes("No COA")) {
           if (!cancelled) {
             setNeedsCoaSetup(true);
-            setWrapState({ status: "idle", error: null, txId: null, wrappedAmount: null, newCommit: null });
+            setWrapState({ status: "idle", error: null, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
           }
           return;
         }
         if (!cancelled) {
-          setWrapState({ status: "error", error: msg, txId: null, wrappedAmount: null, newCommit: null });
+          setWrapState({ status: "error", error: msg, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
           toast.error("Failed to initialize", { description: msg });
         }
       }
@@ -318,10 +322,10 @@ function WrapPageInner() {
     // Show pre-animation at the moment the user clicks wrap
     setShowPreAnimation(true);
 
-    setWrapState({ status: "validating", error: null, txId: null, wrappedAmount: null, newCommit: null });
+    setWrapState({ status: "validating", error: null, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
 
     if (!isValidFlowAmount(amount)) {
-      setWrapState({ status: "error", error: "Invalid amount.", txId: null, wrappedAmount: null, newCommit: null });
+      setWrapState({ status: "error", error: "Invalid amount.", txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
       setShowPreAnimation(false);
       return;
     }
@@ -331,7 +335,7 @@ function WrapPageInner() {
       amountWei = parseTokenAmount(amount, selectedToken);
       if (amountWei <= BigInt(0)) throw new Error("Amount must be > 0");
     } catch (err) {
-      setWrapState({ status: "error", error: err instanceof Error ? err.message : "Invalid amount", txId: null, wrappedAmount: null, newCommit: null });
+      setWrapState({ status: "error", error: err instanceof Error ? err.message : "Invalid amount", txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
       setShowPreAnimation(false);
       return;
     }
@@ -348,7 +352,7 @@ function WrapPageInner() {
           setWrapState({
             status: "error",
             error: `Insufficient FLOW: vault has ${formatTokenAmount(vaultBalanceWei, "flow", 4)}, COA has ${formatTokenAmount(coaBalanceWei, "flow", 4)}, need ${amount}.`,
-            txId: null, wrappedAmount: null, newCommit: null,
+            txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null,
           });
           setShowPreAnimation(false);
           return;
@@ -360,7 +364,7 @@ function WrapPageInner() {
           setWrapState({
             status: "error",
             error: `Selected source (${resolvedSource}) has only ${formatTokenAmount(available, "flow", 4)} FLOW, need ${amount}.`,
-            txId: null, wrappedAmount: null, newCommit: null,
+            txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null,
           });
           setShowPreAnimation(false);
           return;
@@ -371,7 +375,7 @@ function WrapPageInner() {
         setWrapState({
           status: "error",
           error: `Insufficient ${tokenMeta.symbol}: COA has ${formatTokenAmount(coaERC20BalanceWei, selectedToken, 4)}, need ${amount}.`,
-          txId: null, wrappedAmount: null, newCommit: null,
+          txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null,
         });
         setShowPreAnimation(false);
         return;
@@ -381,63 +385,60 @@ function WrapPageInner() {
         setWrapState({
           status: "error",
           error: `Insufficient ${tokenMeta.symbol}: vault has ${formatTokenAmount(ftVaultBalanceWei, selectedToken, 4)}, need ${amount}.`,
-          txId: null, wrappedAmount: null, newCommit: null,
+          txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null,
         });
         setShowPreAnimation(false);
         return;
       }
     }
 
-    setWrapState({ status: "building_proof", error: null, txId: null, wrappedAmount: null, newCommit: null });
+    setWrapState({ status: "building_proof", error: null, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
 
     try {
-      setWrapState({ status: "submitting", error: null, txId: null, wrappedAmount: null, newCommit: null });
-
-      const existing = loadShieldedState(userAddress, selectedToken);
-      const oldBalanceWei = existing ? BigInt(existing.balanceWei) : BigInt(0);
-
-      // v0.5.4-fees: contract takes a 0.1% fee on msg.value. The proof MUST bind
-      // to the NET amount (msg.value - fee), not the gross.
-      const netAmountWei = computeNetWrap(amountWei, feeBps);
-
-      // Get or derive memoKeypair for snapshot encryption.
-      let memoKeypair;
+      // Step 1: Derive memoKeypair (sign-once, cached in session).
+      let memoPrivkey: bigint;
+      let memoKeypair: { privkey: bigint; pubkey: { x: bigint; y: bigint } };
       try {
-        const privkey = await getOrDeriveMemoPrivkey(userAddress);
+        memoPrivkey = await getOrDeriveMemoPrivkey(userAddress);
         const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
-        const pubkey = await pubkeyFromPrivkey(privkey);
-        memoKeypair = { privkey, pubkey };
-      } catch { /* non-fatal — SDK will handle or skip snapshot */ }
+        const pubkey = await pubkeyFromPrivkey(memoPrivkey);
+        memoKeypair = { privkey: memoPrivkey, pubkey };
+      } catch (err) {
+        throw new Error(`Failed to derive memo key: ${err instanceof Error ? err.message : String(err)}`);
+      }
 
-      // native (FLOW) and erc20 (mUSDC): use wrapViaCoa — one Cadence tx signed by
-      // Flow Wallet so the user's COA is msg.sender (the identity with the MemoKey).
-      // cadence-ft (MockFT): JanusFTAdapter uses FCL internally — no signer needed.
-      // The derived EOA path is intentionally removed for native/erc20 — that EOA
-      // has no MemoKey registered and causes "signer has no registered memoKey" reverts.
+      // Step 2: Read previous shielded state from on-chain checkpoint (VoidSigner staticCall).
+      // Returns null if no checkpoint yet (first wrap) — prevBalance=0, prevBlinding=0, cursor=0.
+      const coaAddr = coaHex!;
+      const prevState = await getShieldedStateForCoa(coaAddr, memoPrivkey);
+      const prevBalance = prevState?.balance ?? 0n;
+      const prevBlinding = prevState?.blinding ?? 0n;
+      const prevCursor = prevState?.lastConsumedNoteIndex ?? 0n;
 
-      const result = await wrapAction({
-        amountUFix64: formatTokenAmount(amountWei, selectedToken, 8),
-        amountWei,
-        source: tokenVariant === "native" ? (source === "auto" ? (vaultBalanceWei >= amountWei ? "vault" : "coa") : source) : undefined,
-        memoKeypair,
-        // coaEvmAddr required for all variants (wrapViaCoa path)
-        coaEvmAddr: coaHex ?? undefined,
-        // userCadenceAddr required for cadence-ft wrapViaCoa path
-        userCadenceAddr: tokenVariant === "cadence-ft" ? (userAddress ?? undefined) : undefined,
+      setWrapState({ status: "submitting", error: null, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
+
+      // Step 3: Call wrapToken — generates proof server-side, submits via COA Cadence tx,
+      // then updates ShieldedCheckpoint via COA Cadence tx. All browser-safe (no raw EVM key).
+      const netAmountWei = computeNetWrap(amountWei, feeBps);
+      const result = await wrapToken({
         tokenId: selectedToken,
+        grossAmount: amountWei,
+        coaEvmAddr: coaAddr,
+        memoKeypair,
+        memoPrivkey,
+        prevBalance,
+        prevBlinding,
+        prevCursor,
+        userCadenceAddr: tokenVariant === "cadence-ft" ? userAddress : undefined,
       });
 
-      // Optimistic: store net amount with returned blinding.
-      const actualNewBalanceWei = oldBalanceWei + netAmountWei;
+      // Step 4: Update local shielded balance display (optimistic from result).
+      setShielded({
+        balanceWei: result.newBalance.toString(),
+        blinding: result.newBlinding.toString(),
+      });
 
-      const newState: ShieldedState = {
-        balanceWei: actualNewBalanceWei.toString(),
-        blinding: result.blinding.toString(),
-      };
-      saveShieldedState(userAddress, newState, selectedToken);
-      setShielded(newState);
-
-      // Refresh commitment on-chain
+      // Step 5: Refresh on-chain commitment display.
       if (coaHex) {
         try {
           const commitAddr = tokenVariant === "cadence-ft" ? userAddress : coaHex;
@@ -446,7 +447,7 @@ function WrapPageInner() {
         } catch { /* non-fatal */ }
       }
 
-      // Refresh balances
+      // Step 6: Refresh underlying balances.
       if (coaHex) {
         loadBalances(selectedToken, userAddress, coaHex).catch(() => {});
       }
@@ -455,9 +456,12 @@ function WrapPageInner() {
       setShowPostAnimation(true);
 
       setWrapState({
-        status: "success", error: null, txId: result.txId,
+        status: "success",
+        error: null,
+        txId: result.txHash,
+        checkpointTxId: result.checkpointTxHash,
         wrappedAmount: formatTokenAmount(netAmountWei, selectedToken, 4),
-        newCommit: result.commitment,
+        newCommit: null, // commitment point no longer returned by wrapToken (checkpoint-based)
       });
       toast.success("Wrap successful!", {
         description: `${formatTokenAmount(netAmountWei, selectedToken, 4)} ${tokenMeta.symbol} now in your shielded slot.`,
@@ -465,7 +469,7 @@ function WrapPageInner() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Wrap failed";
       setShowPreAnimation(false);
-      setWrapState({ status: "error", error: msg, txId: null, wrappedAmount: null, newCommit: null });
+      setWrapState({ status: "error", error: msg, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
       toast.error("Wrap failed", { description: msg });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -821,19 +825,35 @@ function WrapPageInner() {
                 <p className="text-xs text-foreground/50">{wrapState.wrappedAmount} {tokenMeta.symbol} now in your shielded slot.</p>
               </div>
             </div>
-            {wrapState.newCommit && (
-              <div className="mb-3">
-                <p className="text-xs font-medium text-foreground/70 mb-1">Your new commitment (point on BabyJubJub):</p>
-                <p className="font-mono text-[10px] break-all text-[#00EF8B]/80">{formatPoint(wrapState.newCommit)}</p>
+            {wrapState.txId && (
+              <div className="mb-2">
+                <p className="text-xs font-medium text-foreground/70 mb-1">Wrap transaction:</p>
+                <a
+                  href={FLOWSCAN_CADENCE_TX(wrapState.txId)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-[10px] break-all text-[#00EF8B]/70 hover:text-[#00EF8B] transition-colors"
+                >
+                  {wrapState.txId.slice(0, 20)}… ↗
+                </a>
               </div>
             )}
-            <div className="mb-3">
-              <p className="text-xs font-medium text-foreground/70 mb-1">Transaction:</p>
-              <p className="font-mono text-[10px] break-all text-foreground/50">{wrapState.txId}</p>
-            </div>
+            {wrapState.checkpointTxId && (
+              <div className="mb-3">
+                <p className="text-xs font-medium text-foreground/70 mb-1">Checkpoint update:</p>
+                <a
+                  href={FLOWSCAN_CADENCE_TX(wrapState.checkpointTxId)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-[10px] break-all text-foreground/50 hover:text-foreground/80 transition-colors"
+                >
+                  {wrapState.checkpointTxId.slice(0, 20)}… ↗
+                </a>
+              </div>
+            )}
             <div className="flex items-center gap-1.5 text-xs text-foreground/40 mb-4">
               <EyeOff className="w-3 h-3" />
-              Your blinding factor is stored locally; future tips will spend from this slot.
+              Your shielded balance is encrypted on-chain — only you can read it.
             </div>
             <div className="flex gap-3 justify-center">
               <Link href="/send">
@@ -849,7 +869,7 @@ function WrapPageInner() {
                 whileHover={{ scale: 1.02, y: -1 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => {
-                  setWrapState({ status: "idle", error: null, txId: null, wrappedAmount: null, newCommit: null });
+                  setWrapState({ status: "idle", error: null, txId: null, checkpointTxId: null, wrappedAmount: null, newCommit: null });
                   setShowPostAnimation(false);
                 }}
                 className="px-4 py-2 rounded-lg border border-white/15 bg-white/5 text-foreground/70 text-sm font-medium hover:bg-white/10 transition-colors"
