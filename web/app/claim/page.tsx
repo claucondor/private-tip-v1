@@ -17,7 +17,6 @@ import {
   Shield,
   Coins,
   EyeOff,
-  AlertTriangle,
 } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -293,23 +292,6 @@ function ClaimPageInner() {
           label="Token to claim / unwrap"
         />
       </motion.div>
-
-      {/* MockFT singleton limitation banner */}
-      {selectedToken === "mockft" && (
-        <motion.div
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3, ease: EASE }}
-          className="rounded-lg border border-amber-500/20 bg-amber-950/20 px-3 py-2.5 text-sm text-amber-200/80 mb-4 flex items-start gap-2"
-        >
-          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-          <span>
-            <strong className="text-amber-200">MockFT — Cadence singleton checkpoint.</strong>{" "}
-            Unwrapping MockFT shares a state slot with FLOW/mUSDC until v0.8.3.
-            Proceed with caution.
-          </span>
-        </motion.div>
-      )}
 
       {/* Batch-claim CTA — consolidate inbox notes into shielded balance before unwrapping */}
       <BatchClaimCTA

@@ -20,8 +20,6 @@ interface CheckpointStatusProps {
   tokenLabel?: string;
   /** Extra class names for the chip wrapper. */
   className?: string;
-  /** When true, append "(singleton — v0.8.3)" note to the chip label. */
-  singletonNote?: boolean;
 }
 
 export default function CheckpointStatus({
@@ -29,7 +27,6 @@ export default function CheckpointStatus({
   tokenAddress,
   tokenLabel,
   className = "",
-  singletonNote = false,
 }: CheckpointStatusProps) {
   const resolvedTokenAddress = tokenAddress ?? TOKEN_REGISTRY.flow.proxy;
 
@@ -84,7 +81,6 @@ export default function CheckpointStatus({
   if (!userAddress) return null;
 
   const labelPrefix = tokenLabel ? `${tokenLabel}: ` : "";
-  const singletonSuffix = singletonNote ? " (singleton — v0.8.3)" : "";
 
   if (loading) {
     return (
@@ -104,7 +100,7 @@ export default function CheckpointStatus({
       <span
         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border border-white/15 bg-white/5 text-foreground/60 ${className}`}
       >
-        {labelPrefix}No shielded state yet{singletonSuffix}
+        {labelPrefix}No shielded state yet
       </span>
     );
   }
@@ -116,8 +112,8 @@ export default function CheckpointStatus({
       <span className="w-1.5 h-1.5 rounded-full bg-[#00EF8B] shrink-0" />
       {labelPrefix}
       {meta
-        ? `v${meta.version} · block ${meta.lastUpdatedBlock}${singletonSuffix}`
-        : `Installed${singletonSuffix}`}
+        ? `v${meta.version} · block ${meta.lastUpdatedBlock}`
+        : `Installed`}
     </span>
   );
 }

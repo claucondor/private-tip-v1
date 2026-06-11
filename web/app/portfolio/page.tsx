@@ -30,6 +30,7 @@ import {
   getOrDeriveMemoPrivkey,
   getRecipientMemoPubkey,
   getShieldedStateForCoa,
+  TOKEN_PROXIES,
 } from "@/lib/tip-actions";
 import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei, ShieldedInboxClient } from "@claucondor/sdk";
 import type { ShieldedTokenState } from "@/lib/store";
@@ -95,9 +96,7 @@ export default function PortfolioPage() {
   }, [userAddress]);
 
   // Phase 4 (v0.8.2): reads on-chain ShieldedCheckpoint via VoidSigner staticCall.
-  // Per-token reads: FLOW + mUSDC each have their own EVM checkpoint slot.
-  // MockFT (cadence-ft) is still on the singleton Cadence checkpoint — shown as "—"
-  // with a tooltip until v0.8.3 Cadence governance upgrade lands.
+  // Per-token reads: FLOW, mUSDC, and MockFT each have their own EVM checkpoint slot.
   const refreshShieldedState = useCallback(async (addr: string, coa: string) => {
     const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
     const memoPrivkey = getCachedMemoPrivkey(addr);
@@ -113,24 +112,15 @@ export default function PortfolioPage() {
       inboxCount = Number(await ibClient.count(coa));
     } catch { /* non-fatal */ }
 
-    // Per-token checkpoint reads — each EVM token has its own slot.
+    // Per-token checkpoint reads — each token has its own slot.
     for (const t of SUPPORTED_TOKENS) {
       const entry = TOKEN_REGISTRY[t.id];
 
-      if (entry.variant === "cadence-ft") {
-        // MockFT: Cadence per-token checkpoint deferred to v0.8.3 (governance window).
-        // Show "—" with limitation indicator — do NOT read singleton (would show wrong token's data).
-        setRow(t.id, {
-          shieldedState: null,
-          loading: false,
-          error: null,
-        });
-        continue;
-      }
-
-      // EVM token (native or erc20): per-token read from new ShieldedCheckpoint.
+      // Resolve token address: EVM tokens use proxy; cadence-ft uses cadenceAddress as identifier.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tokenAddr = (entry as any).proxy as string;
+      const tokenAddr = entry.variant === "cadence-ft"
+        ? TOKEN_PROXIES[t.id as keyof typeof TOKEN_PROXIES]
+        : (entry as any).proxy as string;
       try {
         const cpState = await getShieldedStateForCoa(coa, memoPrivkey, tokenAddr).catch(() => null);
         setRow(t.id, {
@@ -515,18 +505,6 @@ export default function PortfolioPage() {
                     <span className="text-[10px] text-[#00EF8B]/60 uppercase tracking-wide">Shielded</span>
                   </div>
                   {(() => {
-                    const entry = TOKEN_REGISTRY[row.tokenId];
-                    if (entry.variant === "cadence-ft") {
-                      // MockFT: Cadence per-token checkpoint deferred — show limitation badge.
-                      return (
-                        <p
-                          className="text-sm font-mono text-foreground/30 cursor-help"
-                          title="Cadence per-token checkpoint deferred — see release notes for v0.8.3"
-                        >
-                          — <span className="text-[9px] text-amber-500/60 font-sans">(beta — Cadence path)</span>
-                        </p>
-                      );
-                    }
                     return hasShielded && shieldedBal !== null ? (
                       <p className="text-sm font-mono text-[#00EF8B]">
                         {formatTokenAmount(shieldedBal, row.tokenId, 4)} {token.symbol}

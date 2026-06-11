@@ -691,18 +691,6 @@ export default function SendTipPage() {
           label="Token to send"
         />
 
-        {/* MockFT singleton limitation banner */}
-        {selectedToken === "mockft" && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-950/10 p-3 flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-            <p className="text-xs text-amber-200/80">
-              <strong className="text-amber-200">MockFT — Cadence singleton checkpoint.</strong>{" "}
-              MockFT sends still work, but the shielded balance slot is shared with FLOW/mUSDC wraps in v0.8.2.
-              A subsequent wrap for another token will overwrite MockFT&apos;s state until v0.8.3 (per-token Cadence upgrade).
-            </p>
-          </div>
-        )}
-
         {/* Recipient field */}
         <div>
           <label className="text-xs font-medium text-foreground/50 mb-1 block">Recipient (Flow or EVM address)</label>

@@ -190,31 +190,21 @@ export async function getShieldedStateForCoa(
  * The COA is msg.sender for the EVM ShieldedCheckpoint.update() call.
  *
  * v0.8.2: checkpoint is now per-token. Pass the token's EVM proxy address as
- * `tokenAddress`. For cadence-ft (MockFT) tokens that have no EVM proxy, omit
- * this param — the update will be skipped with a console.warn (Cadence singleton
- * path unchanged, per-token upgrade pending v0.8.3).
+ * `tokenAddress`. For cadence-ft (MockFT), pass the cadenceAddress as the token
+ * identifier (per-token Cadence ShieldedCheckpoint is live at 0xd1a02aa46d9151bb).
  *
  * @param snapshot    { balance, blinding } to persist.
  * @param cursor      lastConsumedNoteIndex (inbox drain cursor).
  * @param memoKeypair Caller's BabyJub keypair (pubkey used for ECIES encryption).
- * @param tokenAddress EVM proxy address of the token (e.g. TOKEN_REGISTRY.flow.proxy).
- * @returns Cadence tx ID (not an EVM hash), or empty string if skipped.
+ * @param tokenAddress EVM proxy or cadence address of the token.
+ * @returns Cadence tx ID (not an EVM hash).
  */
 export async function encryptAndUpdateCheckpointViaCoa(
   snapshot: { balance: bigint; blinding: bigint },
   cursor: bigint,
   memoKeypair: BabyJubKeypair,
-  tokenAddress?: string,
+  tokenAddress: string,
 ): Promise<string> {
-  if (!tokenAddress) {
-    // cadence-ft (MockFT): no EVM proxy — per-token checkpoint not applicable yet.
-    console.warn(
-      "[encryptAndUpdateCheckpointViaCoa] tokenAddress not provided — " +
-      "cadence-ft singleton checkpoint update skipped. " +
-      "Per-token Cadence checkpoint upgrade pending v0.8.3 governance window."
-    );
-    return "";
-  }
   const enc = await encryptSnapshot(snapshot, memoKeypair.pubkey);
   const fcl = await getFcl();
   const txId: string = await fcl.mutate({
@@ -795,20 +785,15 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     wrapTxId = wr.txHash;
   } else {
     // cadence-ft (MockFT): FCL Cadence tx with user's Cadence address + COA EVM address
-    // console.warn: Cadence-side checkpoint update still writes to singleton (v0.8.3 governance).
-    console.warn(
-      "[wrapToken] MockFT (cadence-ft) uses singleton Cadence checkpoint — " +
-      "EVM per-token checkpoint update skipped. Upgrade pending v0.8.3 governance window."
-    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const wr = await (adapter as any).wrapViaCoa({ grossAmount, coaEvmAddr, userCadenceAddr, prebuiltProof });
     wrapTxId = wr.txHash;
   }
 
   // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
-  // For erc20: pass token EVM proxy address. For cadence-ft: pass undefined → skipped with warn.
+  // For erc20: use EVM proxy. For cadence-ft: use cadenceAddress as token identifier.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
+  const tokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : (entry as any).cadenceAddress as string;
   const cpTxId = await encryptAndUpdateCheckpointViaCoa(
     { balance: newBalance, blinding: newBlinding },
     effectivePrevCursor,
@@ -977,11 +962,7 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
       coaEvmAddr,
     });
   } else {
-    // cadence-ft (MockFT): singleton Cadence checkpoint — overwrite risk until v0.8.3.
-    console.warn(
-      "[sendTip] MockFT (cadence-ft): shieldedTransfer writes to Cadence singleton checkpoint slot. " +
-      "Any subsequent FLOW/mUSDC wrap will overwrite it. Per-token Cadence checkpoint fix pending v0.8.3."
-    );
+    // cadence-ft (MockFT): Cadence FT shielded transfer path.
     sendResult = await adapter.shieldedTransfer(
       { recipient: recipientAddr, amount, currentBalance, currentBlinding, memo },
       evmSigner
@@ -989,9 +970,9 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
   }
 
   // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
-  // Route by tokenId (C.2): erc20 uses its own proxy, cadence-ft skipped with warn.
+  // For erc20: use EVM proxy. For cadence-ft: use cadenceAddress as token identifier.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sendTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
+  const sendTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : (entry as any).cadenceAddress as string;
   const newBalance = sendResult.newBalance ?? (currentBalance - amount);
   const newBlinding = sendResult.newBlinding ?? generateBlinding();
   const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(
@@ -1188,9 +1169,9 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
   }
 
   // Residual state — use FCL COA checkpoint update (no raw EVM key).
-  // Route by tokenId (C.2): erc20 uses its own proxy, cadence-ft skipped with warn.
+  // For erc20: use EVM proxy. For cadence-ft: use cadenceAddress as token identifier.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const unwrapTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
+  const unwrapTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : (entry as any).cadenceAddress as string;
   const residualBalance = currentBalance - claimedAmount;
   const residualBlinding = generateBlinding();
   const checkpointTxHash = await encryptAndUpdateCheckpointViaCoa(

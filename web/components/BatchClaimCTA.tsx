@@ -21,7 +21,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Inbox, Loader2, CheckCircle, XCircle, AlertTriangle } from "lucide-react";
+import { Inbox, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { ethers } from "ethers";
 import {
@@ -72,13 +72,11 @@ export function BatchClaimCTA({
   const [claimTxId, setClaimTxId]  = useState<string | null>(null);
 
   const tokenMeta = getTokenMeta(tokenId);
-  // MockFT (cadence-ft): EVM batch-claim is deferred to v0.8.3.
-  const isDeferred = tokenId === "mockft";
 
   // ── Initial count check ────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!userAddress || isDeferred) {
+    if (!userAddress) {
       setStatus("idle");
       return;
     }
@@ -105,7 +103,7 @@ export function BatchClaimCTA({
       }
     })();
     return () => { cancelled = true; };
-  }, [userAddress, tokenAddress, isDeferred]);
+  }, [userAddress, tokenAddress]);
 
   // ── Batch claim handler ────────────────────────────────────────────────────
 
@@ -247,26 +245,6 @@ export function BatchClaimCTA({
   }, [userAddress, coaAddr, onClaimed, tokenAddress, tokenMeta.symbol]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
-
-  // MockFT: EVM batch-claim deferred to v0.8.3 (Cadence FT path requires per-token Cadence upgrade)
-  if (isDeferred && userAddress) {
-    return (
-      <div className="rounded-xl border border-amber-500/25 bg-amber-950/20 p-4 mb-4">
-        <div className="flex items-start gap-3">
-          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-semibold text-amber-200 mb-1">
-              MockFT batch claim — deferred (see v0.8.3)
-            </p>
-            <p className="text-xs text-amber-300/70">
-              MockFT uses the Cadence FT path. EVM batch-claim is unavailable for this token in v0.8.2.
-              Per-token Cadence checkpoint support ships in v0.8.3.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   // Hide if not logged in, still checking, or too few notes
   if (!userAddress || status === "checking" || (status === "idle" && inboxCount < MIN_NOTES_TO_SHOW)) {

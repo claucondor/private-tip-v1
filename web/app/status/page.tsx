@@ -271,7 +271,6 @@ export default function StatusPage() {
               userAddress={userAddress}
               tokenAddress={TOKEN_REGISTRY.mockft.cadenceAddress}
               tokenLabel="MockFT"
-              singletonNote={true}
             />
           </div>
         </div>
