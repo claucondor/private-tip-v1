@@ -403,6 +403,14 @@ const ERC20_IFACE = new ethers.Interface([
   "function approve(address spender, uint256 amount) returns (bool)",
 ]);
 
+// ERC20 wrap takes an extra `amount` first arg vs FLOW wrap (FLOW infers amount from msg.value).
+// Reusing JANUS_FLOW_IFACE for ERC20 wrap is the bug behind the mUSDC wrap revert.
+const JANUS_ERC20_IFACE = new ethers.Interface([
+  "function wrapWithProof(uint256 amount, uint256 nonce, uint256[2] commit, uint256[2] pA, uint256[2][2] pB, uint256[2] pC, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY)",
+  "function shieldedTransfer(address to, uint256[6] publicInputs, uint256[8] proof, bytes encryptedNoteTo, uint256 ephPubkeyToX, uint256 ephPubkeyToY)",
+  "function unwrap(uint256 claimedAmount, address recipient, uint256[2] txCommit, uint256[8] amountProof, uint256[6] transferPublicInputs, uint256[8] transferProof, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY)",
+]);
+
 // UFix64 helper — converts attoflow (wei) bigint to Flow UFix64 string (8 dec places)
 function toUFix64(attoflow: bigint): string {
   const FLOW_SCALE_F = 10n ** 18n;
@@ -791,7 +799,9 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
       memoKeypair.pubkey,
     );
     const proof = prebuiltProof.proof;
-    const wrapCalldataErc20 = JANUS_FLOW_IFACE.encodeFunctionData("wrapWithProof", [
+    // ERC20 wrapWithProof signature differs from FLOW: takes `amount` as first arg
+    const wrapCalldataErc20 = JANUS_ERC20_IFACE.encodeFunctionData("wrapWithProof", [
+      grossAmount,
       prebuiltProof.nonce,
       [prebuiltProof.txCommit[0], prebuiltProof.txCommit[1]],
       [proof[0], proof[1]],
