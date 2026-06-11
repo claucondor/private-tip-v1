@@ -411,13 +411,30 @@ const JANUS_ERC20_IFACE = new ethers.Interface([
   "function unwrap(uint256 claimedAmount, address recipient, uint256[2] txCommit, uint256[8] amountProof, uint256[6] transferPublicInputs, uint256[8] transferProof, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY)",
 ]);
 
-// UFix64 helper — converts attoflow (wei) bigint to Flow UFix64 string (8 dec places)
+// UFix64 helper — converts attoflow (wei) bigint to Flow UFix64 string (8 dec places).
+// FLOW uses 18 decimals; UFix64 has 8 fractional digits → divide by 10^10 to scale down.
 function toUFix64(attoflow: bigint): string {
   const FLOW_SCALE_F = 10n ** 18n;
   const UFIX64_FRAC  = 10n ** 10n;
   const whole        = attoflow / FLOW_SCALE_F;
   const fracAttoflow = attoflow % FLOW_SCALE_F;
   const fracUfix64   = fracAttoflow / UFIX64_FRAC;
+  return `${whole}.${fracUfix64.toString().padStart(8, "0")}`;
+}
+
+// Generic UFix64 from a raw bigint with arbitrary decimals. UFix64 has 8 fractional
+// digits. For tokens with <8 decimals: scale up. For >8: scale down. For exactly 8
+// (MockFT): just split whole/frac directly.
+function rawToUFix64(amount: bigint, decimals: number): string {
+  const scale = 10n ** BigInt(decimals);
+  const whole = amount / scale;
+  const frac = amount % scale;
+  let fracUfix64: bigint;
+  if (decimals >= 8) {
+    fracUfix64 = frac / (10n ** BigInt(decimals - 8));
+  } else {
+    fracUfix64 = frac * (10n ** BigInt(8 - decimals));
+  }
   return `${whole}.${fracUfix64.toString().padStart(8, "0")}`;
 }
 
@@ -866,7 +883,8 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; UFix64: unknown; UInt256: unknown; Array: (t: unknown) => unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
       arg(userCadenceAddr, t.Address),
-      arg(toUFix64(grossAmount), t.UFix64),
+      // FT tokens have their own decimals (MockFT=8); use rawToUFix64 not toUFix64 (which is FLOW-specific)
+      arg(rawToUFix64(grossAmount, entry.decimals), t.UFix64),
       arg(prebuiltProof.nonce.toString(), t.UInt256),
       arg(prebuiltProof.txCommit[0].toString(), t.UInt256),
       arg(prebuiltProof.txCommit[1].toString(), t.UInt256),
@@ -1382,7 +1400,8 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; UFix64: unknown; UInt256: unknown; Array: (t: unknown) => unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
       arg(userCadenceAddr, t.Address),
-      arg(toUFix64(claimedAmount), t.UFix64),
+      // FT decimals (MockFT=8) — use rawToUFix64 not toUFix64 (which is FLOW-specific)
+      arg(rawToUFix64(claimedAmount, entry.decimals), t.UFix64),
       arg(recipient, t.Address),
       arg(uwTxCommitFt[0].toString(), t.UInt256),
       arg(uwTxCommitFt[1].toString(), t.UInt256),
