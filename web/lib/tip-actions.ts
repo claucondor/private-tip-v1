@@ -199,6 +199,7 @@ export async function encryptAndUpdateCheckpointViaCoa(
 ): Promise<string> {
   const enc = await encryptSnapshot(snapshot, memoKeypair.pubkey);
   const fcl = await getFcl();
+  const { TX_UPDATE_CHECKPOINT_VIA_COA } = await import("./cadence-tx");
   const txId: string = await fcl.mutate({
     cadence: TX_UPDATE_CHECKPOINT_VIA_COA,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
