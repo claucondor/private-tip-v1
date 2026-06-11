@@ -29,12 +29,14 @@ import {
   getCoaEvmAddress,
   getOrDeriveMemoPrivkey,
   getRecipientMemoPubkey,
+  getShieldedStateForCoa,
 } from "@/lib/tip-actions";
-import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei } from "@claucondor/sdk";
+import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei, ShieldedInboxClient } from "@claucondor/sdk";
 import type { ShieldedTokenState } from "@/lib/store";
 // Phase 4 will rewrite /portfolio to use ShieldedCheckpointClient.readAndDecrypt() —
 // loadShieldedState / saveShieldedState / recoverShieldedState removed in Phase 1 (v0.8).
 import { TokenBadge } from "@/components/TokenSelector";
+import { BatchClaimCTA } from "@/components/BatchClaimCTA";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -92,7 +94,49 @@ export default function PortfolioPage() {
     setRows(initialRows());
   }, [userAddress]);
 
+  // Phase 4: reads on-chain ShieldedCheckpoint via VoidSigner staticCall (no raw EVM key).
+  // There is ONE checkpoint per COA address — all tokens share this slot.
+  // Each token row shows the same shielded balance (the single checkpoint value).
+  // Declared BEFORE the page-state useEffect and handleUnlock so both can reference it.
+  const refreshShieldedState = useCallback(async (addr: string, coa: string) => {
+    const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+    const memoPrivkey = getCachedMemoPrivkey(addr);
+    if (memoPrivkey === null) {
+      setPageState("needs_unlock");
+      return;
+    }
+
+    // Read checkpoint (VoidSigner — no private key needed).
+    const cpState = await getShieldedStateForCoa(coa, memoPrivkey);
+
+    // Read inbox pending count (view call — no signer needed).
+    let inboxCount = 0;
+    try {
+      const ibClient = new ShieldedInboxClient();
+      inboxCount = Number(await ibClient.count(coa));
+    } catch { /* non-fatal */ }
+
+    for (const t of SUPPORTED_TOKENS) {
+      if (cpState) {
+        setRow(t.id, {
+          shieldedState: {
+            balanceRaw: cpState.balance.toString(),
+            blinding: cpState.blinding.toString(),
+            checkpointVersion: cpState.version.toString(),
+            lastUpdatedBlock: "0",
+            inboxPendingCount: inboxCount,
+          },
+          loading: false,
+          error: null,
+        });
+      } else {
+        setRow(t.id, { shieldedState: null, loading: false, error: null });
+      }
+    }
+  }, [setRow, setPageState]);
+
   // Determine page state: needs_wallet / needs_activation / needs_unlock / ready
+  // When transitioning to "ready", kick off shielded balance load.
   useEffect(() => {
     if (!isLoggedIn || !userAddress) {
       setPageState("needs_wallet");
@@ -105,7 +149,13 @@ export default function PortfolioPage() {
         const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
         const sessionKey = getCachedMemoPrivkey(userAddress);
         if (sessionKey !== null) {
-          if (!cancelled) setPageState("ready");
+          if (!cancelled) {
+            setPageState("ready");
+            // Kick off shielded balance read now that we have the privkey in session.
+            if (coaAddr) {
+              refreshShieldedState(userAddress, coaAddr).catch(() => {});
+            }
+          }
           return;
         }
         // No session key — check on-chain
@@ -122,7 +172,8 @@ export default function PortfolioPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [isLoggedIn, userAddress]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn, userAddress, coaAddr, refreshShieldedState]);
 
   const handleUnlock = useCallback(async () => {
     if (!userAddress) return;
@@ -131,6 +182,10 @@ export default function PortfolioPage() {
       await getOrDeriveMemoPrivkey(userAddress);
       toast.success("Private inbox unlocked");
       setPageState("ready");
+      // Immediately load shielded state with the newly-derived key.
+      if (coaAddr) {
+        refreshShieldedState(userAddress, coaAddr).catch(() => {});
+      }
     } catch (err) {
       toast.error("Unlock failed", {
         description: err instanceof Error ? err.message : String(err),
@@ -138,7 +193,7 @@ export default function PortfolioPage() {
     } finally {
       setUnlocking(false);
     }
-  }, [userAddress]);
+  }, [userAddress, coaAddr, refreshShieldedState]);
 
   // Fetch public balances for all tokens.
   const fetchPublicBalances = useCallback(async (addr: string, coa: string) => {
@@ -165,17 +220,6 @@ export default function PortfolioPage() {
       }
     }
   }, [setRow]);
-
-  // Phase 4 will rewrite this to use ShieldedCheckpointClient.readAndDecrypt() per token.
-  // recoverShieldedState (v0.7 event-scan) removed in Phase 1 — runtime error guards this path.
-  const refreshShieldedState = useCallback(async (_addr: string, _coa: string) => {
-    // Phase 4 will rewrite /portfolio to use getShieldedState() from tip-actions.ts —
-    // Phase 1 left this here intentionally because it consumes lib functions
-    // whose rewrite happens in Phase 4.
-    throw new Error(
-      "refreshShieldedState: not implemented in Phase 1 — wait for Phase 4 (/portfolio rewrite)"
-    );
-  }, []);
 
   // Load everything on connect. Deliberately omits `loadingAll` from deps —
   // it's set INSIDE load() and would create a re-entry loop where the
@@ -210,12 +254,19 @@ export default function PortfolioPage() {
   const handleRefresh = useCallback(async () => {
     if (!userAddress || !coaAddr) return;
     setLoadingAll(true);
-    await Promise.all([
-      fetchPublicBalances(userAddress, coaAddr),
-      refreshShieldedState(userAddress, coaAddr),
-    ]);
-    setLoadingAll(false);
-    toast.success("Portfolio refreshed");
+    try {
+      await Promise.all([
+        fetchPublicBalances(userAddress, coaAddr),
+        refreshShieldedState(userAddress, coaAddr),
+      ]);
+      toast.success("Portfolio refreshed");
+    } catch (err) {
+      toast.error("Refresh failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setLoadingAll(false);
+    }
   }, [userAddress, coaAddr, fetchPublicBalances, refreshShieldedState]);
 
   // --- State machine renders ---
@@ -377,6 +428,16 @@ export default function PortfolioPage() {
           </p>
         )}
       </div>
+
+      {/* Batch claim CTA — shown when inbox has ≥ 5 pending notes */}
+      <BatchClaimCTA
+        userAddress={userAddress}
+        onClaimed={() => {
+          if (userAddress && coaAddr) {
+            refreshShieldedState(userAddress, coaAddr).catch(() => {});
+          }
+        }}
+      />
 
       {/* Token grid */}
       <div className="space-y-3">
