@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import CheckpointStatus from "@/components/CheckpointStatus";
+import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
 
 interface StatusResult {
   accountExists: boolean;
@@ -255,7 +256,24 @@ export default function StatusPage() {
             <ShieldCheck className="w-3 h-3" />
             Privacy status
           </div>
-          <CheckpointStatus userAddress={userAddress} />
+          <div className="flex flex-col gap-1">
+            <CheckpointStatus
+              userAddress={userAddress}
+              tokenAddress={TOKEN_REGISTRY.flow.proxy}
+              tokenLabel="FLOW"
+            />
+            <CheckpointStatus
+              userAddress={userAddress}
+              tokenAddress={TOKEN_REGISTRY.mockusdc.proxy}
+              tokenLabel="mUSDC"
+            />
+            <CheckpointStatus
+              userAddress={userAddress}
+              tokenAddress={TOKEN_REGISTRY.mockft.cadenceAddress}
+              tokenLabel="MockFT"
+              singletonNote={true}
+            />
+          </div>
         </div>
         <h1
           className="text-4xl font-bold tracking-tight"

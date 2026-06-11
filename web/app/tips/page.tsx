@@ -42,8 +42,12 @@ import {
   buildGetShieldedTipsBySenderWithSnapshotScript,
   decryptNote,
   getOrDeriveMemoPrivkey,
+  getCoaEvmAddress,
 } from "@/lib/tip-actions";
 import { decryptSnapshot } from "@claucondor/sdk/crypto";
+import { ShieldedInboxClient } from "@claucondor/sdk";
+import type { InboxNote, NoteContent } from "@claucondor/sdk";
+import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
 import { getCachedMemoPrivkey } from "@/lib/memo-key-session";
 import {
   findSentMemo,
@@ -133,6 +137,53 @@ export default function TipsPage() {
   const userAddress = user?.addr ?? null;
 
   const [activeFilter, setActiveFilter] = useState<TipFilter>("all");
+
+  // ShieldedInbox per-token received notes (EVM inbox — FLOW + mUSDC; MockFT uses Cadence path)
+  const [coaAddr, setCoaAddr] = useState<string | null>(null);
+  const [inboxNotes, setInboxNotes] = useState<InboxNote[]>([]);
+  const [inboxLoading, setInboxLoading] = useState(false);
+
+  // Resolve COA and load inbox notes on mount
+  useEffect(() => {
+    if (!userAddress) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const coa = await getCoaEvmAddress(userAddress);
+        if (cancelled) return;
+        setCoaAddr(coa);
+        setInboxLoading(true);
+        const ibClient = new ShieldedInboxClient();
+        const notes = await ibClient.peekAll(coa).catch(() => [] as InboxNote[]);
+        if (!cancelled) setInboxNotes(notes);
+      } catch { /* non-fatal */ } finally {
+        if (!cancelled) setInboxLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userAddress]);
+
+  const handleRefreshInbox = useCallback(async () => {
+    if (!coaAddr) return;
+    setInboxLoading(true);
+    try {
+      const ibClient = new ShieldedInboxClient();
+      const notes = await ibClient.peekAll(coaAddr).catch(() => [] as InboxNote[]);
+      setInboxNotes(notes);
+    } catch { /* non-fatal */ } finally {
+      setInboxLoading(false);
+    }
+  }, [coaAddr]);
+
+  // Filter inbox notes by depositor (token contract address)
+  const flowInboxNotes = inboxNotes.filter(
+    (n) => n.depositor.toLowerCase() === TOKEN_REGISTRY.flow.proxy.toLowerCase()
+  );
+  const musdcInboxNotes = inboxNotes.filter(
+    (n) => n.depositor.toLowerCase() === TOKEN_REGISTRY.mockusdc.proxy.toLowerCase()
+  );
+  // MockFT (cadence-ft) uses Cadence inbox — EVM inbox never has MockFT notes
+  const mockftInboxNotes: InboxNote[] = [];
 
   const receivedQuery = useFlowQuery({
     cadence: buildGetShieldedTipsByRecipientWithMemoScript(),
@@ -352,9 +403,60 @@ export default function TipsPage() {
         </div>
       )}
 
-      {/* List */}
+      {/* Per-token received sections (ShieldedInbox) — shown on All + Received tabs */}
+      {activeFilter !== "sent" && (
+        <div className="mb-8 space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-foreground/70">Received Tips (on-chain inbox)</h2>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRefreshInbox}
+              disabled={inboxLoading}
+              className="shrink-0"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${inboxLoading ? "animate-spin" : ""}`} />
+              <span className="ml-1 hidden sm:inline">Refresh</span>
+            </Button>
+          </div>
+
+          {/* FLOW inbox section */}
+          <TokenInboxSection
+            label="FLOW tips received"
+            symbol="FLOW"
+            notes={flowInboxNotes}
+            loading={inboxLoading}
+            currentUser={userAddress ?? ""}
+          />
+
+          {/* mUSDC inbox section */}
+          <TokenInboxSection
+            label="mUSDC tips received"
+            symbol="mUSDC"
+            notes={musdcInboxNotes}
+            loading={inboxLoading}
+            currentUser={userAddress ?? ""}
+          />
+
+          {/* MockFT inbox section — always empty (Cadence path) */}
+          <TokenInboxSection
+            label="MockFT tips received"
+            symbol="MockFT"
+            notes={mockftInboxNotes}
+            loading={false}
+            currentUser={userAddress ?? ""}
+            cadencePathNote="MockFT uses the Cadence inbox path — EVM inbox notes not applicable in v0.8.2."
+          />
+        </div>
+      )}
+
+      {/* Legacy Cadence-script tip history (Sent + historical received) */}
       {!loading && filteredSorted.length > 0 && (
         <div className="space-y-2">
+          <h2 className="text-sm font-semibold text-foreground/70 mb-3">
+            {activeFilter === "received" ? "Historical received (Cadence contract)" :
+             activeFilter === "sent" ? "Sent tips" : "Tip history (Cadence contract)"}
+          </h2>
           {filteredSorted.map((tip) => (
             <TipCard
               key={`${tip.tipID}-${tip.sender}`}
@@ -372,6 +474,151 @@ export default function TipsPage() {
     </div>
   );
 }
+
+// ─── Per-token inbox section (ShieldedInbox v0.8) ────────────────────────────
+
+function TokenInboxSection({
+  label,
+  symbol,
+  notes,
+  loading,
+  currentUser,
+  cadencePathNote,
+}: {
+  label: string;
+  symbol: string;
+  notes: InboxNote[];
+  loading: boolean;
+  currentUser: string;
+  cadencePathNote?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-[#0A1628]/40 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-foreground/70 uppercase tracking-wider">{label}</h3>
+        <span className="text-xs font-mono text-foreground/40">{notes.length} note{notes.length !== 1 ? "s" : ""}</span>
+      </div>
+
+      {loading && (
+        <div className="flex items-center gap-2 text-xs text-foreground/40 py-2">
+          <RefreshCw className="w-3 h-3 animate-spin" />
+          Loading inbox…
+        </div>
+      )}
+
+      {cadencePathNote && !loading && (
+        <div className="rounded bg-white/5 px-3 py-2 text-xs text-foreground/40 italic">
+          {cadencePathNote}
+        </div>
+      )}
+
+      {!loading && !cadencePathNote && notes.length === 0 && (
+        <p className="text-xs text-foreground/40 italic">No tips received for {symbol} yet.</p>
+      )}
+
+      {!loading && notes.length > 0 && (
+        <div className="space-y-2">
+          {notes.map((note, i) => (
+            <InboxNoteCard
+              key={`${symbol}-${i}-${note.blockNumber}`}
+              note={note}
+              symbol={symbol}
+              currentUser={currentUser}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InboxNoteCard({
+  note,
+  symbol,
+  currentUser,
+}: {
+  note: InboxNote;
+  symbol: string;
+  currentUser: string;
+}) {
+  const [decrypted, setDecrypted] = useState<NoteContent | null>(null);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [decrypting, setDecrypting] = useState(false);
+
+  const handleDecrypt = useCallback(async () => {
+    setDecrypting(true);
+    setDecryptError(null);
+    try {
+      const privkey = await getOrDeriveMemoPrivkey(currentUser);
+      const content = await decryptNote(
+        note.ciphertext,
+        { x: note.ephPubkeyX, y: note.ephPubkeyY },
+        privkey
+      );
+      setDecrypted(content);
+    } catch (err) {
+      setDecryptError(err instanceof Error ? err.message : "Decryption failed");
+    } finally {
+      setDecrypting(false);
+    }
+  }, [note, currentUser]);
+
+  return (
+    <div className="rounded border border-border bg-card p-3 text-xs space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-foreground/60">
+          <Inbox className="w-3 h-3" />
+          <span>Block {note.blockNumber.toString()}</span>
+        </div>
+        <span className="text-foreground/40 font-mono text-[10px] truncate max-w-[120px]" title={note.depositor}>
+          via {note.depositor.slice(0, 6)}…{note.depositor.slice(-4)}
+        </span>
+      </div>
+
+      {!decrypted && !decryptError && (
+        <div className="flex items-center gap-2">
+          <EyeOff className="w-3 h-3 text-foreground/40 shrink-0" />
+          <span className="text-foreground/40 italic">Amount encrypted</span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px] ml-auto"
+            onClick={handleDecrypt}
+            disabled={decrypting}
+          >
+            {decrypting ? "Decrypting…" : "Reveal amount"}
+          </Button>
+        </div>
+      )}
+
+      {decryptError && (
+        <p className="text-amber-400/80 text-[10px]">Decryption failed: {decryptError}</p>
+      )}
+
+      {decrypted && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5 text-[#00EF8B]">
+            <Shield className="w-3 h-3 shrink-0" />
+            <span className="font-mono font-medium">
+              {(() => {
+                const scale = symbol === "FLOW" ? 18n : symbol === "mUSDC" ? 6n : 8n;
+                const divisor = 10n ** scale;
+                const whole = decrypted.amount / divisor;
+                const frac = (decrypted.amount % divisor).toString().padStart(Number(scale), "0").slice(0, 4);
+                return `${whole}.${frac} ${symbol}`;
+              })()}
+            </span>
+          </div>
+          {decrypted.memo && (
+            <p className="text-foreground/70">&ldquo;{decrypted.memo}&rdquo;</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Legacy TipCard (Cadence-contract based tips) ────────────────────────────
 
 function TipCard({
   tip,

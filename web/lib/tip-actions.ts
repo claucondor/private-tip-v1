@@ -933,15 +933,17 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
 
     // 6. Submit one FCL tx: shieldedTransfer + checkpoint atomically.
     // cadenceTx.sendTipAtomic(tokenAddrHex) from SDK — uses new per-token ShieldedCheckpoint.
-    // TODO(C.2): pass actual tokenId proxy for mUSDC/MockFT paths.
+    // Route by tokenId (C.2): derive proxy from entry, not hardcoded to FLOW.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sendAtomicProxy = (entry as any).proxy as string;
     const fcl = await getFcl();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const atomicTxId: string = await fcl.mutate({
-      cadence: cadenceTx.sendTipAtomic(TOKEN_PROXIES.flow),
+      cadence: cadenceTx.sendTipAtomic(sendAtomicProxy),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
         arg(transferCalldataHex, t.String),
-        arg(TOKEN_PROXIES.flow, t.String),
+        arg(sendAtomicProxy, t.String),
         arg(ethers.hexlify(snapEnc.ciphertext).slice(2), t.String),
         arg(snapEnc.ephemeralPubkey.x.toString(), t.UInt256),
         arg(snapEnc.ephemeralPubkey.y.toString(), t.UInt256),
@@ -975,7 +977,11 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
       coaEvmAddr,
     });
   } else {
-    // cadence-ft (MockFT): uses FCL internally
+    // cadence-ft (MockFT): singleton Cadence checkpoint — overwrite risk until v0.8.3.
+    console.warn(
+      "[sendTip] MockFT (cadence-ft): shieldedTransfer writes to Cadence singleton checkpoint slot. " +
+      "Any subsequent FLOW/mUSDC wrap will overwrite it. Per-token Cadence checkpoint fix pending v0.8.3."
+    );
     sendResult = await adapter.shieldedTransfer(
       { recipient: recipientAddr, amount, currentBalance, currentBlinding, memo },
       evmSigner
@@ -983,7 +989,7 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
   }
 
   // Update ShieldedCheckpoint via FCL COA tx (no raw EVM key needed).
-  // TODO(C.2): route per-tokenId for mUSDC — for now FLOW proxy is default, cadence-ft skipped.
+  // Route by tokenId (C.2): erc20 uses its own proxy, cadence-ft skipped with warn.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sendTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
   const newBalance = sendResult.newBalance ?? (currentBalance - amount);
@@ -1122,11 +1128,13 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
 
     // 6. Submit one FCL tx: unwrap + checkpoint atomically.
     // cadenceTx.unwrapFlowAtomic(tokenAddrHex) from SDK — uses new per-token ShieldedCheckpoint.
-    // TODO(C.2): pass actual tokenId proxy for mUSDC/MockFT paths.
+    // Route by tokenId (C.2): derive proxy from entry, not hardcoded to FLOW.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const unwrapAtomicProxy = (entry as any).proxy as string;
     const fcl = await getFcl();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const atomicTxId: string = await fcl.mutate({
-      cadence: cadenceTx.unwrapFlowAtomic(TOKEN_REGISTRY.flow.proxy),
+      cadence: cadenceTx.unwrapFlowAtomic(unwrapAtomicProxy),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
         arg(unwrapCalldataHex, t.String),
@@ -1180,7 +1188,7 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
   }
 
   // Residual state — use FCL COA checkpoint update (no raw EVM key).
-  // TODO(C.2): route per-tokenId for mUSDC — for now FLOW proxy is default, cadence-ft skipped.
+  // Route by tokenId (C.2): erc20 uses its own proxy, cadence-ft skipped with warn.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const unwrapTokenProxy = entry.variant === "erc20" ? (entry as any).proxy as string : undefined;
   const residualBalance = currentBalance - claimedAmount;

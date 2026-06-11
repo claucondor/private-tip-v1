@@ -1,8 +1,9 @@
 "use client";
 
 /// CheckpointStatus — compact chip showing whether the current user has an
-/// on-chain ShieldedCheckpoint and, if so, its version + last updated block.
+/// on-chain ShieldedCheckpoint for a given token, and if so, its version + last updated block.
 ///
+/// v0.8.2 (C.2): now accepts tokenAddress prop for per-token status.
 /// Resolves COA from the Flow Cadence address, then reads public checkpoint
 /// metadata (no signer required — metadata() is a public view).
 
@@ -13,13 +14,25 @@ import { Loader2 } from "lucide-react";
 
 interface CheckpointStatusProps {
   userAddress: string | null;
+  /** EVM proxy address of the token to check. Defaults to FLOW proxy. */
+  tokenAddress?: string;
+  /** Short label shown on the chip (e.g. "FLOW", "mUSDC", "MockFT"). */
+  tokenLabel?: string;
+  /** Extra class names for the chip wrapper. */
   className?: string;
+  /** When true, append "(singleton — v0.8.3)" note to the chip label. */
+  singletonNote?: boolean;
 }
 
 export default function CheckpointStatus({
   userAddress,
+  tokenAddress,
+  tokenLabel,
   className = "",
+  singletonNote = false,
 }: CheckpointStatusProps) {
+  const resolvedTokenAddress = tokenAddress ?? TOKEN_REGISTRY.flow.proxy;
+
   const [loading, setLoading] = useState(false);
   const [installed, setInstalled] = useState<boolean | null>(null);
   const [meta, setMeta] = useState<CheckpointMetadata | null>(null);
@@ -48,11 +61,9 @@ export default function CheckpointStatus({
         if (cancelled) return;
 
         const client = new ShieldedCheckpointClient();
-        // v0.8.2: exists/metadata now require a token address. CheckpointStatus shows
-        // FLOW slot by default (TODO C.2: multi-token per-row status display).
         const [exists, metadata] = await Promise.all([
-          client.exists(coaAddr, TOKEN_REGISTRY.flow.proxy).catch(() => false),
-          client.metadata(coaAddr, TOKEN_REGISTRY.flow.proxy).catch(() => null),
+          client.exists(coaAddr, resolvedTokenAddress).catch(() => false),
+          client.metadata(coaAddr, resolvedTokenAddress).catch(() => null),
         ]);
 
         if (cancelled) return;
@@ -68,9 +79,12 @@ export default function CheckpointStatus({
     return () => {
       cancelled = true;
     };
-  }, [userAddress]);
+  }, [userAddress, resolvedTokenAddress]);
 
   if (!userAddress) return null;
+
+  const labelPrefix = tokenLabel ? `${tokenLabel}: ` : "";
+  const singletonSuffix = singletonNote ? " (singleton — v0.8.3)" : "";
 
   if (loading) {
     return (
@@ -78,19 +92,19 @@ export default function CheckpointStatus({
         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border border-white/15 bg-white/5 text-foreground/50 ${className}`}
       >
         <Loader2 className="w-3 h-3 animate-spin" />
-        Loading checkpoint…
+        {labelPrefix}Loading…
       </span>
     );
   }
 
   if (!installed) {
-    // No checkpoint yet — not a setup error, just no shielded state.
-    // Checkpoint is created on the user's first wrap+update.
+    // No checkpoint yet — not a setup error, just no shielded state for this token.
+    // Checkpoint is created on the user's first wrap+update for this token.
     return (
       <span
         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border border-white/15 bg-white/5 text-foreground/60 ${className}`}
       >
-        No shielded state yet
+        {labelPrefix}No shielded state yet{singletonSuffix}
       </span>
     );
   }
@@ -100,9 +114,10 @@ export default function CheckpointStatus({
       className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono border border-[#00EF8B]/25 bg-[#00EF8B]/8 text-[#00EF8B] ${className}`}
     >
       <span className="w-1.5 h-1.5 rounded-full bg-[#00EF8B] shrink-0" />
+      {labelPrefix}
       {meta
-        ? `Checkpoint v${meta.version} · block ${meta.lastUpdatedBlock}`
-        : "Checkpoint installed"}
+        ? `v${meta.version} · block ${meta.lastUpdatedBlock}${singletonSuffix}`
+        : `Installed${singletonSuffix}`}
     </span>
   );
 }
