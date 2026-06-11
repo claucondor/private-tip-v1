@@ -204,7 +204,7 @@ export async function encryptAndUpdateCheckpointViaCoa(
     cadence: TX_UPDATE_CHECKPOINT_VIA_COA,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
-      arg(Array.from(enc.ciphertext).map(String), t.Array(t.UInt8)),
+      arg(ethers.hexlify(enc.ciphertext).slice(2), t.String),
       arg(enc.ephemeralPubkey.x.toString(), t.UInt256),
       arg(enc.ephemeralPubkey.y.toString(), t.UInt256),
       arg(cursor.toString(), t.UInt64),
@@ -665,7 +665,7 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
         arg(toUFix64(grossAmount), t.UFix64),
         arg(grossAmount.toString(), t.UInt),
         arg(wrapCalldataHex, t.String),
-        arg(Array.from(cpSnap.ciphertext).map(String), t.Array(t.UInt8)),
+        arg(ethers.hexlify(cpSnap.ciphertext).slice(2), t.String),
         arg(cpSnap.ephemeralPubkey.x.toString(), t.UInt256),
         arg(cpSnap.ephemeralPubkey.y.toString(), t.UInt256),
         arg(effectivePrevCursor.toString(), t.UInt64),
@@ -831,7 +831,7 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
       args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
         arg(transferCalldataHex, t.String),
         arg(TOKEN_PROXIES.flow, t.String),
-        arg(Array.from(snapEnc.ciphertext).map(String), t.Array(t.UInt8)),
+        arg(ethers.hexlify(snapEnc.ciphertext).slice(2), t.String),
         arg(snapEnc.ephemeralPubkey.x.toString(), t.UInt256),
         arg(snapEnc.ephemeralPubkey.y.toString(), t.UInt256),
         arg(inboxCursor.toString(), t.UInt64),
@@ -1014,7 +1014,7 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
         arg(unwrapCalldataHex, t.String),
-        arg(Array.from(cpSnap.ciphertext).map(String), t.Array(t.UInt8)),
+        arg(ethers.hexlify(cpSnap.ciphertext).slice(2), t.String),
         arg(cpSnap.ephemeralPubkey.x.toString(), t.UInt256),
         arg(cpSnap.ephemeralPubkey.y.toString(), t.UInt256),
         arg(inboxCursor.toString(), t.UInt64),

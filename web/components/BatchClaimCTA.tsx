@@ -192,7 +192,7 @@ export function BatchClaimCTA({ userAddress, onClaimed }: BatchClaimCTAProps) {
         args: (arg: (v: unknown, t: unknown) => unknown, t: { Array: (inner: unknown) => unknown; UInt256: unknown; UInt8: unknown; UInt64: unknown }) => [
           arg(publicInputs.map(String), t.Array(t.UInt256)),
           arg(proof.map(String), t.Array(t.UInt256)),
-          arg(Array.from(cpEnc.ciphertext).map(String), t.Array(t.UInt8)),
+          arg(ethers.hexlify(cpEnc.ciphertext).slice(2), t.String),
           arg(cpEnc.ephemeralPubkey.x.toString(), t.UInt256),
           arg(cpEnc.ephemeralPubkey.y.toString(), t.UInt256),
           arg(newCursor.toString(), t.UInt64),

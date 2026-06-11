@@ -90,7 +90,7 @@ export const TX_UPDATE_CHECKPOINT_VIA_COA = `
 import EVM from ${EVM_SYSTEM_CONTRACT}
 
 transaction(
-  encryptedSnapshot:     [UInt8],
+  encryptedSnapshotHex:  String,
   ephPubkeyX:            UInt256,
   ephPubkeyY:            UInt256,
   lastConsumedNoteIndex: UInt64
@@ -107,7 +107,7 @@ transaction(
 
     let calldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshot, ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
 
     let result = self.coa.call(
@@ -151,7 +151,7 @@ transaction(
   amountUFix64: UFix64,
   attoflowWei: UInt,
   wrapCalldataHex: String,
-  encryptedSnapshot: [UInt8],
+  encryptedSnapshotHex: String,
   ephPubkeyX: UInt256,
   ephPubkeyY: UInt256,
   lastConsumedNoteIndex: UInt64
@@ -185,7 +185,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshot, ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = coa.call(
       to: checkpointAddr,
@@ -222,7 +222,7 @@ import EVM from ${EVM_SYSTEM_CONTRACT}
 transaction(
   transferCalldataHex: String,
   janusProxyHex: String,
-  encryptedSnapshot: [UInt8],
+  encryptedSnapshotHex: String,
   ephPubkeyX: UInt256,
   ephPubkeyY: UInt256,
   lastConsumedNoteIndex: UInt64
@@ -252,7 +252,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshot, ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = self.coa.call(
       to: checkpointAddr,
@@ -284,7 +284,7 @@ import EVM from ${EVM_SYSTEM_CONTRACT}
 
 transaction(
   unwrapCalldataHex: String,
-  encryptedSnapshot: [UInt8],
+  encryptedSnapshotHex: String,
   ephPubkeyX: UInt256,
   ephPubkeyY: UInt256,
   lastConsumedNoteIndex: UInt64
@@ -314,7 +314,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshot, ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = self.coa.call(
       to: checkpointAddr,
@@ -351,7 +351,7 @@ import EVM from ${EVM_SYSTEM_CONTRACT}
 transaction(
   publicInputs: [UInt256],
   proof: [UInt256],
-  encryptedSnapshot: [UInt8],
+  encryptedSnapshotHex: String,
   ephPubkeyX: UInt256,
   ephPubkeyY: UInt256,
   lastConsumedNoteIndex: UInt64
@@ -395,7 +395,7 @@ transaction(
     let checkpointAddr = EVM.addressFromString("${SHIELDED_CHECKPOINT_ADDRESS}")
     let cpCalldata = EVM.encodeABIWithSignature(
       "update(bytes,uint256,uint256,uint64)",
-      [encryptedSnapshot, ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
+      [encryptedSnapshotHex.decodeHex(), ephPubkeyX, ephPubkeyY, lastConsumedNoteIndex]
     )
     let cpResult = self.coa.call(
       to: checkpointAddr,
