@@ -16,24 +16,21 @@ import { Key, RefreshCw, AlertTriangle, Menu, X } from "lucide-react";
 import { flowConfig } from "@/lib/fcl-config";
 import ConnectWallet from "@/components/ConnectWallet";
 import MainnetCountdown from "@/components/MainnetCountdown";
+import RecoveryBanner from "@/components/RecoveryBanner";
 // Copy of /flow.json bundled inside web/ so Vercel's build root (web/) can resolve it.
 // Keep web/flow.json in sync with /flow.json when contracts/aliases change.
 import flowJSON from "../flow.json";
 
 // ---------------------------------------------------------------------------
-// Recovery banner — Phase 1 stub.
+// Recovery banner — Phase 3 rewrite.
 //
-// Phase 3 will rewrite this using ShieldedCheckpointClient.readAndDecrypt()
-// to detect chain vs local desync. The v0.7 localStorage model this depended
-// on (loadAllShieldedStates, sweepStaleShieldedCache, clearShieldedStateForAddr,
-// recoverShieldedState from deleted recovery.ts, saveShieldedState) was removed
-// in Phase 1. Return null until Phase 3 rewrites with the checkpoint model.
+// Reads ShieldedInboxClient.count + ShieldedCheckpointClient.exists via the
+// real RecoveryBanner component. Surfaces pending notes and missing checkpoint.
 // ---------------------------------------------------------------------------
 
-function RecoveryBanner() {
-  // Phase 1 stub — Phase 3 will rewrite — Phase 1 left this here intentionally
-  // because it consumes lib functions whose rewrite happens later.
-  return null;
+function RecoveryBannerWrapper() {
+  const { user } = useFlowCurrentUser();
+  return <RecoveryBanner userAddress={user?.addr ?? null} />;
 }
 
 
@@ -183,8 +180,8 @@ export default function ClientLayout({
       {/* Global MemoKey status banner */}
       <MemoKeyStatusBanner />
 
-      {/* Recovery banner — shown when localStorage is empty but chain has state */}
-      <RecoveryBanner />
+      {/* Recovery banner — surfaces pending inbox notes + uninstalled checkpoint */}
+      <RecoveryBannerWrapper />
 
       {/* Main content area */}
       <main className="flex-1">{children}</main>
@@ -203,7 +200,7 @@ export default function ClientLayout({
               GitHub
             </a>
             <span className="text-foreground/30">·</span>
-            <span className="font-mono text-foreground/40">v0.8.1-alpha.2</span>
+            <span className="font-mono text-foreground/40">v0.8.1-alpha.5</span>
             <span className="text-foreground/30">·</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
               testnet
