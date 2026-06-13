@@ -40,6 +40,7 @@ import {
   encryptNote,
   decryptNote,
   installInboxAndCheckpoint,
+  computeCommitment,
 } from "@claucondor/sdk";
 import {
   getCoaEvmAddress as sdkGetCoaEvmAddress,
@@ -50,6 +51,7 @@ import {
   createEvmWallet,
   createEvmProvider,
   TOKEN_REGISTRY,
+  SHIELDED_INBOX_ADDRESS,
 } from "@claucondor/sdk/network";
 import { ethers } from "ethers";
 import type { TokenId } from "./tokens";
@@ -86,11 +88,13 @@ export const EVM_CHAIN_ID = 545;
  */
 export const PRIVATE_TIP_CADENCE = "0x4b6bc58bc8bf5dcc";
 
-/** Per-token proxy addresses from SDK registry (canonical, no hardcoding). */
+/** Per-token proxy addresses from SDK registry (canonical, no hardcoding).
+ *  MockFT: Cadence addr (8 bytes) is zero-padded to 20-byte EVM address — this
+ *  is the identifier stored in ShieldedCheckpoint, must match what wrap writes. */
 export const TOKEN_PROXIES = {
   flow:     TOKEN_REGISTRY.flow.proxy,
   mockusdc: TOKEN_REGISTRY.mockusdc.proxy,
-  mockft:   TOKEN_REGISTRY.mockft.cadenceAddress,
+  mockft:   "0x" + TOKEN_REGISTRY.mockft.cadenceAddress.replace(/^0x/, "").padStart(40, "0"),
 } as const;
 
 // ─── BabyJub suborder (for blinding accumulation) ────────────────────────────
@@ -405,6 +409,148 @@ const ERC20_IFACE = new ethers.Interface([
 
 // ERC20 wrap takes an extra `amount` first arg vs FLOW wrap (FLOW infers amount from msg.value).
 // Reusing JANUS_FLOW_IFACE for ERC20 wrap is the bug behind the mUSDC wrap revert.
+
+// ─── Inbox note accumulation helper (sendTip / unwrapToken cursor fix) ─────────
+
+/**
+ * Fetch and accumulate inbox notes for the given COA + token into a corrected
+ * old balance/blinding suitable for shieldedTransfer or unwrap proof generation.
+ *
+ * Problem: shieldedTransfer and unwrap require C_old = on-chain commitment.
+ * On-chain commitment = Pedersen(checkpoint.balance + Σpending.amounts,
+ *                                checkpoint.blinding + Σpending.blindings)
+ * Using only checkpoint values produces a mismatch and the circuit reverts.
+ *
+ * Fix (Option B): absorb all pending notes into the old state, advance cursor.
+ *   effectiveOldBalance  = checkpoint.balance + Σpending.amounts
+ *   effectiveOldBlinding = (checkpoint.blinding + Σpending.blindings) % SUBORDER
+ *   newCursor            = headOffset + allNotes.length  (consumed all known notes)
+ *
+ * @param coaEvmAddr   Sender's EVM address (inbox owner, msg.sender equivalent).
+ * @param tokenProxy   EVM token proxy address (used as depositor filter).
+ * @param cursor       Current lastConsumedNoteIndex from ShieldedCheckpoint.
+ * @param memoPrivkey  BabyJub private key for ECIES note decryption.
+ * @returns            Effective old balance/blinding + new cursor for checkpoint.
+ */
+async function fetchAndAccumulateInboxNotes(
+  coaEvmAddr: string,
+  tokenProxy: string,
+  cursor: bigint,
+  memoPrivkey: bigint,
+): Promise<{
+  sumAmounts:    bigint;
+  sumBlinds:     bigint;
+  newCursor:     bigint;
+  pendingCount:  number;
+}> {
+  const ibClient = new ShieldedInboxClient();
+  const provider = getProvider();
+
+  // Read headOffset: ShieldedInbox._heads[user] lives at storage slot
+  // keccak256(abi.encode(user, 1)) — same calculation as getPortfolioView.
+  let headOffset = 0n;
+  try {
+    const headSlot = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(["address", "uint256"], [coaEvmAddr.toLowerCase(), 1]),
+    );
+    const headRaw = await provider.getStorage(SHIELDED_INBOX_ADDRESS, headSlot);
+    headOffset = BigInt(headRaw);
+  } catch {
+    // headOffset stays 0n — safe fallback
+  }
+
+  const allNotes = await ibClient.peekAll(coaEvmAddr).catch(() => []);
+  const liveCount = headOffset + BigInt(allNotes.length);
+
+  // Filter by depositor (identifies the token) and by cursor (skip already-consumed).
+  const tokenNotes = allNotes.filter(
+    (n, idx) =>
+      n.depositor.toLowerCase() === tokenProxy.toLowerCase() &&
+      headOffset + BigInt(idx) >= cursor,
+  );
+
+  let sumAmounts  = 0n;
+  let sumBlinds   = 0n;
+  let decryptedCount = 0;
+  for (const n of tokenNotes) {
+    try {
+      const content = await decryptNote(
+        n.ciphertext instanceof Uint8Array
+          ? n.ciphertext
+          : Uint8Array.from(Object.values(n.ciphertext as Record<string, number>)),
+        { x: BigInt(n.ephPubkeyX), y: BigInt(n.ephPubkeyY) },
+        memoPrivkey,
+      );
+      sumAmounts += content.amount;
+      sumBlinds   = (sumBlinds + content.blinding) % BABYJUB_SUBORDER;
+      decryptedCount++;
+    } catch {
+      // Note not decryptable with this key — skip (may belong to a different
+      // token or recipient; foreign notes don't affect the sender's balance).
+    }
+  }
+
+  return {
+    sumAmounts,
+    sumBlinds,
+    newCursor:     liveCount,
+    pendingCount:  decryptedCount,
+  };
+}
+
+/**
+ * Compute effective old state for proof generation when the sender has pending
+ * inbox notes (received tips not yet claimed). Accumulates pending amounts into
+ * checkpoint balance/blinding to match the on-chain commitment exactly.
+ *
+ * Also runs a pre-flight sanity check: computed C_old must match the on-chain
+ * commitment. Throws CheckpointDivergenceError if they don't match.
+ */
+async function computeEffectiveOldStateForSend(
+  coaEvmAddr: string,
+  tokenId: TokenId,
+  checkpointBalance: bigint,
+  checkpointBlinding: bigint,
+  cursor: bigint,
+  memoPrivkey: bigint,
+): Promise<{
+  effectiveOldBalance:  bigint;
+  effectiveOldBlinding: bigint;
+  newCursor:            bigint;
+}> {
+  const entry = TOKEN_REGISTRY[tokenId];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tokenProxy = (entry as any).proxy as string | undefined;
+  if (!tokenProxy) {
+    // cadence-ft: no EVM inbox cursor — use checkpoint state as-is
+    return {
+      effectiveOldBalance:  checkpointBalance,
+      effectiveOldBlinding: checkpointBlinding,
+      newCursor:            cursor,
+    };
+  }
+
+  const { sumAmounts, sumBlinds, newCursor } =
+    await fetchAndAccumulateInboxNotes(coaEvmAddr, tokenProxy, cursor, memoPrivkey);
+
+  const effectiveOldBalance  = checkpointBalance  + sumAmounts;
+  const effectiveOldBlinding = (checkpointBlinding + sumBlinds) % BABYJUB_SUBORDER;
+
+  // Pre-flight sanity check: computed C_old must match on-chain commitment.
+  // If mismatched, the proof will pass but the on-chain verifier will reject.
+  const computedCommit = await computeCommitment(effectiveOldBalance, effectiveOldBlinding);
+  const onChainCommit  = await getCommitment(coaEvmAddr, tokenId);
+  if (computedCommit.x !== onChainCommit.x || computedCommit.y !== onChainCommit.y) {
+    throw new Error(
+      `sendTip/unwrap: C_old sanity check failed — computed (${computedCommit.x.toString().slice(0, 12)}…) ` +
+      `does not match on-chain (${onChainCommit.x.toString().slice(0, 12)}…). ` +
+      `Checkpoint blinding may be corrupted from an old claim. ` +
+      `Use adminResetCommitment (testnet) or contact support.`,
+    );
+  }
+
+  return { effectiveOldBalance, effectiveOldBlinding, newCursor };
+}
 const JANUS_ERC20_IFACE = new ethers.Interface([
   "function wrapWithProof(uint256 amount, uint256 nonce, uint256[2] commit, uint256[2] pA, uint256[2][2] pB, uint256[2] pC, bytes encryptedSnapshot, uint256 ephPubkeyX, uint256 ephPubkeyY)",
   "function shieldedTransfer(address to, uint256[6] publicInputs, uint256[8] proof, bytes encryptedNoteTo, uint256 ephPubkeyToX, uint256 ephPubkeyToY)",
@@ -871,7 +1017,10 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
   );
   const proofFt = prebuiltProof.proof;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ftTokenAddrHex = (entry as any).cadenceAddress as string;
+  const ftCadenceAddr = (entry as any).cadenceAddress as string;
+  // SDK wrapFtAtomic expects tokenAddrHex as 20-byte EVM address (40 hex chars).
+  // Cadence addresses are 8 bytes (16 hex chars); pad-left with zeros.
+  const ftTokenAddrHex = "0x" + ftCadenceAddr.replace(/^0x/, "").padStart(40, "0");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ftContractNameVal = (entry as any).ftContractName as string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -879,7 +1028,7 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
   const fclFt = await getFcl();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const atomicFtWrapId: string = await fclFt.mutate({
-    cadence: cadenceTx.wrapFtAtomic(ftTokenAddrHex, ftTokenAddrHex, ftContractNameVal, ftAddressVal),
+    cadence: cadenceTx.wrapFtAtomic(ftTokenAddrHex, ftCadenceAddr, ftContractNameVal, ftAddressVal),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; UFix64: unknown; UInt256: unknown; Array: (t: unknown) => unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
       arg(userCadenceAddr, t.Address),
@@ -889,7 +1038,11 @@ export async function wrapToken(params: WrapTokenParams): Promise<WrapTokenResul
       arg(prebuiltProof.txCommit[0].toString(), t.UInt256),
       arg(prebuiltProof.txCommit[1].toString(), t.UInt256),
       arg([proofFt[0].toString(), proofFt[1].toString()], t.Array(t.UInt256)),
-      arg([[proofFt[2].toString(), proofFt[3].toString()], [proofFt[4].toString(), proofFt[5].toString()]], t.Array(t.Array(t.UInt256))),
+      // pB pre-swap: JanusFT.wrapWithProof flattens pB with an internal Fp2 swap,
+      // which would un-swap the SDK's already-EVM-swapped pi_b. Pre-swap here so
+      // the contract's swap cancels out and the verifier receives EVM-swapped order.
+      // Verified on-chain: tx 2114e5717640e8b4 SEALED with this ordering.
+      arg([[proofFt[3].toString(), proofFt[2].toString()], [proofFt[5].toString(), proofFt[4].toString()]], t.Array(t.Array(t.UInt256))),
       arg([proofFt[6].toString(), proofFt[7].toString()], t.Array(t.UInt256)),
       arg(Array.from(margSnapFt.ciphertext).map(String), t.Array(t.UInt8)),
       arg(margSnapFt.ephemeralPubkey.x.toString(), t.UInt256),
@@ -967,17 +1120,41 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
 
   if (entry.variant === "native") {
     // ── Atomic path: shieldedTransfer + checkpoint in a single FCL tx ──────────
-    // 1. Generate blindings for transfer note and sender's residual commitment.
+    // 1. Absorb pending inbox notes into the effective old state (cursor fix).
+    // shieldedTransfer requires C_old = on-chain commitment. If the sender has
+    // received tips since their last checkpoint write, the on-chain commitment
+    // includes those pending amounts. We must include them in oldBalance/oldBlinding,
+    // advance the cursor to liveCount, and store ONLY the fresh newBlinding in the
+    // new checkpoint (not the accumulated blinding delta).
+    const { effectiveOldBalance, effectiveOldBlinding, newCursor } =
+      await computeEffectiveOldStateForSend(
+        coaEvmAddr,
+        tokenId,
+        currentBalance,
+        currentBlinding,
+        inboxCursor,
+        memoKeypair.privkey,
+      );
+
+    // Guard: cannot send more than effective balance (includes absorbed pending tips).
+    if (amount > effectiveOldBalance) {
+      throw new Error(
+        `sendTip: insufficient shielded balance: have ${effectiveOldBalance} (including absorbed pending), need ${amount}`,
+      );
+    }
+
+    // 2. Generate blindings for transfer note and sender's residual commitment.
     const transferBlinding = generateBlinding();
     const newBlinding = generateBlinding();
 
-    // 2. Generate shielded-transfer proof server-side (Node.js WASM circuit).
+    // 3. Generate shielded-transfer proof server-side (Node.js WASM circuit).
+    // Uses effectiveOldBalance/Blinding so C_old matches on-chain commitment.
     const stResp = await fetch("/api/proof/shielded-transfer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        oldBalance:       currentBalance.toString(),
-        oldBlinding:      currentBlinding.toString(),
+        oldBalance:       effectiveOldBalance.toString(),
+        oldBlinding:      effectiveOldBlinding.toString(),
         transferAmount:   amount.toString(),
         transferBlinding: transferBlinding.toString(),
         newBlinding:      newBlinding.toString(),
@@ -991,20 +1168,21 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     const publicInputsBigint = stProof.publicInputs.map(BigInt) as [bigint, bigint, bigint, bigint, bigint, bigint];
     const proofBigint        = stProof.proof.map(BigInt) as [bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint];
 
-    // 3. Encrypt note for recipient (ECIES — uses their MemoKey pubkey).
+    // 4. Encrypt note for recipient (ECIES — uses their MemoKey pubkey).
     const noteEnc = await encryptNote(
       { amount, blinding: transferBlinding, memo },
       recipientMemoKey,
     );
 
-    // 4. Compute sender's new balance and encrypt sender's residual snapshot.
-    const newBalance = currentBalance - amount;
+    // 5. Sender's new balance = effective old - sendAmount. Checkpoint stores ONLY
+    // newBlinding (fresh random — NOT accumulated blinding delta, per claim fix).
+    const newBalance = effectiveOldBalance - amount;
     const snapEnc = await encryptSnapshot(
       { balance: newBalance, blinding: newBlinding },
       memoKeypair.pubkey,
     );
 
-    // 5. Build shieldedTransfer calldata (complex ABI — pre-encode client-side).
+    // 6. Build shieldedTransfer calldata (complex ABI — pre-encode client-side).
     const transferCalldata = JANUS_FLOW_IFACE.encodeFunctionData("shieldedTransfer", [
       recipientAddr,
       publicInputsBigint,
@@ -1015,7 +1193,7 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     ]);
     const transferCalldataHex = transferCalldata.slice(2);
 
-    // 6. Submit one FCL tx: shieldedTransfer + checkpoint atomically.
+    // 7. Submit one FCL tx: shieldedTransfer + checkpoint atomically.
     // cadenceTx.sendTipAtomic(tokenAddrHex) from SDK — uses new per-token ShieldedCheckpoint.
     // Route by tokenId (C.2): derive proxy from entry, not hardcoded to FLOW.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1031,7 +1209,8 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
         arg(ethers.hexlify(snapEnc.ciphertext).slice(2), t.String),
         arg(snapEnc.ephemeralPubkey.x.toString(), t.UInt256),
         arg(snapEnc.ephemeralPubkey.y.toString(), t.UInt256),
-        arg(inboxCursor.toString(), t.UInt64),
+        // newCursor advances to liveCount — consumes all absorbed pending notes
+        arg(newCursor.toString(), t.UInt64),
       ],
       proposer: fcl.authz,
       payer: fcl.authz,
@@ -1049,7 +1228,24 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
   }
 
   // ── Atomic path: ERC20 / cadence-ft sendTip + checkpoint in one FCL tx ──────
-  // Common: generate blindings + proof (circuit is token-agnostic).
+  // Common: absorb pending inbox notes for ERC20 tokens (same cursor fix as native path).
+  const { effectiveOldBalance: stEffectiveBalance, effectiveOldBlinding: stEffectiveBlinding, newCursor: stNewCursor } =
+    await computeEffectiveOldStateForSend(
+      coaEvmAddr,
+      tokenId,
+      currentBalance,
+      currentBlinding,
+      inboxCursor,
+      memoKeypair.privkey,
+    );
+
+  if (amount > stEffectiveBalance) {
+    throw new Error(
+      `sendTip(erc20/ft): insufficient shielded balance: have ${stEffectiveBalance} (including absorbed pending), need ${amount}`,
+    );
+  }
+
+  // Generate blindings + proof using effective old state.
   const stTransferBlinding = generateBlinding();
   const stNewBlinding = generateBlinding();
 
@@ -1057,8 +1253,8 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      oldBalance:       currentBalance.toString(),
-      oldBlinding:      currentBlinding.toString(),
+      oldBalance:       stEffectiveBalance.toString(),
+      oldBlinding:      stEffectiveBlinding.toString(),
       transferAmount:   amount.toString(),
       transferBlinding: stTransferBlinding.toString(),
       newBlinding:      stNewBlinding.toString(),
@@ -1076,7 +1272,8 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
     { amount, blinding: stTransferBlinding, memo },
     recipientMemoKey,
   );
-  const stNewBalance = currentBalance - amount;
+  // Use effective balance for new balance (absorbed pending notes included).
+  const stNewBalance = stEffectiveBalance - amount;
   const stSnapEnc = await encryptSnapshot(
     { balance: stNewBalance, blinding: stNewBlinding },
     memoKeypair.pubkey,
@@ -1104,7 +1301,8 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
         arg(ethers.hexlify(stSnapEnc.ciphertext).slice(2), t.String),
         arg(stSnapEnc.ephemeralPubkey.x.toString(), t.UInt256),
         arg(stSnapEnc.ephemeralPubkey.y.toString(), t.UInt256),
-        arg(inboxCursor.toString(), t.UInt64),
+        // stNewCursor advances to liveCount — consumed all absorbed pending notes
+        arg(stNewCursor.toString(), t.UInt64),
       ],
       proposer: fclSendErc20.authz,
       payer: fclSendErc20.authz,
@@ -1117,13 +1315,18 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
   }
 
   // cadence-ft: sendTipFtAtomic — JanusFT.shieldedTransfer + checkpoint in one FCL tx
+  // For cadence-ft, the inbox is Cadence-based (drain-based, no EVM cursor needed).
+  // stEffectiveBalance / stNewCursor already returned checkpoint values unchanged by
+  // computeEffectiveOldStateForSend (no EVM proxy → no accumulation applied).
   if (!userCadenceAddr) throw new Error("sendTip: userCadenceAddr required for cadence-ft");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ftSendTokenAddr = (entry as any).cadenceAddress as string;
+  const ftSendCadenceAddr = (entry as any).cadenceAddress as string;
+  // Pad cadence addr to 20-byte EVM address for checkpoint token identifier
+  const ftSendTokenAddr = "0x" + ftSendCadenceAddr.replace(/^0x/, "").padStart(40, "0");
   const fclSendFt = await getFcl();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const atomicFtSendId: string = await fclSendFt.mutate({
-    cadence: cadenceTx.sendTipFtAtomic(ftSendTokenAddr, ftSendTokenAddr),
+    cadence: cadenceTx.sendTipFtAtomic(ftSendTokenAddr, ftSendCadenceAddr),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; Array: (t: unknown) => unknown; UInt256: unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
       arg(userCadenceAddr, t.Address),
@@ -1136,7 +1339,7 @@ export async function sendTip(params: SendTipParams): Promise<SendTipResult> {
       arg(ethers.hexlify(stSnapEnc.ciphertext).slice(2), t.String),
       arg(stSnapEnc.ephemeralPubkey.x.toString(), t.UInt256),
       arg(stSnapEnc.ephemeralPubkey.y.toString(), t.UInt256),
-      arg(inboxCursor.toString(), t.UInt64),
+      arg(stNewCursor.toString(), t.UInt64),
     ],
     proposer: fclSendFt.authz,
     payer: fclSendFt.authz,
@@ -1187,159 +1390,94 @@ export interface UnwrapTokenResult {
  * Parses the residual state from on-chain event and updates ShieldedCheckpoint.
  */
 export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapTokenResult> {
-  const { tokenId, claimedAmount, recipient, coaEvmAddr: _coaEvmAddr, memoKeypair,
-    memoPrivkey: _memoPrivkey, currentBalance, currentBlinding, inboxCursor, userCadenceAddr } = params;
-
-  if (claimedAmount > currentBalance) {
-    throw new Error(`unwrapToken: insufficient shielded balance: have ${currentBalance}, claimed ${claimedAmount}`);
-  }
+  const { tokenId, claimedAmount, recipient, coaEvmAddr, memoKeypair,
+    currentBalance, currentBlinding, inboxCursor, userCadenceAddr } = params;
 
   const entry = TOKEN_REGISTRY[tokenId];
 
-  if (entry.variant === "native") {
-    // ── Atomic path: unwrap + checkpoint in a single FCL tx ────────────────────
-    // 1. Generate blindings: claimed portion + residual commitment.
-    const claimedBlinding = generateBlinding();
-    const newBlinding = generateBlinding();
+  // ── EVM paths (native + erc20): absorb pending inbox notes before proof ─────
+  // unwrap requires C_old = on-chain commitment. If sender has received tips since
+  // their last checkpoint write, C_old must include those pending amounts.
+  if (entry.variant === "native" || entry.variant === "erc20") {
+    const { effectiveOldBalance, effectiveOldBlinding, newCursor: uwNewCursor } =
+      await computeEffectiveOldStateForSend(
+        coaEvmAddr, tokenId, currentBalance, currentBlinding, inboxCursor, memoKeypair.privkey,
+      );
 
-    // 2. Generate unwrap proof server-side (amountDisclose + shieldedTransfer proofs).
-    const uwResp = await fetch("/api/proof/unwrap", {
+    if (claimedAmount > effectiveOldBalance) {
+      throw new Error(
+        `unwrapToken: insufficient shielded balance: have ${effectiveOldBalance} (absorbed pending included), claimed ${claimedAmount}`,
+      );
+    }
+
+    // Generate blindings BEFORE proof call — must match circuit inputs.
+    const uwClaimedBlinding = generateBlinding();
+    const uwNewBlinding     = generateBlinding();
+
+    const uwProof = await fetch("/api/proof/unwrap", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        oldBalance:     currentBalance.toString(),
-        oldBlinding:    currentBlinding.toString(),
-        claimedAmount:  claimedAmount.toString(),
-        claimedBlinding: claimedBlinding.toString(),
-        newBlinding:    newBlinding.toString(),
+        oldBalance:      effectiveOldBalance.toString(),
+        oldBlinding:     effectiveOldBlinding.toString(),
+        claimedAmount:   claimedAmount.toString(),
+        claimedBlinding: uwClaimedBlinding.toString(),
+        newBlinding:     uwNewBlinding.toString(),
       }),
+    }).then(async r => {
+      if (!r.ok) throw new Error(`unwrapToken: proof failed (${r.status}): ${await r.text().catch(() => r.statusText)}`);
+      return r.json() as Promise<{ amountDisclose: { proof: string[]; publicInputs: string[] }; transfer: { proof: string[]; publicInputs: string[] } }>;
     });
-    if (!uwResp.ok) {
-      const errText = await uwResp.text().catch(() => uwResp.statusText);
-      throw new Error(`unwrapToken: proof generation failed (${uwResp.status}): ${errText}`);
-    }
-    const uwProof = await uwResp.json() as {
-      amountDisclose: { proof: string[]; publicInputs: string[] };
-      transfer:       { proof: string[]; publicInputs: string[] };
-    };
 
-    // txCommit comes from amountDisclose publicInputs: [amount, commitX, commitY, nonce]
-    const txCommit: [bigint, bigint] = [
+    const uwTxCommit: [bigint, bigint] = [
       BigInt(uwProof.amountDisclose.publicInputs[1]),
       BigInt(uwProof.amountDisclose.publicInputs[2]),
     ];
+    const uwResidualBalance = effectiveOldBalance - claimedAmount;
+    // Store ONLY uwNewBlinding in checkpoint (not accumulated delta — per claim fix).
+    const uwResidualBlinding = uwNewBlinding;
 
-    // 3. Compute residual balance and encrypt residual snapshot (embedded in unwrap calldata).
-    const residualBalance = currentBalance - claimedAmount;
-    const residualSnap = await encryptSnapshot(
-      { balance: residualBalance, blinding: newBlinding },
-      memoKeypair.pubkey,
-    );
+    if (entry.variant === "native") {
+      const residualSnap = await encryptSnapshot({ balance: uwResidualBalance, blinding: uwResidualBlinding }, memoKeypair.pubkey);
+      const cpSnap       = await encryptSnapshot({ balance: uwResidualBalance, blinding: uwResidualBlinding }, memoKeypair.pubkey);
+      const unwrapCalldataHex = JANUS_FLOW_IFACE.encodeFunctionData("unwrap", [
+        claimedAmount, recipient, uwTxCommit,
+        uwProof.amountDisclose.proof.map(BigInt),
+        uwProof.transfer.publicInputs.map(BigInt),
+        uwProof.transfer.proof.map(BigInt),
+        ethers.hexlify(residualSnap.ciphertext),
+        residualSnap.ephemeralPubkey.x,
+        residualSnap.ephemeralPubkey.y,
+      ]).slice(2);
 
-    // 4. Build unwrap calldata (complex ABI — pre-encode client-side).
-    const unwrapCalldata = JANUS_FLOW_IFACE.encodeFunctionData("unwrap", [
-      claimedAmount,
-      recipient,
-      txCommit,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const unwrapProxy = (entry as any).proxy as string;
+      const fcl = await getFcl();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const atomicTxId: string = await fcl.mutate({
+        cadence: cadenceTx.unwrapFlowAtomic(unwrapProxy),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; UInt256: unknown; UInt64: unknown }) => [
+          arg(unwrapCalldataHex, t.String),
+          arg(ethers.hexlify(cpSnap.ciphertext).slice(2), t.String),
+          arg(cpSnap.ephemeralPubkey.x.toString(), t.UInt256),
+          arg(cpSnap.ephemeralPubkey.y.toString(), t.UInt256),
+          arg(uwNewCursor.toString(), t.UInt64), // advances cursor to liveCount
+        ],
+        proposer: fcl.authz, payer: fcl.authz, authorizations: [fcl.authz], limit: 9999,
+      });
+      await fcl.tx(atomicTxId).onceSealed();
+      return { txHash: atomicTxId, checkpointTxHash: atomicTxId, netReceived: claimedAmount, newBalance: uwResidualBalance, newBlinding: uwResidualBlinding };
+    }
+
+    // entry.variant === "erc20"
+    const uwResidualSnap = await encryptSnapshot({ balance: uwResidualBalance, blinding: uwResidualBlinding }, memoKeypair.pubkey);
+    const uwCpSnap       = await encryptSnapshot({ balance: uwResidualBalance, blinding: uwResidualBlinding }, memoKeypair.pubkey);
+    const uwCalldata = JANUS_FLOW_IFACE.encodeFunctionData("unwrap", [
+      claimedAmount, recipient, uwTxCommit,
       uwProof.amountDisclose.proof.map(BigInt),
       uwProof.transfer.publicInputs.map(BigInt),
       uwProof.transfer.proof.map(BigInt),
-      ethers.hexlify(residualSnap.ciphertext),
-      residualSnap.ephemeralPubkey.x,
-      residualSnap.ephemeralPubkey.y,
-    ]);
-    const unwrapCalldataHex = unwrapCalldata.slice(2);
-
-    // 5. Encrypt checkpoint snapshot with fresh ephemeral keys (different from residualSnap).
-    const cpSnap = await encryptSnapshot(
-      { balance: residualBalance, blinding: newBlinding },
-      memoKeypair.pubkey,
-    );
-
-    // 6. Submit one FCL tx: unwrap + checkpoint atomically.
-    // cadenceTx.unwrapFlowAtomic(tokenAddrHex) from SDK — uses new per-token ShieldedCheckpoint.
-    // Route by tokenId (C.2): derive proxy from entry, not hardcoded to FLOW.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const unwrapAtomicProxy = (entry as any).proxy as string;
-    const fcl = await getFcl();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const atomicTxId: string = await fcl.mutate({
-      cadence: cadenceTx.unwrapFlowAtomic(unwrapAtomicProxy),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      args: (arg: (v: unknown, t: unknown) => unknown, t: { String: unknown; Array: (t: unknown) => unknown; UInt8: unknown; UInt256: unknown; UInt64: unknown }) => [
-        arg(unwrapCalldataHex, t.String),
-        arg(ethers.hexlify(cpSnap.ciphertext).slice(2), t.String),
-        arg(cpSnap.ephemeralPubkey.x.toString(), t.UInt256),
-        arg(cpSnap.ephemeralPubkey.y.toString(), t.UInt256),
-        arg(inboxCursor.toString(), t.UInt64),
-      ],
-      proposer: fcl.authz,
-      payer: fcl.authz,
-      authorizations: [fcl.authz],
-      limit: 9999,
-    });
-    await fcl.tx(atomicTxId).onceSealed();
-
-    return {
-      txHash: atomicTxId,
-      checkpointTxHash: atomicTxId,
-      netReceived: claimedAmount,
-      newBalance: residualBalance,
-      newBlinding,
-    };
-  }
-
-  // ── Atomic path: ERC20 / cadence-ft unwrap + checkpoint in one FCL tx ───────
-  // Generate blindings BEFORE proof call so they match the proof circuit inputs.
-  const uwClaimedBlinding = generateBlinding();
-  const uwNewBlinding = generateBlinding(); // residual blinding — NOT re-generated after proof
-
-  const uwResp2 = await fetch("/api/proof/unwrap", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      oldBalance:      currentBalance.toString(),
-      oldBlinding:     currentBlinding.toString(),
-      claimedAmount:   claimedAmount.toString(),
-      claimedBlinding: uwClaimedBlinding.toString(),
-      newBlinding:     uwNewBlinding.toString(),
-    }),
-  });
-  if (!uwResp2.ok) {
-    const errText = await uwResp2.text().catch(() => uwResp2.statusText);
-    throw new Error(`unwrapToken: proof generation failed (${uwResp2.status}): ${errText}`);
-  }
-  const uwProof2 = await uwResp2.json() as {
-    amountDisclose: { proof: string[]; publicInputs: string[] };
-    transfer:       { proof: string[]; publicInputs: string[] };
-  };
-
-  const uwResidualBalance = currentBalance - claimedAmount;
-  // Blinding fix (was generateBlinding()): use locally-tracked uwNewBlinding that
-  // was fed to the proof circuit — ensures the residual commitment is provably correct.
-  const uwResidualBlinding = uwNewBlinding;
-
-  if (entry.variant === "erc20") {
-    // ERC20: unwrapErc20Atomic — unwrap + checkpoint in one FCL tx
-    const uwTxCommitErc20: [bigint, bigint] = [
-      BigInt(uwProof2.amountDisclose.publicInputs[1]),
-      BigInt(uwProof2.amountDisclose.publicInputs[2]),
-    ];
-    const uwResidualSnap = await encryptSnapshot(
-      { balance: uwResidualBalance, blinding: uwResidualBlinding },
-      memoKeypair.pubkey,
-    );
-    const uwCpSnap = await encryptSnapshot(
-      { balance: uwResidualBalance, blinding: uwResidualBlinding },
-      memoKeypair.pubkey,
-    );
-    const uwCalldata = JANUS_FLOW_IFACE.encodeFunctionData("unwrap", [
-      claimedAmount,
-      recipient,
-      uwTxCommitErc20,
-      uwProof2.amountDisclose.proof.map(BigInt),
-      uwProof2.transfer.publicInputs.map(BigInt),
-      uwProof2.transfer.proof.map(BigInt),
       ethers.hexlify(uwResidualSnap.ciphertext),
       uwResidualSnap.ephemeralPubkey.x,
       uwResidualSnap.ephemeralPubkey.y,
@@ -1356,59 +1494,70 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
         arg(ethers.hexlify(uwCpSnap.ciphertext).slice(2), t.String),
         arg(uwCpSnap.ephemeralPubkey.x.toString(), t.UInt256),
         arg(uwCpSnap.ephemeralPubkey.y.toString(), t.UInt256),
-        arg(inboxCursor.toString(), t.UInt64),
+        arg(uwNewCursor.toString(), t.UInt64), // advances cursor to liveCount
       ],
-      proposer: fclUnwrapErc20.authz,
-      payer: fclUnwrapErc20.authz,
-      authorizations: [fclUnwrapErc20.authz],
-      limit: 9999,
+      proposer: fclUnwrapErc20.authz, payer: fclUnwrapErc20.authz, authorizations: [fclUnwrapErc20.authz], limit: 9999,
     });
     await fclUnwrapErc20.tx(atomicErc20UnwrapId).onceSealed();
-    return {
-      txHash: atomicErc20UnwrapId,
-      checkpointTxHash: atomicErc20UnwrapId,
-      netReceived: claimedAmount,
-      newBalance: uwResidualBalance,
-      newBlinding: uwResidualBlinding,
-    };
+    return { txHash: atomicErc20UnwrapId, checkpointTxHash: atomicErc20UnwrapId, netReceived: claimedAmount, newBalance: uwResidualBalance, newBlinding: uwResidualBlinding };
   }
 
-  // cadence-ft: unwrapFtAtomic — JanusFT.unwrap + checkpoint in one FCL tx
-  if (!userCadenceAddr) throw new Error("unwrapToken: userCadenceAddr required for cadence-ft");
-  const uwTxCommitFt: [bigint, bigint] = [
-    BigInt(uwProof2.amountDisclose.publicInputs[1]),
-    BigInt(uwProof2.amountDisclose.publicInputs[2]),
+  // ── cadence-ft: no EVM inbox cursor accumulation ───────────────────────────
+  // JanusFT uses Cadence ShieldedInbox (drain-based); EVM cursor not applicable.
+  if (claimedAmount > currentBalance) {
+    throw new Error(`unwrapToken(ft): insufficient balance: have ${currentBalance}, claimed ${claimedAmount}`);
+  }
+
+  const ftClaimedBlinding = generateBlinding();
+  const ftNewBlinding     = generateBlinding();
+
+  const ftUwProof = await fetch("/api/proof/unwrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      oldBalance:      currentBalance.toString(),
+      oldBlinding:     currentBlinding.toString(),
+      claimedAmount:   claimedAmount.toString(),
+      claimedBlinding: ftClaimedBlinding.toString(),
+      newBlinding:     ftNewBlinding.toString(),
+    }),
+  }).then(async r => {
+    if (!r.ok) throw new Error(`unwrapToken(ft): proof failed (${r.status}): ${await r.text().catch(() => r.statusText)}`);
+    return r.json() as Promise<{ amountDisclose: { proof: string[]; publicInputs: string[] }; transfer: { proof: string[]; publicInputs: string[] } }>;
+  });
+
+  const ftResidualBalance  = currentBalance - claimedAmount;
+  const ftResidualBlinding = ftNewBlinding;
+  const ftTxCommit: [bigint, bigint] = [
+    BigInt(ftUwProof.amountDisclose.publicInputs[1]),
+    BigInt(ftUwProof.amountDisclose.publicInputs[2]),
   ];
-  const uwFtResidualSnap = await encryptSnapshot(
-    { balance: uwResidualBalance, blinding: uwResidualBlinding },
-    memoKeypair.pubkey,
-  );
-  const uwFtCpSnap = await encryptSnapshot(
-    { balance: uwResidualBalance, blinding: uwResidualBlinding },
-    memoKeypair.pubkey,
-  );
+
+  if (!userCadenceAddr) throw new Error("unwrapToken: userCadenceAddr required for cadence-ft");
+  const uwFtResidualSnap = await encryptSnapshot({ balance: ftResidualBalance, blinding: ftResidualBlinding }, memoKeypair.pubkey);
+  const uwFtCpSnap       = await encryptSnapshot({ balance: ftResidualBalance, blinding: ftResidualBlinding }, memoKeypair.pubkey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ftUnwrapTokenAddr = (entry as any).cadenceAddress as string;
+  const ftUnwrapCadenceAddr   = (entry as any).cadenceAddress as string;
+  const ftUnwrapTokenAddr     = "0x" + ftUnwrapCadenceAddr.replace(/^0x/, "").padStart(40, "0");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ftUnwrapContractName = (entry as any).ftContractName as string;
+  const ftUnwrapContractName  = (entry as any).ftContractName as string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ftUnwrapFtAddress = (entry as any).ftAddress as string;
+  const ftUnwrapFtAddress     = (entry as any).ftAddress as string;
   const fclUnwrapFt = await getFcl();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const atomicFtUnwrapId: string = await fclUnwrapFt.mutate({
-    cadence: cadenceTx.unwrapFtAtomic(ftUnwrapTokenAddr, ftUnwrapTokenAddr, ftUnwrapContractName, ftUnwrapFtAddress),
+    cadence: cadenceTx.unwrapFtAtomic(ftUnwrapTokenAddr, ftUnwrapCadenceAddr, ftUnwrapContractName, ftUnwrapFtAddress),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     args: (arg: (v: unknown, t: unknown) => unknown, t: { Address: unknown; UFix64: unknown; UInt256: unknown; Array: (t: unknown) => unknown; UInt8: unknown; String: unknown; UInt64: unknown }) => [
       arg(userCadenceAddr, t.Address),
-      // FT decimals (MockFT=8) — use rawToUFix64 not toUFix64 (which is FLOW-specific)
       arg(rawToUFix64(claimedAmount, entry.decimals), t.UFix64),
       arg(recipient, t.Address),
-      arg(uwTxCommitFt[0].toString(), t.UInt256),
-      arg(uwTxCommitFt[1].toString(), t.UInt256),
-      arg(uwProof2.amountDisclose.proof.map(String), t.Array(t.UInt256)),
-      arg(uwProof2.amountDisclose.publicInputs.map(String), t.Array(t.UInt256)),
-      arg(uwProof2.transfer.proof.map(String), t.Array(t.UInt256)),
-      arg(uwProof2.transfer.publicInputs.map(String), t.Array(t.UInt256)),
+      arg(ftTxCommit[0].toString(), t.UInt256),
+      arg(ftTxCommit[1].toString(), t.UInt256),
+      arg(ftUwProof.amountDisclose.proof.map(String), t.Array(t.UInt256)),
+      arg(ftUwProof.amountDisclose.publicInputs.map(String), t.Array(t.UInt256)),
+      arg(ftUwProof.transfer.proof.map(String), t.Array(t.UInt256)),
+      arg(ftUwProof.transfer.publicInputs.map(String), t.Array(t.UInt256)),
       arg(Array.from(uwFtResidualSnap.ciphertext).map(String), t.Array(t.UInt8)),
       arg(uwFtResidualSnap.ephemeralPubkey.x.toString(), t.UInt256),
       arg(uwFtResidualSnap.ephemeralPubkey.y.toString(), t.UInt256),
@@ -1417,19 +1566,10 @@ export async function unwrapToken(params: UnwrapTokenParams): Promise<UnwrapToke
       arg(uwFtCpSnap.ephemeralPubkey.y.toString(), t.UInt256),
       arg(inboxCursor.toString(), t.UInt64),
     ],
-    proposer: fclUnwrapFt.authz,
-    payer: fclUnwrapFt.authz,
-    authorizations: [fclUnwrapFt.authz],
-    limit: 9999,
+    proposer: fclUnwrapFt.authz, payer: fclUnwrapFt.authz, authorizations: [fclUnwrapFt.authz], limit: 9999,
   });
   await fclUnwrapFt.tx(atomicFtUnwrapId).onceSealed();
-  return {
-    txHash: atomicFtUnwrapId,
-    checkpointTxHash: atomicFtUnwrapId,
-    netReceived: claimedAmount,
-    newBalance: uwResidualBalance,
-    newBlinding: uwResidualBlinding,
-  };
+  return { txHash: atomicFtUnwrapId, checkpointTxHash: atomicFtUnwrapId, netReceived: claimedAmount, newBalance: ftResidualBalance, newBlinding: ftResidualBlinding };
 }
 
 // ─── v0.8 Core: drainInbox ───────────────────────────────────────────────────
@@ -1443,14 +1583,13 @@ export interface DrainInboxResult {
 }
 
 /**
- * Drain all pending notes from the caller's ShieldedInbox.
- * Returns decrypted note contents for display in /tips Received.
+ * @deprecated DO NOT USE — calls drainAll() on the EVM ShieldedInbox which
+ * permanently deletes ALL notes across ALL tokens in one transaction.
+ * Cross-token contamination: draining FLOW notes also deletes pending mUSDC notes.
+ * Use BatchClaimCTA → claimBatchAtomic() instead, which uses a cursor-based approach.
  *
- * After draining, callers should update ShieldedCheckpoint by accumulating
- * drained note amounts into the current checkpoint balance.
- *
- * @param evmSigner   Ethers wallet (msg.sender = inbox owner for drainAll).
- * @param memoPrivkey Caller's BabyJub private key for ECIES decryption.
+ * This function is not called from any UI component. It exists as a stub.
+ * It will be removed in Phase 5.
  */
 export async function drainInbox(
   evmSigner: ethers.Wallet,
@@ -1606,10 +1745,13 @@ export async function unwrapActionLegacy(_params: LegacyUnwrapParams): Promise<L
 // These still reference 0x4b6bc58bc8bf5dcc (v0.8 PrivateTip deployer).
 
 export function buildGetShieldedTipsByRecipientWithMemoScript(): string {
+  // Deployed PrivateTip exposes TipMetadata (no memo field) + getTipsByRecipient.
+  // The "WithMemo" enhancement was never shipped to chain. Memos for received
+  // tips fall back to local mirror or null until the contract is upgraded.
   return `
     import PrivateTip from 0x4b6bc58bc8bf5dcc
-    access(all) fun main(recipient: Address): [PrivateTip.TipMetadataWithMemo] {
-      return PrivateTip.getShieldedTipsByRecipientWithMemo(recipient: recipient)
+    access(all) fun main(recipient: Address): [PrivateTip.TipMetadata] {
+      return PrivateTip.getTipsByRecipient(recipient: recipient)
     }
   `;
 }
@@ -1618,16 +1760,18 @@ export function buildGetShieldedTipsBySenderScript(): string {
   return `
     import PrivateTip from 0x4b6bc58bc8bf5dcc
     access(all) fun main(sender: Address): [PrivateTip.TipMetadata] {
-      return PrivateTip.getShieldedTipsBySender(sender: sender)
+      return PrivateTip.getTipsBySender(sender: sender)
     }
   `;
 }
 
 export function buildGetShieldedTipsBySenderWithSnapshotScript(): string {
+  // Deployed PrivateTip doesn't expose the WithSnapshot variant; fall back to
+  // basic getTipsBySender. senderSnapshot will be null in the front-side type.
   return `
     import PrivateTip from 0x4b6bc58bc8bf5dcc
-    access(all) fun main(sender: Address): [PrivateTip.TipMetadataWithSenderSnapshot] {
-      return PrivateTip.getShieldedTipsBySenderWithSnapshot(sender: sender)
+    access(all) fun main(sender: Address): [PrivateTip.TipMetadata] {
+      return PrivateTip.getTipsBySender(sender: sender)
     }
   `;
 }

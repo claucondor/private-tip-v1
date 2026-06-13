@@ -9,7 +9,8 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { ShieldedInboxClient, getCoaEvmAddress, sdk } from "@claucondor/sdk";
+import { ShieldedInboxClient, ShieldedCheckpointClient, getCoaEvmAddress, sdk, getCadenceInboxNotes, TOKEN_REGISTRY } from "@claucondor/sdk";
+import { FLOW_CADENCE_ACCESS, CADENCE_DEPLOYER_ADDRESS } from "@claucondor/sdk/network";
 import { X } from "lucide-react";
 
 interface RecoveryBannerProps {
@@ -17,12 +18,14 @@ interface RecoveryBannerProps {
   onDismiss?: () => void;
 }
 
-type BannerMode = "pending_notes" | "not_activated" | null;
+type BannerMode = "corrupted_checkpoint" | "pending_notes" | "not_activated" | null;
 
 export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBannerProps) {
   const [dismissed, setDismissed] = useState(false);
   const [mode, setMode] = useState<BannerMode>(null);
   const [pendingCount, setPendingCount] = useState(0n);
+  const [corruptedTokens, setCorruptedTokens] = useState<string[]>([]);
+  const [cadenceUnavailable, setCadenceUnavailable] = useState(false);
 
   useEffect(() => {
     if (!userAddress) {
@@ -40,25 +43,73 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
         if (cancelled) return;
 
         const ibClient = new ShieldedInboxClient();
+        const cpClient = new ShieldedCheckpointClient();
         const adapter = sdk.token("flow");
 
         // "Activated" == has memokey published. ShieldedCheckpoint EVM only
         // exists AFTER the first wrap+update — its absence is NOT a setup gap.
-        const [count, memoKey] = await Promise.all([
+        const [allEvmNotes, flowMeta, musdcMeta, memoKey, cadenceNotes] = await Promise.all([
           hasValidCoa
-            ? ibClient.count(coaAddr!).catch(() => 0n)
-            : Promise.resolve(0n),
+            ? ibClient.peekAll(coaAddr!).catch(() => [])
+            : Promise.resolve([]),
+          // Public checkpoint metadata reads (no memoPrivkey needed) — used for cursor filter.
+          hasValidCoa
+            ? cpClient.metadata(coaAddr!, TOKEN_REGISTRY.flow.proxy).catch(() => null)
+            : Promise.resolve(null),
+          hasValidCoa
+            ? cpClient.metadata(coaAddr!, TOKEN_REGISTRY.mockusdc.proxy).catch(() => null)
+            : Promise.resolve(null),
           hasValidCoa
             ? adapter.getMemoKey(coaAddr!).catch(() => null)
             : Promise.resolve(null),
+          // Cadence ShieldedInbox (MockFT notes from JanusFT.shieldedTransfer)
+          getCadenceInboxNotes(userAddress, {
+            flowAccessNode: FLOW_CADENCE_ACCESS,
+            inboxContractAddress: CADENCE_DEPLOYER_ADDRESS,
+          }).catch((err) => {
+            console.warn("[RecoveryBanner] Cadence inbox query failed:", err);
+            return null as null;
+          }),
         ]);
 
         if (cancelled) return;
 
+        // Cursor-filtered EVM pending count: exclude notes already consumed by prior claims.
+        // Notes at absoluteIndex < lastConsumedNoteIndex are captured in the checkpoint and
+        // must not be counted as pending. headOffset=0 invariant holds since drainAll is
+        // never called by claimBatchAtomic, so peek array index = absolute storage index.
+        const flowCursor  = flowMeta?.lastConsumedNoteIndex  ?? 0n;
+        const musdcCursor = musdcMeta?.lastConsumedNoteIndex ?? 0n;
+        const evmCount = BigInt(
+          allEvmNotes.filter((n, idx) => {
+            const absIdx = BigInt(idx);
+            const dep = n.depositor.toLowerCase();
+            return (
+              (dep === TOKEN_REGISTRY.flow.proxy.toLowerCase()     && absIdx >= flowCursor)  ||
+              (dep === TOKEN_REGISTRY.mockusdc.proxy.toLowerCase() && absIdx >= musdcCursor)
+            );
+          }).length
+        );
+
+        if (cadenceNotes === null) {
+          setCadenceUnavailable(true);
+        } else {
+          setCadenceUnavailable(false);
+        }
+        const count = evmCount + (cadenceNotes !== null ? BigInt(cadenceNotes.length) : 0n);
         const hasMemoKey =
           !!memoKey && (memoKey.x !== 0n || memoKey.y !== 0n);
 
-        if (count > 0n) {
+        // Check sessionStorage for corrupted tokens (written by portfolio page).
+        let corrupted: string[] = [];
+        try {
+          corrupted = JSON.parse(sessionStorage.getItem("janus_corrupted_tokens") ?? "[]");
+        } catch { /* ignore */ }
+
+        if (corrupted.length > 0) {
+          setCorruptedTokens(corrupted);
+          setMode("corrupted_checkpoint");
+        } else if (count > 0n) {
           setPendingCount(count);
           setMode("pending_notes");
         } else if (!hasMemoKey) {
@@ -85,20 +136,41 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
     onDismiss?.();
   };
 
+  const bannerColor = mode === "corrupted_checkpoint"
+    ? "border-red-700/40 bg-red-950/30"
+    : "border-amber-600/30 bg-amber-950/30";
+  const textColor = mode === "corrupted_checkpoint" ? "text-red-300" : "text-amber-200";
+  const dismissColor = mode === "corrupted_checkpoint"
+    ? "text-red-400 hover:text-red-200 hover:bg-red-900/40"
+    : "text-amber-400 hover:text-amber-200 hover:bg-amber-900/40";
+
   return (
-    <div className="w-full border-b border-amber-600/30 bg-amber-950/30 px-4 py-2.5">
+    <div className={`w-full border-b ${bannerColor} px-4 py-2.5`}>
       <div className="max-w-5xl mx-auto flex items-center justify-between gap-3">
-        <span className="text-xs text-amber-200 flex-1 min-w-0 truncate sm:whitespace-normal">
-          {mode === "pending_notes" ? (
+        <span className={`text-xs ${textColor} flex-1 min-w-0 truncate sm:whitespace-normal`}>
+          {mode === "corrupted_checkpoint" ? (
+            <>
+              <strong className="text-red-200">Checkpoint corrupted</strong> for{" "}
+              {corruptedTokens.join(", ").toUpperCase()}.
+              Send and withdraw are disabled.{" "}
+              <Link
+                href="/portfolio"
+                className="underline underline-offset-2 font-medium hover:text-red-100 transition-colors"
+              >
+                View portfolio
+              </Link>{" "}
+              for details or contact support.
+            </>
+          ) : mode === "pending_notes" ? (
             <>
               You have{" "}
-              <strong className="text-amber-100">{pendingCount.toString()}</strong>{" "}
-              pending shielded note{pendingCount !== 1n ? "s" : ""}.{" "}
+              <strong className="text-amber-100">{cadenceUnavailable ? "≥ " : ""}{pendingCount.toString()}</strong>{" "}
+              pending shielded note{pendingCount !== 1n ? "s" : ""}{cadenceUnavailable ? " (Cadence inbox unavailable)" : ""}.{" "}
               <Link
-                href="/tips"
+                href="/portfolio"
                 className="underline underline-offset-2 font-medium hover:text-amber-100 transition-colors"
               >
-                Drain inbox
+                Claim pending
               </Link>
             </>
           ) : (
@@ -117,7 +189,7 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
           type="button"
           aria-label="Dismiss"
           onClick={handleDismiss}
-          className="shrink-0 p-1 rounded text-amber-400 hover:text-amber-200 hover:bg-amber-900/40 transition-colors"
+          className={`shrink-0 p-1 rounded ${dismissColor} transition-colors`}
         >
           <X className="w-3.5 h-3.5" />
         </button>

@@ -20,6 +20,7 @@ import {
   RefreshCw,
   AlertTriangle,
   Key,
+  Copy,
 } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -29,10 +30,10 @@ import {
   getCoaEvmAddress,
   getOrDeriveMemoPrivkey,
   getRecipientMemoPubkey,
-  getShieldedStateForCoa,
   TOKEN_PROXIES,
 } from "@/lib/tip-actions";
-import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei, ShieldedInboxClient } from "@claucondor/sdk";
+import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei, getPortfolioView } from "@claucondor/sdk";
+import { SHIELDED_CHECKPOINT_ADDRESS, SHIELDED_INBOX_ADDRESS, FLOW_EVM_RPC, FLOW_CADENCE_ACCESS } from "@claucondor/sdk/network";
 import type { ShieldedTokenState } from "@/lib/store";
 // Phase 4 will rewrite /portfolio to use ShieldedCheckpointClient.readAndDecrypt() —
 // loadShieldedState / saveShieldedState / recoverShieldedState removed in Phase 1 (v0.8).
@@ -45,8 +46,16 @@ interface TokenPortfolioRow {
   tokenId: TokenId;
   publicBalance: bigint | null;
   shieldedState: ShieldedTokenState | null;
+  /** Pending notes in EVM inbox not yet consolidated into checkpoint. */
+  pendingRaw: bigint | null;
+  pendingCount: number;
+  batchEligible: boolean;
   loading: boolean;
   error: string | null;
+  /** Checkpoint health — populated after getPortfolioView with janusTokenAddr. */
+  checkpointHealth: "coherent" | "stale" | "corrupted" | "unknown";
+  /** Which ops are safe to attempt (false when checkpointHealth==="corrupted"). */
+  safeOpsAvailable: { wrap: boolean; send: boolean; claim: boolean; unwrap: boolean };
 }
 
 const initialRows = (): TokenPortfolioRow[] =>
@@ -54,8 +63,13 @@ const initialRows = (): TokenPortfolioRow[] =>
     tokenId: t.id,
     publicBalance: null,
     shieldedState: null,
+    pendingRaw: null,
+    pendingCount: 0,
+    batchEligible: false,
     loading: false,
     error: null,
+    checkpointHealth: "unknown" as const,
+    safeOpsAvailable: { wrap: true, send: true, claim: true, unwrap: true },
   }));
 
 type PortfolioPageState =
@@ -95,8 +109,9 @@ export default function PortfolioPage() {
     setRows(initialRows());
   }, [userAddress]);
 
-  // Phase 4 (v0.8.2): reads on-chain ShieldedCheckpoint via VoidSigner staticCall.
-  // Per-token reads: FLOW, mUSDC, and MockFT each have their own EVM checkpoint slot.
+  // v0.8.2: use getPortfolioView for per-token shielded + pending in one call.
+  // Reads ShieldedCheckpoint (shielded balance) and ShieldedInbox (pending notes)
+  // simultaneously, filtered per-token by depositor address.
   const refreshShieldedState = useCallback(async (addr: string, coa: string) => {
     const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
     const memoPrivkey = getCachedMemoPrivkey(addr);
@@ -105,38 +120,63 @@ export default function PortfolioPage() {
       return;
     }
 
-    // Read inbox pending count (view call — no signer needed).
-    let inboxCount = 0;
-    try {
-      const ibClient = new ShieldedInboxClient();
-      inboxCount = Number(await ibClient.count(coa));
-    } catch { /* non-fatal */ }
-
-    // Per-token checkpoint reads — each token has its own slot.
-    for (const t of SUPPORTED_TOKENS) {
+    // Build token list for getPortfolioView — map each supported token to its EVM identifier.
+    // Include janusTokenAddr for native/erc20 tokens so getPortfolioView can run the live
+    // Pedersen health check against the on-chain commitment.
+    const tokenList = SUPPORTED_TOKENS.map((t) => {
       const entry = TOKEN_REGISTRY[t.id];
+      return {
+        id: t.id,
+        address: TOKEN_PROXIES[t.id as keyof typeof TOKEN_PROXIES],
+        // proxy IS the JanusToken contract for native+erc20; cadence-ft omits it.
+        janusTokenAddr: entry.variant !== "cadence-ft" ? entry.proxy : undefined,
+      };
+    });
 
-      // Resolve token address: EVM tokens use proxy; cadence-ft uses cadenceAddress as identifier.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tokenAddr = entry.variant === "cadence-ft"
-        ? TOKEN_PROXIES[t.id as keyof typeof TOKEN_PROXIES]
-        : (entry as any).proxy as string;
-      try {
-        const cpState = await getShieldedStateForCoa(coa, memoPrivkey, tokenAddr).catch(() => null);
+    try {
+      const view = await getPortfolioView(coa, {
+        rpc: FLOW_EVM_RPC,
+        checkpointAddr: SHIELDED_CHECKPOINT_ADDRESS,
+        inboxAddr: SHIELDED_INBOX_ADDRESS,
+        tokens: tokenList,
+        memoPrivkey,
+        cadenceAddress: addr,           // Cadence address — used to read Cadence inbox for MockFT
+        flowAccessNode: FLOW_CADENCE_ACCESS,
+      });
+
+      for (const t of SUPPORTED_TOKENS) {
+        const tv = view.tokens[t.id];
+        if (!tv) continue;
+        // Surface corruption in sessionStorage so RecoveryBanner can pick it up.
+        if (tv.checkpointHealth === "corrupted") {
+          try { sessionStorage.setItem("janus_corrupted_tokens", JSON.stringify(
+            [...JSON.parse(sessionStorage.getItem("janus_corrupted_tokens") ?? "[]"), t.id]
+          )); } catch { /* ignore */ }
+        }
+
         setRow(t.id, {
-          shieldedState: cpState
+          shieldedState: tv.shielded > 0n
             ? {
-                balanceRaw: cpState.balance.toString(),
-                blinding: cpState.blinding.toString(),
-                checkpointVersion: cpState.version.toString(),
+                balanceRaw: tv.shielded.toString(),
+                blinding: "0", // blinding not exposed by getPortfolioView — not needed for display
+                checkpointVersion: tv.checkpointVersion.toString(),
                 lastUpdatedBlock: "0",
-                inboxPendingCount: inboxCount,
+                inboxPendingCount: tv.pendingCount,
               }
             : null,
+          pendingRaw: tv.pending,
+          pendingCount: tv.pendingCount,
+          batchEligible: tv.batchEligible,
           loading: false,
-          error: null,
+          error: tv.decryptErrors.length > 0 ? tv.decryptErrors[0] : null,
+          checkpointHealth: tv.checkpointHealth,
+          safeOpsAvailable: tv.safeOpsAvailable,
         });
-      } catch {
+      }
+    } catch (err) {
+      // Non-fatal: log and leave rows as-is
+      console.warn("[portfolio] getPortfolioView failed:", err);
+      for (const t of SUPPORTED_TOKENS) {
         setRow(t.id, { loading: false, error: null });
       }
     }
@@ -429,22 +469,60 @@ export default function PortfolioPage() {
         <p className="mt-2 text-foreground/70">
           Tip privately in FLOW, USDC, or any supported token.
         </p>
-        {coaAddr && (
-          <p className="mt-1 text-[10px] font-mono text-foreground/30">
-            COA: {coaAddr.slice(0, 10)}…{coaAddr.slice(-6)}
-          </p>
+        {/* Dual identity block — Cadence + EVM COA */}
+        {(userAddress || coaAddr) && (
+          <div className="mt-2 rounded-lg border border-white/8 bg-white/3 px-3 py-2 inline-block">
+            <p className="text-[10px] text-foreground/40 font-medium mb-1">You:</p>
+            <div className="space-y-0.5">
+              {userAddress && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-foreground/40 w-14 shrink-0">Cadence:</span>
+                  <span className="text-[10px] font-mono text-foreground/60">{userAddress}</span>
+                  <button
+                    type="button"
+                    onClick={() => { navigator.clipboard.writeText(userAddress); }}
+                    className="text-foreground/30 hover:text-foreground/60 transition-colors"
+                    title="Copy Cadence address"
+                  >
+                    <Copy className="w-2.5 h-2.5" />
+                  </button>
+                </div>
+              )}
+              {coaAddr && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-foreground/40 w-14 shrink-0">EVM COA:</span>
+                  <span className="text-[10px] font-mono text-foreground/60">{coaAddr.slice(0, 10)}…{coaAddr.slice(-6)}</span>
+                  <button
+                    type="button"
+                    onClick={() => { navigator.clipboard.writeText(coaAddr); }}
+                    className="text-foreground/30 hover:text-foreground/60 transition-colors"
+                    title="Copy EVM COA address"
+                  >
+                    <Copy className="w-2.5 h-2.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
-      {/* Batch claim CTA — shown when inbox has ≥ 5 pending notes */}
-      <BatchClaimCTA
-        userAddress={userAddress}
-        onClaimed={() => {
-          if (userAddress && coaAddr) {
-            refreshShieldedState(userAddress, coaAddr).catch(() => {});
-          }
-        }}
-      />
+      {/* Claim CTAs — one per token with pending inbox notes */}
+      {rows
+        .filter((r) => r.pendingCount > 0)
+        .map((r) => (
+          <BatchClaimCTA
+            key={r.tokenId}
+            userAddress={userAddress}
+            tokenId={r.tokenId}
+            tokenAddress={TOKEN_PROXIES[r.tokenId as keyof typeof TOKEN_PROXIES]}
+            onClaimed={() => {
+              if (userAddress && coaAddr) {
+                refreshShieldedState(userAddress, coaAddr).catch(() => {});
+              }
+            }}
+          />
+        ))}
 
       {/* Token grid */}
       <div className="space-y-3">
@@ -465,7 +543,25 @@ export default function PortfolioPage() {
                 <div className="flex items-center gap-3">
                   <TokenBadge id={row.tokenId} />
                   <div>
-                    <p className="text-sm font-semibold text-foreground">{token.label}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-semibold text-foreground">{token.label}</p>
+                      {/* Checkpoint health badge — only shown after getPortfolioView runs */}
+                      {row.checkpointHealth === "corrupted" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-red-900/40 border border-red-700/50 text-red-400 font-mono">
+                          corrupted
+                        </span>
+                      )}
+                      {row.checkpointHealth === "stale" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-amber-900/30 border border-amber-700/30 text-amber-400 font-mono">
+                          stale
+                        </span>
+                      )}
+                      {row.checkpointHealth === "coherent" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-emerald-900/30 border border-emerald-700/30 text-emerald-400 font-mono">
+                          coherent
+                        </span>
+                      )}
+                    </div>
                     <p className="text-[10px] text-foreground/40">
                       {(() => {
                         const entry = TOKEN_REGISTRY[row.tokenId];
@@ -482,7 +578,21 @@ export default function PortfolioPage() {
                 {row.loading && <Loader2 className="w-4 h-4 animate-spin text-foreground/30" />}
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mb-4">
+              {/* Corruption warning — shown when blinding is corrupted */}
+              {row.checkpointHealth === "corrupted" && (
+                <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 px-3 py-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-[10px] text-red-300 font-medium">Checkpoint corrupted</p>
+                    <p className="text-[9px] text-red-400/70 mt-0.5">
+                      Your checkpoint blinding does not match the on-chain commitment.
+                      Send and withdraw are disabled. Contact support or use admin reset (testnet).
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 mb-3">
                 {/* Public balance */}
                 <div className="rounded-lg border border-white/8 bg-white/3 px-3 py-2">
                   <div className="flex items-center gap-1 mb-1">
@@ -504,6 +614,12 @@ export default function PortfolioPage() {
                     <Lock className="w-3 h-3 text-[#00EF8B]/60" />
                     <span className="text-[10px] text-[#00EF8B]/60 uppercase tracking-wide">Shielded</span>
                   </div>
+                  <p className="text-[9px] text-foreground/25 mb-0.5">
+                    {(() => {
+                      const entry = TOKEN_REGISTRY[row.tokenId];
+                      return entry.variant === "cadence-ft" ? "tracked on Cadence" : "tracked on EVM";
+                    })()}
+                  </p>
                   {(() => {
                     return hasShielded && shieldedBal !== null ? (
                       <p className="text-sm font-mono text-[#00EF8B]">
@@ -516,6 +632,26 @@ export default function PortfolioPage() {
                 </div>
               </div>
 
+              {/* Pending notes row — shown when getPortfolioView found inbox notes */}
+              {row.pendingCount > 0 && row.pendingRaw !== null && (
+                <div className="rounded-lg border border-[#6B46C1]/20 bg-[#6B46C1]/6 px-3 py-2 mb-3 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="text-[10px] text-[#8B5CF6] uppercase tracking-wide font-medium">Pending</span>
+                      {row.batchEligible && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-[#6B46C1]/25 text-[#8B5CF6] font-mono">
+                          Batch eligible · lower gas
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm font-mono text-[#8B5CF6]">
+                      {formatTokenAmount(row.pendingRaw, row.tokenId, 4)} {token.symbol}
+                      <span className="text-[10px] text-foreground/40 ml-1">({row.pendingCount} note{row.pendingCount !== 1 ? "s" : ""})</span>
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {row.error && (
                 <div className="mb-3 flex items-center gap-2 text-[10px] text-amber-400/70">
                   <AlertTriangle className="w-3 h-3 shrink-0" />
@@ -523,8 +659,8 @@ export default function PortfolioPage() {
                 </div>
               )}
 
-              {/* Quick actions */}
-              <div className="flex gap-2">
+              {/* Quick actions — disabled when safeOpsAvailable[op] === false */}
+              <div className="flex gap-2 flex-wrap">
                 <Link
                   href={`/wrap?token=${row.tokenId}`}
                   className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-white/12 bg-white/4 text-xs text-foreground/70 hover:bg-white/8 transition-colors"
@@ -532,21 +668,50 @@ export default function PortfolioPage() {
                   Wrap
                   <ArrowRight className="w-3 h-3" />
                 </Link>
-                <Link
-                  href={`/send?token=${row.tokenId}`}
-                  className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#6B46C1]/25 bg-[#6B46C1]/8 text-xs text-[#6B46C1] hover:bg-[#6B46C1]/15 transition-colors"
-                >
-                  Send
-                  <ArrowRight className="w-3 h-3" />
-                </Link>
-                {hasShielded && (
+                {row.safeOpsAvailable.send ? (
                   <Link
-                    href={`/claim?token=${row.tokenId}`}
-                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#00EF8B]/20 bg-[#00EF8B]/6 text-xs text-[#00EF8B] hover:bg-[#00EF8B]/12 transition-colors"
+                    href={`/send?token=${row.tokenId}`}
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#6B46C1]/25 bg-[#6B46C1]/8 text-xs text-[#6B46C1] hover:bg-[#6B46C1]/15 transition-colors"
                   >
-                    Claim
+                    Send
                     <ArrowRight className="w-3 h-3" />
                   </Link>
+                ) : (
+                  <span
+                    title="Send disabled: checkpoint corrupted. Admin reset required."
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#6B46C1]/12 bg-[#6B46C1]/4 text-xs text-[#6B46C1]/30 cursor-not-allowed"
+                  >
+                    Send
+                    <ArrowRight className="w-3 h-3" />
+                  </span>
+                )}
+                {row.pendingCount > 0 && row.safeOpsAvailable.claim && (
+                  <Link
+                    href={`/claim?token=${row.tokenId}`}
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#8B5CF6]/30 bg-[#6B46C1]/8 text-xs text-[#8B5CF6] hover:bg-[#6B46C1]/15 transition-colors"
+                  >
+                    Claim {row.pendingCount}
+                    <ArrowRight className="w-3 h-3" />
+                  </Link>
+                )}
+                {hasShielded && (
+                  row.safeOpsAvailable.unwrap ? (
+                    <Link
+                      href={`/withdraw?token=${row.tokenId}`}
+                      className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#00EF8B]/20 bg-[#00EF8B]/6 text-xs text-[#00EF8B] hover:bg-[#00EF8B]/12 transition-colors"
+                    >
+                      Withdraw
+                      <ArrowRight className="w-3 h-3" />
+                    </Link>
+                  ) : (
+                    <span
+                      title="Withdraw disabled: checkpoint corrupted. Admin reset required."
+                      className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#00EF8B]/10 bg-[#00EF8B]/3 text-xs text-[#00EF8B]/30 cursor-not-allowed"
+                    >
+                      Withdraw
+                      <ArrowRight className="w-3 h-3" />
+                    </span>
+                  )
                 )}
               </div>
             </motion.div>
