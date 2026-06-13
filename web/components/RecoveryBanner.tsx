@@ -11,6 +11,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { ShieldedInboxClient, ShieldedCheckpointClient, getCoaEvmAddress, sdk, getCadenceInboxNotes, TOKEN_REGISTRY } from "@claucondor/sdk";
 import { FLOW_CADENCE_ACCESS, CADENCE_DEPLOYER_ADDRESS } from "@claucondor/sdk/network";
+import type { CadenceInboxNote } from "@claucondor/sdk";
 import { X } from "lucide-react";
 
 interface RecoveryBannerProps {
@@ -19,6 +20,33 @@ interface RecoveryBannerProps {
 }
 
 type BannerMode = "corrupted_checkpoint" | "pending_notes" | "not_activated" | null;
+
+/**
+ * Read Cadence inbox notes with one retry on empty result.
+ *
+ * `getCadenceInboxNotes` can return [] before FCL has fully initialised
+ * (race condition: banner mounts before FlowProvider's async FCL setup completes).
+ * One retry after a 2 s delay resolves the race in the common case.
+ * On genuine error the catch returns null so the caller can show "≥ N" instead of N.
+ */
+async function getCadenceNotesWithRetry(
+  cadenceAddr: string,
+): Promise<CadenceInboxNote[] | null> {
+  const opts = {
+    flowAccessNode: FLOW_CADENCE_ACCESS,
+    inboxContractAddress: CADENCE_DEPLOYER_ADDRESS,
+  };
+  try {
+    const first = await getCadenceInboxNotes(cadenceAddr, opts);
+    if (first.length > 0) return first;
+    // Possibly FCL not warm yet — wait 2 s and try once more.
+    await new Promise<void>((r) => setTimeout(r, 2000));
+    return await getCadenceInboxNotes(cadenceAddr, opts);
+  } catch (err) {
+    console.warn("[RecoveryBanner] Cadence inbox query failed:", err);
+    return null;
+  }
+}
 
 export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBannerProps) {
   const [dismissed, setDismissed] = useState(false);
@@ -62,14 +90,9 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
           hasValidCoa
             ? adapter.getMemoKey(coaAddr!).catch(() => null)
             : Promise.resolve(null),
-          // Cadence ShieldedInbox (MockFT notes from JanusFT.shieldedTransfer)
-          getCadenceInboxNotes(userAddress, {
-            flowAccessNode: FLOW_CADENCE_ACCESS,
-            inboxContractAddress: CADENCE_DEPLOYER_ADDRESS,
-          }).catch((err) => {
-            console.warn("[RecoveryBanner] Cadence inbox query failed:", err);
-            return null as null;
-          }),
+          // Cadence ShieldedInbox (MockFT notes from JanusFT.shieldedTransfer).
+          // Uses retry helper to survive FCL warm-up race (see getCadenceNotesWithRetry).
+          getCadenceNotesWithRetry(userAddress),
         ]);
 
         if (cancelled) return;
