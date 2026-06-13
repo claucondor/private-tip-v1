@@ -162,7 +162,8 @@ export default function ClientLayout({
               <NavLink href="/wrap">Wrap</NavLink>
               <NavLink href="/send">Send</NavLink>
               <NavLink href="/tips">Tips</NavLink>
-              <NavLink href="/claim">Withdraw</NavLink>
+              <NavLink href="/claim">Claim</NavLink>
+              <NavLink href="/withdraw">Withdraw</NavLink>
               <NavLink href="/status">Status</NavLink>
               <NavLink href="/faucet">Faucet</NavLink>
               <NavLink href="/learn" highlight>Learn</NavLink>
@@ -256,13 +257,14 @@ function MobileNav() {
 
   const links: { href: string; label: string; highlight?: boolean }[] = [
     { href: "/portfolio", label: "Portfolio" },
-    { href: "/wrap",   label: "Wrap" },
-    { href: "/send",   label: "Send" },
-    { href: "/tips",   label: "Tips" },
-    { href: "/claim",  label: "Withdraw" },
-    { href: "/status", label: "Status" },
-    { href: "/faucet", label: "Faucet" },
-    { href: "/learn",  label: "Learn", highlight: true },
+    { href: "/wrap",      label: "Wrap" },
+    { href: "/send",      label: "Send" },
+    { href: "/tips",      label: "Tips" },
+    { href: "/claim",     label: "Claim" },
+    { href: "/withdraw",  label: "Withdraw" },
+    { href: "/status",    label: "Status" },
+    { href: "/faucet",    label: "Faucet" },
+    { href: "/learn",     label: "Learn", highlight: true },
   ];
 
   return (
