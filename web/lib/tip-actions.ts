@@ -748,6 +748,41 @@ transaction(memoPubX: UInt256, memoPubY: UInt256) {
   return { memoKeyTxHash: atomicTxId, installTxId: atomicTxId, pubkey: keypair.pubkey };
 }
 
+// ─── Step 3: initializeShieldedSlots ─────────────────────────────────────────
+/**
+ * Initialize empty ShieldedCheckpoint slots for FLOW and mUSDC via the user's COA.
+ * Called as Step 3 of activation after publishMemoKey + installInboxAndCheckpoint (Step 2).
+ *
+ * ShieldedCheckpoint.update() is permissionless — the user's COA writes its own slot.
+ * Passing empty snapshot + zero numerics creates a zero-state checkpoint that:
+ *   - prevents the NoCheckpoint revert on getPortfolioView reads
+ *   - is semantically equivalent to balance=0 (coherent empty state)
+ *
+ * @param coaEvmAddr  COA EVM address of the caller (for logging/validation).
+ * @param memoKeypair Session memo keypair (held for consistency; not used in tx body).
+ * @returns { txHash } — Cadence tx hash, onceSealed before returning.
+ */
+export async function initializeShieldedSlots(
+  coaEvmAddr: string,
+  memoKeypair: BabyJubKeypair,
+): Promise<{ txHash: string }> {
+  void coaEvmAddr;   // Not used in tx body — COA comes from signer storage
+  void memoKeypair;  // Preserved for signature consistency; Step 3 requires no ZK material
+
+  const fcl = await getFcl();
+  const tx = cadenceTx.initializeShieldedSlots();
+  const txId: string = await fcl.mutate({
+    cadence: tx.cadence,
+    args: tx.args,
+    proposer: fcl.authz,
+    payer: fcl.authz,
+    authorizations: [fcl.authz],
+    limit: 9999,
+  });
+  await fcl.tx(txId).onceSealed();
+  return { txHash: txId };
+}
+
 // ─── v0.8 Core: getShieldedState ─────────────────────────────────────────────
 
 /**

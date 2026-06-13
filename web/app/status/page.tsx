@@ -56,7 +56,9 @@ type ActivationStep =
   | "step1_pending"  // deriving privkey (wallet signMessage)
   | "step1_done"     // privkey derived, ready for step 2
   | "step2_pending"  // publishing pubkey + COA on-chain
-  | "done"           // fully activated
+  | "step2_done"     // Step 2 sealed; Step 3 not yet run
+  | "step3_pending"  // Step 3 tx in-flight
+  | "done"           // Step 3 sealed; fully activated
   | "unlock_pending" // re-deriving privkey for existing session (step 1 of 1)
   | "unlock_done";   // session key re-derived
 
@@ -73,6 +75,10 @@ export default function StatusPage() {
   const [activationError, setActivationError] = useState<string | null>(null);
   // Whether the privkey is in session memory for own address
   const [sessionHasKey, setSessionHasKey] = useState(false);
+  // Whether FLOW ShieldedCheckpoint slot exists (checked when isReady = true)
+  const [slotsInitialized, setSlotsInitialized] = useState<boolean | null>(null);
+  // COA address captured during status check (needed for step3 handler)
+  const [coaForStep3, setCoaForStep3] = useState<string | null>(null);
 
   // Pre-fill with own wallet on first load.
   useEffect(() => {
@@ -115,6 +121,20 @@ export default function StatusPage() {
         coaAddress: hasCoa ? coaAddress : null,
         error: null,
       });
+      // Capture COA for step 3 handler
+      if (hasCoa && coaAddress) {
+        setCoaForStep3(coaAddress);
+        // Check if FLOW ShieldedCheckpoint slot is already initialized
+        try {
+          const { ShieldedCheckpointClient } = await import("@claucondor/sdk");
+          const flowExists = await new ShieldedCheckpointClient()
+            .exists(coaAddress, TOKEN_REGISTRY.flow.proxy)
+            .catch(() => false);
+          setSlotsInitialized(flowExists as boolean);
+        } catch {
+          setSlotsInitialized(null);
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Check failed";
       setResult({
@@ -169,7 +189,7 @@ export default function StatusPage() {
           ? `Install: ${activation.installTxId.slice(0, 10)}…`
           : "Already activated (idempotent)";
       toast.success(`Activated! ${txLabel}`);
-      setActivationStep("done");
+      setActivationStep("step2_done");
       // Refresh status check
       await runCheck(userAddress);
     } catch (err) {
@@ -179,6 +199,31 @@ export default function StatusPage() {
       toast.error("Step 2 failed", { description: msg });
     }
   }, [userAddress, runCheck]);
+
+  const handleActivateStep3 = useCallback(async () => {
+    if (!userAddress) return;
+    setActivationStep("step3_pending");
+    setActivationError(null);
+    try {
+      const { initializeShieldedSlots, loadMemoPrivkey } = await import("@/lib/tip-actions");
+      const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
+      const privkey = loadMemoPrivkey(userAddress);
+      if (!privkey) throw new Error("Session key missing — complete Step 1 first.");
+      const pubkey = await pubkeyFromPrivkey(privkey);
+      const coa = coaForStep3 ?? result?.coaAddress;
+      if (!coa) throw new Error("COA address not available — refresh the status check.");
+      const { txHash } = await initializeShieldedSlots(coa, { privkey, pubkey });
+      toast.success(`Shielded slots initialized! tx: ${txHash.slice(0, 10)}…`);
+      setSlotsInitialized(true);
+      setActivationStep("done");
+      await runCheck(userAddress);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Transaction failed";
+      setActivationError(msg);
+      setActivationStep("step2_done");
+      toast.error("Step 3 failed", { description: msg });
+    }
+  }, [userAddress, coaForStep3, result, runCheck]);
 
   const handleUnlock = useCallback(async () => {
     if (!userAddress) return;
@@ -370,6 +415,7 @@ export default function StatusPage() {
                   userAddress={userAddress ?? undefined}
                   onStep1={handleActivateStep1}
                   onStep2={handleActivateStep2}
+                  onStep3={handleActivateStep3}
                   onUnlock={handleUnlock}
                 />
               ) : (
@@ -414,6 +460,7 @@ export default function StatusPage() {
                 userAddress={userAddress ?? undefined}
                 onStep1={handleActivateStep1}
                 onStep2={handleActivateStep2}
+                onStep3={handleActivateStep3}
                 onUnlock={handleUnlock}
               />
             </div>
@@ -438,6 +485,39 @@ export default function StatusPage() {
                   Wrap funds
                   <ArrowRight className="w-3.5 h-3.5" />
                 </Link>
+              )}
+            </div>
+          )}
+
+          {/* Step 3 pending for existing activated users */}
+          {isReady && isOwnAddress && slotsInitialized === false && (
+            <div className="pt-3 border-t border-white/10 space-y-3">
+              <div className="rounded-lg border border-[#D4AF37]/25 bg-[#D4AF37]/6 px-4 py-3 text-sm">
+                <p className="font-medium text-[#D4AF37] mb-1 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5" />
+                  Step 3 pending — Initialize shielded slots
+                </p>
+                <p className="text-foreground/60 text-xs leading-relaxed">
+                  Your MemoKey is published and inbox is installed, but your ShieldedCheckpoint slots
+                  haven&apos;t been initialized yet. This one-time step creates empty FLOW and mUSDC
+                  checkpoint entries — no funds are moved, gas only.
+                </p>
+              </div>
+              <button
+                onClick={handleActivateStep3}
+                disabled={activationStep === "step3_pending" || !sessionHasKey}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[#D4AF37]/50 bg-[#D4AF37]/10 text-amber-200 text-sm font-medium hover:bg-[#D4AF37]/20 transition-colors disabled:opacity-50"
+              >
+                {activationStep === "step3_pending" ? (
+                  <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Waiting for on-chain confirmation…</>
+                ) : (
+                  <><Key className="w-3.5 h-3.5" /> Initialize shielded slots (Step 3)</>
+                )}
+              </button>
+              {!sessionHasKey && (
+                <p className="text-xs text-foreground/50">
+                  Sign with wallet (Step 1) to re-derive your session key first.
+                </p>
               )}
             </div>
           )}
@@ -509,6 +589,7 @@ function InlineActivation({
   userAddress,
   onStep1,
   onStep2,
+  onStep3,
   onUnlock,
 }: {
   step: ActivationStep;
@@ -518,6 +599,7 @@ function InlineActivation({
   userAddress?: string;
   onStep1: () => void;
   onStep2: () => void;
+  onStep3: () => void;
   onUnlock: () => void;
 }) {
   // Case: fully activated on-chain, session key missing → unlock flow (1 step)
@@ -597,6 +679,45 @@ function InlineActivation({
     );
   }
 
+  // Case: step 2 sealed, ready to initialize shielded slots (Step 3)
+  if (step === "step2_done") {
+    return (
+      <div className="space-y-3">
+        <div className="rounded-lg border border-[#00EF8B]/20 bg-[#00EF8B]/5 px-4 py-3 text-xs text-foreground/70">
+          <span className="text-[#00EF8B] font-medium">Step 2 complete.</span>{" "}
+          MemoKey published and Cadence resources installed. Now initialize your shielded state slots.
+        </div>
+        <button
+          onClick={onStep3}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[#00EF8B]/40 bg-[#00EF8B]/10 text-[#00EF8B] text-sm font-medium hover:bg-[#00EF8B]/20 transition-colors"
+        >
+          <Key className="w-3.5 h-3.5" />
+          Activate (Step 3 of 3) — Initialize shielded slots (no funds moved)
+        </button>
+        {error && <p className="text-xs text-red-400">{error}</p>}
+      </div>
+    );
+  }
+
+  // Case: step 3 tx in-flight
+  if (step === "step3_pending") {
+    return (
+      <div className="space-y-3">
+        <div className="rounded-lg border border-[#00EF8B]/20 bg-[#00EF8B]/5 px-4 py-3 text-xs text-foreground/70">
+          <span className="text-[#00EF8B] font-medium">Step 2 complete.</span>{" "}
+          Initializing shielded slots on-chain…
+        </div>
+        <button
+          disabled
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[#00EF8B]/40 bg-[#00EF8B]/10 text-[#00EF8B] text-sm font-medium opacity-50"
+        >
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Waiting for on-chain confirmation…
+        </button>
+      </div>
+    );
+  }
+
   // Case: step 1 done, waiting to proceed to step 2
   if (step === "step1_done") {
     return (
@@ -655,8 +776,7 @@ function InlineActivation({
             Flow Wallet transaction, gas-only.
           </li>
           <li>
-            <strong className="text-foreground/80">Step 3:</strong> Verify — read-only check that
-            MemoKey, Checkpoint, and Inbox are all set up correctly on-chain.
+            <strong className="text-foreground/80">Step 3:</strong> Initialize shielded slots (no funds moved) — creates empty FLOW and mUSDC checkpoint slots in one Flow Wallet transaction, gas-only.
           </li>
         </ul>
         <p className="text-foreground/50 text-xs mt-2">

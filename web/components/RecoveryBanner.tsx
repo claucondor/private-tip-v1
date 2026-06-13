@@ -39,7 +39,7 @@ interface RecoveryBannerProps {
   onDismiss?: () => void;
 }
 
-type BannerMode = "corrupted_checkpoint" | "not_activated" | null;
+type BannerMode = "corrupted_checkpoint" | "not_initialized_slots" | "not_activated" | null;
 
 export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBannerProps) {
   const [dismissed, setDismissed] = useState(false);
@@ -77,13 +77,20 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
           corrupted = JSON.parse(sessionStorage.getItem("janus_corrupted_tokens") ?? "[]");
         } catch { /* ignore */ }
 
+        let notInitialized: string[] = [];
+        try {
+          notInitialized = JSON.parse(sessionStorage.getItem("janus_not_initialized_tokens") ?? "[]");
+        } catch { /* ignore */ }
+
         // Debug log — operator validates in browser console.
         // pending_notes mode was removed; see per-card counts on /portfolio instead.
-        console.log("[RecoveryBanner] hasMemoKey=", hasMemoKey, "corrupted=", corrupted, "coaAddr=", coaAddr);
+        console.log("[RecoveryBanner] hasMemoKey=", hasMemoKey, "corrupted=", corrupted, "notInitialized=", notInitialized, "coaAddr=", coaAddr);
 
         if (corrupted.length > 0) {
           setCorruptedTokens(corrupted);
           setMode("corrupted_checkpoint");
+        } else if (notInitialized.length > 0) {
+          setMode("not_initialized_slots");
         } else if (!hasMemoKey) {
           setMode("not_activated");
         } else {
@@ -113,6 +120,7 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
   const dismissColor = mode === "corrupted_checkpoint"
     ? "text-red-400 hover:text-red-200 hover:bg-red-900/40"
     : "text-amber-400 hover:text-amber-200 hover:bg-amber-900/40";
+  // not_initialized_slots uses same amber styling as not_activated
 
   return (
     <div className={`w-full border-b ${bannerColor} px-4 py-2.5`}>
@@ -130,6 +138,14 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
                 View portfolio
               </Link>{" "}
               for details or contact support.
+            </>
+          ) : mode === "not_initialized_slots" ? (
+            <>
+              <strong className="text-amber-200">Shielded slots not initialized.</strong>{" "}
+              <Link href="/status" className="underline underline-offset-2 font-medium hover:text-amber-100 transition-colors">
+                Run Step 3 in /status
+              </Link>{" "}
+              to initialize, or wrap funds directly.
             </>
           ) : (
             <>

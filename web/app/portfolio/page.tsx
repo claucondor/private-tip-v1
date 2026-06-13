@@ -19,6 +19,7 @@ import {
   Wallet,
   RefreshCw,
   AlertTriangle,
+  ShieldAlert,
   Key,
   Copy,
 } from "lucide-react";
@@ -52,7 +53,7 @@ interface TokenPortfolioRow {
   loading: boolean;
   error: string | null;
   /** Checkpoint health — populated after getPortfolioView with janusTokenAddr. */
-  checkpointHealth: "coherent" | "stale" | "corrupted" | "unknown";
+  checkpointHealth: "coherent" | "stale" | "corrupted" | "not_initialized" | "unknown";
   /** Which ops are safe to attempt (false when checkpointHealth==="corrupted"). */
   safeOpsAvailable: { wrap: boolean; send: boolean; claim: boolean; unwrap: boolean };
 }
@@ -151,6 +152,15 @@ export default function PortfolioPage() {
           try { sessionStorage.setItem("janus_corrupted_tokens", JSON.stringify(
             [...JSON.parse(sessionStorage.getItem("janus_corrupted_tokens") ?? "[]"), t.id]
           )); } catch { /* ignore */ }
+        }
+        // Write not_initialized tokens to sessionStorage for RecoveryBanner
+        if (tv.checkpointHealth === "not_initialized") {
+          try {
+            const existing = JSON.parse(sessionStorage.getItem("janus_not_initialized_tokens") ?? "[]");
+            if (!existing.includes(t.id)) {
+              sessionStorage.setItem("janus_not_initialized_tokens", JSON.stringify([...existing, t.id]));
+            }
+          } catch { /* ignore */ }
         }
 
         setRow(t.id, {
@@ -543,6 +553,11 @@ export default function PortfolioPage() {
                           coherent
                         </span>
                       )}
+                      {row.checkpointHealth === "not_initialized" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-slate-800/40 border border-slate-600/50 text-slate-300 font-mono">
+                          fresh
+                        </span>
+                      )}
                     </div>
                     <p className="text-[10px] text-foreground/40">
                       {(() => {
@@ -569,6 +584,21 @@ export default function PortfolioPage() {
                     <p className="text-[9px] text-red-400/70 mt-0.5">
                       Your checkpoint blinding does not match the on-chain commitment.
                       Send and withdraw are disabled. Contact support or use admin reset (testnet).
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* not_initialized info — shown when slot needs Step 3 or first wrap */}
+              {row.checkpointHealth === "not_initialized" && (
+                <div className="mb-3 flex items-start gap-2 rounded-lg border border-blue-700/30 bg-blue-950/20 px-3 py-2">
+                  <ShieldAlert className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-[10px] text-blue-300 font-medium">Slot not initialized</p>
+                    <p className="text-[9px] text-blue-400/70 mt-0.5">
+                      ShieldedCheckpoint slot not yet created. Wrap funds to auto-initialize, or run
+                      {" "}<Link href="/status" className="underline">Step 3 in /status</Link>.
+                      Send and withdraw are disabled until the slot is initialized.
                     </p>
                   </div>
                 </div>
@@ -660,7 +690,9 @@ export default function PortfolioPage() {
                   </Link>
                 ) : (
                   <span
-                    title="Send disabled: checkpoint corrupted. Admin reset required."
+                    title={row.checkpointHealth === "not_initialized"
+                      ? "Send disabled: slot not initialized. Run Step 3 in /status or wrap funds first."
+                      : "Send disabled: checkpoint corrupted. Admin reset required."}
                     className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#6B46C1]/12 bg-[#6B46C1]/4 text-xs text-[#6B46C1]/30 cursor-not-allowed"
                   >
                     Send
@@ -687,7 +719,9 @@ export default function PortfolioPage() {
                     </Link>
                   ) : (
                     <span
-                      title="Withdraw disabled: checkpoint corrupted. Admin reset required."
+                      title={row.checkpointHealth === "not_initialized"
+                        ? "Withdraw disabled: slot not initialized. Run Step 3 in /status or wrap funds first."
+                        : "Withdraw disabled: checkpoint corrupted. Admin reset required."}
                       className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#00EF8B]/10 bg-[#00EF8B]/3 text-xs text-[#00EF8B]/30 cursor-not-allowed"
                     >
                       Withdraw
