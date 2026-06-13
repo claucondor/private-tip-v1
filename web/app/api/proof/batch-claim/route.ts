@@ -49,9 +49,9 @@ export async function POST(req: NextRequest) {
     if (typeof newBlinding !== "string") {
       return NextResponse.json({ error: "newBlinding required (decimal string)" }, { status: 400 });
     }
-    if (!Array.isArray(notesToConsume) || notesToConsume.length === 0) {
+    if (!Array.isArray(notesToConsume)) {
       return NextResponse.json(
-        { error: "notesToConsume required (non-empty array of {amount, blinding})" },
+        { error: "notesToConsume required (array of {amount, blinding}; pass [] for re-blinding only)" },
         { status: 400 }
       );
     }
