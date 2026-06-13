@@ -43,8 +43,9 @@ import {
   getOrDeriveMemoPrivkey,
   type Point,
 } from "@/lib/tip-actions";
-import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
+import { TOKEN_REGISTRY, TOKEN_RECIPIENT_TYPES, SHIELDED_CHECKPOINT_ADDRESS, SHIELDED_INBOX_ADDRESS, FLOW_EVM_RPC, FLOW_CADENCE_ACCESS } from "@claucondor/sdk/network";
 import { ethers } from "ethers";
+import { getPortfolioView } from "@claucondor/sdk";
 // loadShieldedState and saveShieldedState removed from @/lib/store in v0.8.
 // Phase 4/5/6 will rewrite — Phase 1 left this here intentionally because it
 // consumes lib functions whose rewrite happens later.
@@ -52,6 +53,7 @@ import { TokenSelector } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
 import { parseTokenAmount, formatTokenAmount, getTokenMeta } from "@/lib/tokens";
 import { ShieldedNoteEncrypt } from "@/components/animations/ShieldedNoteEncrypt";
+import { ClaimFirstWarning } from "@/components/ClaimFirstWarning";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -131,6 +133,33 @@ export default function SendTipPage() {
   });
 
   const [showEncryptAnim, setShowEncryptAnim] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Derive the allowed recipient address types for the selected token.
+  // mockft → Cadence only; mockusdc → EVM only; flow → both.
+  const allowedRecipientTypes = TOKEN_RECIPIENT_TYPES[selectedToken as keyof typeof TOKEN_RECIPIENT_TYPES] as ReadonlyArray<"cadence" | "evm">;
+
+  // Validate whether the current recipient input is allowed for this token.
+  const recipientTypeOk = (() => {
+    if (!recipient) return true;
+    if (allowedRecipientTypes.includes("cadence" as never) && allowedRecipientTypes.includes("evm" as never)) return isValidRecipient(recipient);
+    if (allowedRecipientTypes.includes("evm" as never)) return isEvmAddr(recipient);
+    if (allowedRecipientTypes.includes("cadence" as never)) return isFlowAddr(recipient);
+    return false;
+  })();
+
+  // Human-readable label + placeholder for the recipient field.
+  const recipientFieldLabel = (() => {
+    if (allowedRecipientTypes.length === 2) return "Recipient Cadence or EVM address";
+    if (allowedRecipientTypes[0] === "evm") return "Recipient EVM address (0x…40 hex)";
+    return "Recipient Cadence address (0x…16 hex)";
+  })();
+
+  const recipientFieldPlaceholder = (() => {
+    if (allowedRecipientTypes.length === 2) return "0x... (16-hex Cadence or 40-hex EVM)";
+    if (allowedRecipientTypes[0] === "evm") return "0x... (40-hex EVM address)";
+    return "0x... (16-hex Cadence address)";
+  })();
 
   // Debounced recipient check — handles both Flow and EVM addresses
   useEffect(() => {
@@ -159,11 +188,13 @@ export default function SendTipPage() {
             setResolvedMemoPubkey(memoPub);
           }
         } else {
-          // Flow address: check COA + memokey
+          // Cadence address: check COA + memokey
+          // For mockft: COA is needed only for memokey lookup, NOT for the tx address.
           const [coaOk, memoPub] = await Promise.all([
             recipientHasCoa(recipient),
             getRecipientMemoPubkey(recipient, selectedToken === "mockft" ? "flow" : selectedToken),
           ]);
+          // Resolve COA EVM address for display and memokey lookup — never used as tx recipient for mockft.
           let resolvedCoa: string | null = null;
           if (coaOk) {
             try {
@@ -293,6 +324,40 @@ export default function SendTipPage() {
     }
   }, [userAddress, senderCoaEvmAddr, selectedToken]);
 
+  // Fetch pending inbox count for claim-first warning.
+  // Fires once senderCoaEvmAddr is resolved and again on every token switch.
+  useEffect(() => {
+    if (!userAddress || !senderCoaEvmAddr) return;
+    let cancelled = false;
+    (async () => {
+      const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+      const memoPrivkey = getCachedMemoPrivkey(userAddress);
+      if (!memoPrivkey) { setPendingCount(0); return; }
+      try {
+        const entry = TOKEN_REGISTRY[selectedToken];
+        const tokenList = [{
+          id: selectedToken,
+          address: TOKEN_PROXIES[selectedToken as keyof typeof TOKEN_PROXIES],
+          janusTokenAddr: entry.variant !== "cadence-ft" ? (entry as any).proxy as string : undefined,
+        }];
+        const view = await getPortfolioView(senderCoaEvmAddr, {
+          rpc: FLOW_EVM_RPC,
+          checkpointAddr: SHIELDED_CHECKPOINT_ADDRESS,
+          inboxAddr: SHIELDED_INBOX_ADDRESS,
+          tokens: tokenList,
+          memoPrivkey,
+          cadenceAddress: userAddress,
+          flowAccessNode: FLOW_CADENCE_ACCESS,
+        });
+        if (!cancelled) setPendingCount(view.tokens[selectedToken]?.pendingCount ?? 0);
+      } catch {
+        if (!cancelled) setPendingCount(0);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userAddress, senderCoaEvmAddr, selectedToken]);
+
   // Insufficient balance check
   const insufficientReason: string | null = (() => {
     if (!shielded || !amount || !isValidFlowAmount(amount)) return null;
@@ -342,8 +407,29 @@ export default function SendTipPage() {
 
     const amountWei = parseTokenAmount(amount, selectedToken);
 
-    // COA warning for Flow addresses without COA
-    if (isFlowAddr(recipientTrimmed)) {
+    // Token-aware type guard — reject mismatched address types before any network call.
+    if (selectedToken === "mockusdc" && !isEvmAddr(recipientTrimmed)) {
+      setSendState({
+        status: "error",
+        error: "mUSDC tips require an EVM address (0x + 40 hex chars). You entered a Cadence address.",
+        txId: null,
+      });
+      setShowEncryptAnim(false);
+      return;
+    }
+    if (selectedToken === "mockft" && !isFlowAddr(recipientTrimmed)) {
+      setSendState({
+        status: "error",
+        error: "MockFT tips require a Cadence address (0x + 16 hex chars). You entered an EVM address.",
+        txId: null,
+      });
+      setShowEncryptAnim(false);
+      return;
+    }
+
+    // COA warning for Cadence addresses without COA (only relevant for FLOW/EVM tokens).
+    // mockft uses Cadence address directly — COA presence is needed only for memokey lookup.
+    if (isFlowAddr(recipientTrimmed) && selectedToken !== "mockft") {
       let coaOk = recipientCoaOk;
       if (coaOk === null) {
         coaOk = await recipientHasCoa(recipientTrimmed);
@@ -362,13 +448,20 @@ export default function SendTipPage() {
 
     setSendState({ status: "resolving_coa", error: null, txId: null });
 
-    // Resolve final recipient EVM address
-    let finalRecipientEvmHex: string;
-    if (isEvmAddr(recipientTrimmed)) {
-      finalRecipientEvmHex = recipientTrimmed;
+    // Resolve final recipient address:
+    //   mockft   → Cadence address (used directly by JanusFT.shieldedTransfer)
+    //   flow     → EVM COA (Cadence input resolved; EVM input used as-is)
+    //   mockusdc → EVM address (always)
+    let finalRecipientAddr: string;
+    if (selectedToken === "mockft") {
+      // For mockft, the transaction recipient IS the Cadence address.
+      finalRecipientAddr = recipientTrimmed;
+    } else if (isEvmAddr(recipientTrimmed)) {
+      finalRecipientAddr = recipientTrimmed;
     } else {
+      // FLOW with Cadence address input → resolve EVM COA
       try {
-        finalRecipientEvmHex = await getCoaEvmAddress(recipientTrimmed);
+        finalRecipientAddr = await getCoaEvmAddress(recipientTrimmed);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "COA resolution failed";
         setSendState({ status: "error", error: msg, txId: null });
@@ -377,12 +470,24 @@ export default function SendTipPage() {
       }
     }
 
-    // MemoKey check — use already-resolved key or re-fetch
+    // For memokey lookup we always need the EVM COA, regardless of token type.
+    // For mockft with Cadence input, resolve COA separately for the memokey query.
+    let evmAddrForMemoKey: string = finalRecipientAddr;
+    if (selectedToken === "mockft" && isFlowAddr(recipientTrimmed)) {
+      try {
+        evmAddrForMemoKey = recipientEvmAddr ?? await getCoaEvmAddress(recipientTrimmed);
+      } catch {
+        // If COA lookup fails for mockft, the memokey check below will catch it.
+        evmAddrForMemoKey = finalRecipientAddr;
+      }
+    }
+
+    // MemoKey check — use already-resolved key or re-fetch.
     let recipientMemoPubkey = resolvedMemoPubkey;
     if (!recipientMemoPubkey) {
       const memoTokenId = selectedToken === "mockft" ? "flow" : selectedToken;
-      if (isEvmAddr(recipientTrimmed)) {
-        recipientMemoPubkey = await getMemoPubkeyByEvmAddr(finalRecipientEvmHex, memoTokenId);
+      if (isEvmAddr(recipientTrimmed) || selectedToken === "mockft") {
+        recipientMemoPubkey = await getMemoPubkeyByEvmAddr(evmAddrForMemoKey, memoTokenId);
       } else {
         recipientMemoPubkey = await getRecipientMemoPubkey(recipientTrimmed, memoTokenId);
       }
@@ -444,7 +549,7 @@ export default function SendTipPage() {
 
       const result = await sendTip({
         tokenId: selectedToken,
-        recipientAddr: finalRecipientEvmHex,
+        recipientAddr: finalRecipientAddr,
         amount: amountWei,
         memo: memo || undefined,
         coaEvmAddr: coaAddr,
@@ -674,6 +779,9 @@ export default function SendTipPage() {
         onDismiss={() => setShowEncryptAnim(false)}
       />
 
+      {/* Claim-first warning — shown when pending inbox notes exist for selected token */}
+      <ClaimFirstWarning pendingCount={pendingCount} tokenSymbol={tokenMeta.symbol} variant="send" />
+
       {/* Form */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}
@@ -693,18 +801,43 @@ export default function SendTipPage() {
 
         {/* Recipient field */}
         <div>
-          <label className="text-xs font-medium text-foreground/50 mb-1 block">Recipient (Flow or EVM address)</label>
+          <label className="text-xs font-medium text-foreground/50 mb-1 block">{recipientFieldLabel}</label>
           <input
             type="text"
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
-            placeholder="0x... (16 hex Flow, or 40 hex EVM)"
+            placeholder={recipientFieldPlaceholder}
             className="janus-input font-mono"
             disabled={isSubmitting || sendState.status === "success"}
           />
-          <p className="text-[10px] text-foreground/30 mt-1">
-            Cadence wallets use Flow addresses (16 hex). MetaMask/EVM-only wallets use full 40-char EVM addresses. Both work if the recipient has activated MemoKey.
-          </p>
+          {/* Token-specific address type hint */}
+          {selectedToken === "mockft" && (
+            <p className="text-[10px] text-foreground/30 mt-1">
+              MockFT tips go directly to a Cadence FT vault. Enter a Cadence address (16 hex). EVM addresses are not supported for this token.
+            </p>
+          )}
+          {selectedToken === "mockusdc" && (
+            <p className="text-[10px] text-foreground/30 mt-1">
+              mUSDC is an ERC20 token — enter a 40-char EVM address. Cadence addresses are not supported for this token.
+            </p>
+          )}
+          {selectedToken === "flow" && (
+            <p className="text-[10px] text-foreground/30 mt-1">
+              Cadence wallets use Flow addresses (16 hex). MetaMask/EVM-only wallets use full 40-char EVM addresses. Both work if the recipient has activated MemoKey.
+            </p>
+          )}
+          {/* Address type mismatch error */}
+          {recipient && !recipientTypeOk && (
+            <div className="rounded-lg border border-red-500/30 bg-red-950/20 p-2 mt-1">
+              <p className="text-[10px] text-red-400/80">
+                {selectedToken === "mockusdc" && isFlowAddr(recipient)
+                  ? "mUSDC tips require an EVM address. You entered a Cadence address."
+                  : selectedToken === "mockft" && isEvmAddr(recipient)
+                  ? "MockFT tips require a Cadence address. You entered an EVM address."
+                  : "Invalid address format for this token."}
+              </p>
+            </div>
+          )}
 
           {/* Address type + validation feedback */}
           {isValidRecipient(recipient) && (
@@ -807,7 +940,7 @@ export default function SendTipPage() {
 
         <motion.button
           onClick={handleSendTip}
-          disabled={isSubmitting || sendState.status === "success" || !shielded || recipientMemoOk === false || !!insufficientReason}
+          disabled={isSubmitting || sendState.status === "success" || !shielded || recipientMemoOk === false || !!insufficientReason || !recipientTypeOk || pendingCount > 0}
           whileHover={!isSubmitting && !!shielded && recipientMemoOk !== false && !insufficientReason ? { scale: 1.01, y: -1 } : {}}
           whileTap={{ scale: 0.99 }}
           className="janus-button-primary w-full py-3 rounded-xl text-base disabled:opacity-50 disabled:cursor-not-allowed"

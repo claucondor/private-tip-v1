@@ -13,7 +13,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { useFlowCurrentUser } from "@onflow/react-sdk";
 import { motion } from "framer-motion";
 import {
@@ -45,20 +45,23 @@ import {
   computeNetWrapAmount as computeNetWrap,
   computeWrapFeeAmount as computeWrapFee,
   getOrDeriveMemoPrivkey,
+  TOKEN_PROXIES,
   type Point,
 } from "@/lib/tip-actions";
 import { FLOWSCAN_CADENCE_TX } from "@/lib/explorer";
+import { getPortfolioView } from "@claucondor/sdk";
 // loadShieldedState and saveShieldedState removed from @/lib/store in v0.8.
 // Phase 4/5/6 will rewrite — Phase 1 left this here intentionally because it
 // consumes lib functions whose rewrite happens later.
 import { TokenSelector } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
 import { parseTokenAmount, formatTokenAmount, getTokenMeta } from "@/lib/tokens";
-import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
+import { TOKEN_REGISTRY, SHIELDED_CHECKPOINT_ADDRESS, SHIELDED_INBOX_ADDRESS, FLOW_EVM_RPC, FLOW_CADENCE_ACCESS } from "@claucondor/sdk/network";
 
 // WrapSource type shim for v0.6 (EVM-direct, no vault/coa split needed).
 type WrapSource = "vault" | "coa";
 import { PedersenCommitFormation } from "@/components/animations/PedersenCommitFormation";
+import { ClaimFirstWarning } from "@/components/ClaimFirstWarning";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -106,6 +109,8 @@ function WrapPageInner() {
   const isLoggedIn = !!user?.loggedIn && !!user?.addr;
   const userAddress = user?.addr ?? null;
 
+  const router = useRouter();
+
   // v0.6: token selector (reads ?token= URL param on mount).
   const searchParams = useSearchParams();
   const initialToken = (searchParams.get("token") ?? "flow") as TokenId;
@@ -140,6 +145,7 @@ function WrapPageInner() {
   const [showPreAnimation, setShowPreAnimation] = useState(false);
   const [showPostAnimation, setShowPostAnimation] = useState(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
 
   const tokenMeta = getTokenMeta(selectedToken);
   const tokenVariant = TOKEN_REGISTRY[selectedToken].variant;
@@ -288,31 +294,47 @@ function WrapPageInner() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedToken]);
 
-  // -- Smart setup handler ----------------------------------------------------
-
-  const handleSetupCoa = useCallback(async () => {
-    if (!userAddress) return;
-    setSettingUpCoa(true);
-    try {
-      const { smartSetupAccount, getRecipientMemoPubkey } = await import("@/lib/tip-actions");
-      toast.info("Creating COA + MemoKey (one-time setup)...");
-      const { txId } = await smartSetupAccount({ flowAddr: userAddress });
-      toast.success(`Setup complete! Tx: ${txId.slice(0, 10)}...`);
-      setNeedsCoaSetup(false);
-      const coa = await getCoaEvmAddress(userAddress);
-      setCoaHex(coa);
-      const c = await getCommitment(coa);
-      setChainCommit(c);
-      const memoPub = await getRecipientMemoPubkey(userAddress);
+  // Fetch pending inbox count for claim-first warning.
+  // Fires once coaHex is resolved and again on every token switch.
+  useEffect(() => {
+    if (!userAddress || !coaHex) return;
+    let cancelled = false;
+    (async () => {
       const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
-      const hasSessionPrivkey = getCachedMemoPrivkey(userAddress) !== null;
-      setNeedsMemoKey(memoPub === null || !hasSessionPrivkey);
-    } catch (err) {
-      toast.error(`Setup failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setSettingUpCoa(false);
-    }
-  }, [userAddress]);
+      const memoPrivkey = getCachedMemoPrivkey(userAddress);
+      if (!memoPrivkey) { setPendingCount(0); return; }
+      try {
+        const entry = TOKEN_REGISTRY[selectedToken];
+        const tokenList = [{
+          id: selectedToken,
+          address: TOKEN_PROXIES[selectedToken as keyof typeof TOKEN_PROXIES],
+          janusTokenAddr: entry.variant !== "cadence-ft" ? (entry as any).proxy as string : undefined,
+        }];
+        const view = await getPortfolioView(coaHex, {
+          rpc: FLOW_EVM_RPC,
+          checkpointAddr: SHIELDED_CHECKPOINT_ADDRESS,
+          inboxAddr: SHIELDED_INBOX_ADDRESS,
+          tokens: tokenList,
+          memoPrivkey,
+          cadenceAddress: userAddress,
+          flowAccessNode: FLOW_CADENCE_ACCESS,
+        });
+        if (!cancelled) setPendingCount(view.tokens[selectedToken]?.pendingCount ?? 0);
+      } catch {
+        if (!cancelled) setPendingCount(0);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userAddress, coaHex, selectedToken]);
+
+  // -- Smart setup handler ----------------------------------------------------
+  // Redirects to /status (the canonical activation page) instead of calling
+  // the legacy smartSetupAccount stub that throws in Phase 1.
+
+  const handleSetupCoa = useCallback(() => {
+    router.push("/status");
+  }, [router]);
 
   // -- Pre-flight check -------------------------------------------------------
 
@@ -515,7 +537,7 @@ function WrapPageInner() {
     wrapState.status === "submitting";
 
   const insufficientReason = getInsufficientReason();
-  const wrapDisabled = isSubmitting || !amount || !!insufficientReason;
+  const wrapDisabled = isSubmitting || !amount || !!insufficientReason || pendingCount > 0;
 
   // -- Unauthenticated -------------------------------------------------------
 
@@ -669,6 +691,11 @@ function WrapPageInner() {
           </div>
         </div>
       </motion.div>
+
+      {/* Claim-first warning — shown when pending inbox notes exist for selected token */}
+      {wrapState.status !== "success" && (
+        <ClaimFirstWarning pendingCount={pendingCount} tokenSymbol={tokenMeta.symbol} variant="wrap" />
+      )}
 
       {/* Pre-wrap educational animation */}
       {wrapState.status !== "success" && (

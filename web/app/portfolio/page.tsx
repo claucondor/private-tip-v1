@@ -38,7 +38,6 @@ import type { ShieldedTokenState } from "@/lib/store";
 // Phase 4 will rewrite /portfolio to use ShieldedCheckpointClient.readAndDecrypt() —
 // loadShieldedState / saveShieldedState / recoverShieldedState removed in Phase 1 (v0.8).
 import { TokenBadge } from "@/components/TokenSelector";
-import { BatchClaimCTA } from "@/components/BatchClaimCTA";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -506,23 +505,6 @@ export default function PortfolioPage() {
           </div>
         )}
       </div>
-
-      {/* Claim CTAs — one per token with pending inbox notes */}
-      {rows
-        .filter((r) => r.pendingCount > 0)
-        .map((r) => (
-          <BatchClaimCTA
-            key={r.tokenId}
-            userAddress={userAddress}
-            tokenId={r.tokenId}
-            tokenAddress={TOKEN_PROXIES[r.tokenId as keyof typeof TOKEN_PROXIES]}
-            onClaimed={() => {
-              if (userAddress && coaAddr) {
-                refreshShieldedState(userAddress, coaAddr).catch(() => {});
-              }
-            }}
-          />
-        ))}
 
       {/* Token grid */}
       <div className="space-y-3">
