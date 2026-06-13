@@ -1,17 +1,37 @@
 "use client";
 
 /// RecoveryBanner — surfaces two recovery conditions to the user:
-///   1. Pending notes in their ShieldedInbox → link to /tips to drain.
-///   2. ShieldedCheckpoint not installed → link to /status to activate.
+///   1. ShieldedCheckpoint corrupted for one or more tokens → link to /portfolio.
+///   2. MemoKey not published on-chain → link to /status to activate.
+///
+/// NOTE: pending_notes mode was removed in v0.8.1-alpha.7 fix sprint.
+///
+/// Root-cause: getCadenceInboxNotes (Cadence ShieldedInbox read via FCL) is
+/// unreliable in the banner context because:
+///   a) FCL requires a wallet interaction (unlock) to be fully warm.
+///   b) The banner fires on mount, before the user clicks Unlock.
+///   c) getCadenceInboxNotes catches any FCL error that includes the string
+///      "capabilities.borrow" (present in the Cadence script source) and
+///      silently returns [] — so an FCL-not-warm error looks identical to
+///      "account has no inbox", producing cadenceCount = 0.
+///   d) The banner useEffect only re-runs when userAddress changes, not when
+///      the user later unlocks — so the stale count (0 Cadence notes) is
+///      never corrected.
+///
+/// The portfolio page (getPortfolioView) reads the Cadence inbox correctly
+/// because it fires only after unlock (FCL warm). Per-card pending counts on
+/// /portfolio already surface this information without ambiguity.
+///
+/// Remaining modes that ARE uniquely surfaced by this banner:
+///   - corrupted_checkpoint: written to sessionStorage by portfolio; not shown per-card.
+///   - not_activated: checks EVM memoKey (reliable, no FCL query needed).
 ///
 /// Rendered globally in client-layout. Dismissible per session (local state).
-/// Resolves COA from the Flow Cadence address before querying SDK clients.
+/// Resolves COA from the Flow Cadence address before querying EVM.
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { ShieldedInboxClient, ShieldedCheckpointClient, getCoaEvmAddress, sdk, getCadenceInboxNotes, TOKEN_REGISTRY } from "@claucondor/sdk";
-import { FLOW_CADENCE_ACCESS, CADENCE_DEPLOYER_ADDRESS } from "@claucondor/sdk/network";
-import type { CadenceInboxNote } from "@claucondor/sdk";
+import { sdk, getCoaEvmAddress } from "@claucondor/sdk";
 import { X } from "lucide-react";
 
 interface RecoveryBannerProps {
@@ -19,41 +39,12 @@ interface RecoveryBannerProps {
   onDismiss?: () => void;
 }
 
-type BannerMode = "corrupted_checkpoint" | "pending_notes" | "not_activated" | null;
-
-/**
- * Read Cadence inbox notes with one retry on empty result.
- *
- * `getCadenceInboxNotes` can return [] before FCL has fully initialised
- * (race condition: banner mounts before FlowProvider's async FCL setup completes).
- * One retry after a 2 s delay resolves the race in the common case.
- * On genuine error the catch returns null so the caller can show "≥ N" instead of N.
- */
-async function getCadenceNotesWithRetry(
-  cadenceAddr: string,
-): Promise<CadenceInboxNote[] | null> {
-  const opts = {
-    flowAccessNode: FLOW_CADENCE_ACCESS,
-    inboxContractAddress: CADENCE_DEPLOYER_ADDRESS,
-  };
-  try {
-    const first = await getCadenceInboxNotes(cadenceAddr, opts);
-    if (first.length > 0) return first;
-    // Possibly FCL not warm yet — wait 2 s and try once more.
-    await new Promise<void>((r) => setTimeout(r, 2000));
-    return await getCadenceInboxNotes(cadenceAddr, opts);
-  } catch (err) {
-    console.warn("[RecoveryBanner] Cadence inbox query failed:", err);
-    return null;
-  }
-}
+type BannerMode = "corrupted_checkpoint" | "not_activated" | null;
 
 export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBannerProps) {
   const [dismissed, setDismissed] = useState(false);
   const [mode, setMode] = useState<BannerMode>(null);
-  const [pendingCount, setPendingCount] = useState(0n);
   const [corruptedTokens, setCorruptedTokens] = useState<string[]>([]);
-  const [cadenceUnavailable, setCadenceUnavailable] = useState(false);
 
   useEffect(() => {
     if (!userAddress) {
@@ -70,76 +61,32 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
 
         if (cancelled) return;
 
-        const ibClient = new ShieldedInboxClient();
-        const cpClient = new ShieldedCheckpointClient();
+        // "Activated" == has memokey published on EVM. Pure EVM call — no FCL needed.
         const adapter = sdk.token("flow");
-
-        // "Activated" == has memokey published. ShieldedCheckpoint EVM only
-        // exists AFTER the first wrap+update — its absence is NOT a setup gap.
-        const [allEvmNotes, flowMeta, musdcMeta, memoKey, cadenceNotes] = await Promise.all([
-          hasValidCoa
-            ? ibClient.peekAll(coaAddr!).catch(() => [])
-            : Promise.resolve([]),
-          // Public checkpoint metadata reads (no memoPrivkey needed) — used for cursor filter.
-          hasValidCoa
-            ? cpClient.metadata(coaAddr!, TOKEN_REGISTRY.flow.proxy).catch(() => null)
-            : Promise.resolve(null),
-          hasValidCoa
-            ? cpClient.metadata(coaAddr!, TOKEN_REGISTRY.mockusdc.proxy).catch(() => null)
-            : Promise.resolve(null),
-          hasValidCoa
-            ? adapter.getMemoKey(coaAddr!).catch(() => null)
-            : Promise.resolve(null),
-          // Cadence ShieldedInbox (MockFT notes from JanusFT.shieldedTransfer).
-          // Uses retry helper to survive FCL warm-up race (see getCadenceNotesWithRetry).
-          getCadenceNotesWithRetry(userAddress),
-        ]);
+        const memoKey = hasValidCoa
+          ? await adapter.getMemoKey(coaAddr!).catch(() => null)
+          : null;
 
         if (cancelled) return;
 
-        // Cursor-filtered EVM pending count: exclude notes already consumed by prior claims.
-        // Notes at absoluteIndex < lastConsumedNoteIndex are captured in the checkpoint and
-        // must not be counted as pending. headOffset=0 invariant holds since drainAll is
-        // never called by claimBatchAtomic, so peek array index = absolute storage index.
-        const flowCursor  = flowMeta?.lastConsumedNoteIndex  ?? 0n;
-        const musdcCursor = musdcMeta?.lastConsumedNoteIndex ?? 0n;
-        const evmCount = BigInt(
-          allEvmNotes.filter((n, idx) => {
-            const absIdx = BigInt(idx);
-            const dep = n.depositor.toLowerCase();
-            return (
-              (dep === TOKEN_REGISTRY.flow.proxy.toLowerCase()     && absIdx >= flowCursor)  ||
-              (dep === TOKEN_REGISTRY.mockusdc.proxy.toLowerCase() && absIdx >= musdcCursor)
-            );
-          }).length
-        );
+        const hasMemoKey = !!memoKey && (memoKey.x !== 0n || memoKey.y !== 0n);
 
-        if (cadenceNotes === null) {
-          setCadenceUnavailable(true);
-        } else {
-          setCadenceUnavailable(false);
-        }
-        const count = evmCount + (cadenceNotes !== null ? BigInt(cadenceNotes.length) : 0n);
-        const hasMemoKey =
-          !!memoKey && (memoKey.x !== 0n || memoKey.y !== 0n);
-
-        // Check sessionStorage for corrupted tokens (written by portfolio page).
+        // Check sessionStorage for corrupted tokens (written by portfolio page on load).
         let corrupted: string[] = [];
         try {
           corrupted = JSON.parse(sessionStorage.getItem("janus_corrupted_tokens") ?? "[]");
         } catch { /* ignore */ }
 
+        // Debug log — operator validates in browser console.
+        // pending_notes mode was removed; see per-card counts on /portfolio instead.
+        console.log("[RecoveryBanner] hasMemoKey=", hasMemoKey, "corrupted=", corrupted, "coaAddr=", coaAddr);
+
         if (corrupted.length > 0) {
           setCorruptedTokens(corrupted);
           setMode("corrupted_checkpoint");
-        } else if (count > 0n) {
-          setPendingCount(count);
-          setMode("pending_notes");
         } else if (!hasMemoKey) {
           setMode("not_activated");
         } else {
-          // Memokey published + inbox empty — nothing to surface (no checkpoint
-          // doesn't mean "not setup"; it just means no shielded state yet).
           setMode(null);
         }
       } catch {
@@ -183,18 +130,6 @@ export default function RecoveryBanner({ userAddress, onDismiss }: RecoveryBanne
                 View portfolio
               </Link>{" "}
               for details or contact support.
-            </>
-          ) : mode === "pending_notes" ? (
-            <>
-              You have{" "}
-              <strong className="text-amber-100">{cadenceUnavailable ? "≥ " : ""}{pendingCount.toString()}</strong>{" "}
-              pending shielded note{pendingCount !== 1n ? "s" : ""}{cadenceUnavailable ? " (Cadence inbox unavailable)" : ""}.{" "}
-              <Link
-                href="/portfolio"
-                className="underline underline-offset-2 font-medium hover:text-amber-100 transition-colors"
-              >
-                Claim pending
-              </Link>
             </>
           ) : (
             <>
