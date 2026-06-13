@@ -44,10 +44,9 @@ import {
   getOrDeriveMemoPrivkey,
   getCoaEvmAddress,
 } from "@/lib/tip-actions";
-import { decryptSnapshot } from "@claucondor/sdk/crypto";
-import { ShieldedInboxClient } from "@claucondor/sdk";
-import type { InboxNote, NoteContent } from "@claucondor/sdk";
-import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
+import { ShieldedInboxClient, getCadenceInboxNotes } from "@claucondor/sdk";
+import type { InboxNote, NoteContent, CadenceInboxNote } from "@claucondor/sdk";
+import { TOKEN_REGISTRY, FLOW_CADENCE_ACCESS, CADENCE_DEPLOYER_ADDRESS } from "@claucondor/sdk/network";
 import { getCachedMemoPrivkey } from "@/lib/memo-key-session";
 import {
   findSentMemo,
@@ -138,15 +137,35 @@ export default function TipsPage() {
 
   const [activeFilter, setActiveFilter] = useState<TipFilter>("all");
 
-  // ShieldedInbox per-token received notes (EVM inbox — FLOW + mUSDC; MockFT uses Cadence path)
+  // EVM ShieldedInbox — FLOW + mUSDC notes (JanusFlow / JanusERC20 shieldedTransfer)
   const [coaAddr, setCoaAddr] = useState<string | null>(null);
   const [inboxNotes, setInboxNotes] = useState<InboxNote[]>([]);
   const [inboxLoading, setInboxLoading] = useState(false);
 
-  // Resolve COA and load inbox notes on mount
+  // Cadence ShieldedInbox — MockFT notes (JanusFT.shieldedTransfer writes here)
+  // depositor field = sender's Cadence address (not the JanusFT contract)
+  const [mockftCadenceNotes, setMockftCadenceNotes] = useState<CadenceInboxNote[]>([]);
+  const [mockftCadenceLoading, setMockftCadenceLoading] = useState(false);
+
+  // Helper: load MockFT Cadence inbox for a given Cadence address
+  const loadMockftCadenceInbox = useCallback(async (cadenceAddr: string, signal?: { cancelled: boolean }) => {
+    setMockftCadenceLoading(true);
+    try {
+      const notes = await getCadenceInboxNotes(cadenceAddr, {
+        flowAccessNode: FLOW_CADENCE_ACCESS,
+        inboxContractAddress: CADENCE_DEPLOYER_ADDRESS,
+      }).catch(() => [] as CadenceInboxNote[]);
+      if (!signal?.cancelled) setMockftCadenceNotes(notes);
+    } catch { /* non-fatal */ } finally {
+      if (!signal?.cancelled) setMockftCadenceLoading(false);
+    }
+  }, []);
+
+  // Resolve COA and load EVM inbox + Cadence inbox on mount
   useEffect(() => {
     if (!userAddress) return;
     let cancelled = false;
+    const signal = { cancelled };
     (async () => {
       try {
         const coa = await getCoaEvmAddress(userAddress);
@@ -159,9 +178,11 @@ export default function TipsPage() {
       } catch { /* non-fatal */ } finally {
         if (!cancelled) setInboxLoading(false);
       }
+      // Load Cadence inbox for MockFT (uses Cadence address, not EVM COA)
+      await loadMockftCadenceInbox(userAddress, signal);
     })();
-    return () => { cancelled = true; };
-  }, [userAddress]);
+    return () => { cancelled = true; signal.cancelled = true; };
+  }, [userAddress, loadMockftCadenceInbox]);
 
   const handleRefreshInbox = useCallback(async () => {
     if (!coaAddr) return;
@@ -173,17 +194,30 @@ export default function TipsPage() {
     } catch { /* non-fatal */ } finally {
       setInboxLoading(false);
     }
-  }, [coaAddr]);
+    // Also refresh Cadence inbox
+    if (userAddress) {
+      await loadMockftCadenceInbox(userAddress);
+    }
+  }, [coaAddr, userAddress, loadMockftCadenceInbox]);
 
-  // Filter inbox notes by depositor (token contract address)
+  // Filter EVM inbox notes by depositor (token contract address — FLOW + mUSDC only)
   const flowInboxNotes = inboxNotes.filter(
     (n) => n.depositor.toLowerCase() === TOKEN_REGISTRY.flow.proxy.toLowerCase()
   );
   const musdcInboxNotes = inboxNotes.filter(
     (n) => n.depositor.toLowerCase() === TOKEN_REGISTRY.mockusdc.proxy.toLowerCase()
   );
-  // MockFT (cadence-ft) uses Cadence inbox — EVM inbox never has MockFT notes
-  const mockftInboxNotes: InboxNote[] = [];
+
+  // MockFT notes come from the Cadence inbox (JanusFT.shieldedTransfer writes there).
+  // Convert CadenceInboxNote → InboxNote shape so TokenInboxSection/InboxNoteCard can render them.
+  // blockHeight maps to blockNumber; sender (Cadence addr) maps to depositor.
+  const mockftInboxNotes: InboxNote[] = mockftCadenceNotes.map((n) => ({
+    ciphertext: n.ciphertext,
+    ephPubkeyX: n.ephPubkeyX,
+    ephPubkeyY: n.ephPubkeyY,
+    depositor: n.sender,       // Cadence address of sender (e.g. "0x7599043aea001283")
+    blockNumber: n.blockHeight, // Cadence block height used as blockNumber for display
+  }));
 
   const receivedQuery = useFlowQuery({
     cadence: buildGetShieldedTipsByRecipientWithMemoScript(),
@@ -438,14 +472,13 @@ export default function TipsPage() {
             currentUser={userAddress ?? ""}
           />
 
-          {/* MockFT inbox section — always empty (Cadence path) */}
+          {/* MockFT inbox section — Cadence ShieldedInbox (JanusFT.shieldedTransfer writes here) */}
           <TokenInboxSection
-            label="MockFT tips received"
+            label="MockFT tips received (Cadence inbox)"
             symbol="MockFT"
             notes={mockftInboxNotes}
-            loading={false}
+            loading={mockftCadenceLoading}
             currentUser={userAddress ?? ""}
-            cadencePathNote="MockFT uses the Cadence inbox path — EVM inbox notes not applicable in v0.8.2."
           />
         </div>
       )}
@@ -562,6 +595,29 @@ function InboxNoteCard({
       setDecrypting(false);
     }
   }, [note, currentUser]);
+
+  // Auto-decrypt on mount when memokey is already in sessionStorage
+  // (operator has already signed this session via wrap/portfolio).
+  // Does NOT trigger a wallet popup — falls back to manual button if not cached.
+  useEffect(() => {
+    const privkey = getCachedMemoPrivkey(currentUser);
+    if (!privkey) return;
+    let cancelled = false;
+    setDecrypting(true);
+    decryptNote(note.ciphertext, { x: note.ephPubkeyX, y: note.ephPubkeyY }, privkey)
+      .then((content) => { if (!cancelled) setDecrypted(content); })
+      .catch((err) => {
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : "Decryption failed";
+          console.debug("[InboxNoteCard] auto-decrypt failed:", msg);
+          setDecryptError(msg);
+        }
+      })
+      .finally(() => { if (!cancelled) setDecrypting(false); });
+    return () => { cancelled = true; };
+  // note and currentUser are stable per card instance; run once on mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="rounded border border-border bg-card p-3 text-xs space-y-1.5">
