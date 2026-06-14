@@ -13,9 +13,9 @@ import { TokenSelector, TokenBadge } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
 import {
   FT_CONFIGS,
-  checkReceiverCapability,
   signSetupTx,
 } from "@/lib/ft-setup";
+import { checkMockFTVaultVersion, reinstallMockFTVault } from "@claucondor/sdk";
 // checkJanusFTRegistryState and signInstallJanusFTRegistryTx removed in v0.8.
 // Phase 3 will rewrite using activateAccount() from tip-actions.ts.
 
@@ -55,9 +55,12 @@ function FaucetPageInner() {
   const [states, setStates] = useState<Partial<Record<TokenId, ClaimState>>>({});
   const [info, setInfo] = useState<FaucetInfo | null>(null);
 
-  // MockFT vault state: null = unknown/checking, true = ready, false = needs setup
-  const [hasMockFTVault, setHasMockFTVault] = useState<boolean | null>(null);
+  // MockFT vault status: null = unknown/checking, "ok" = ready, "outdated" = old cap type,
+  // "missing" = no vault, "unknown" = unexpected state
+  type MockFTVaultStatus = "ok" | "outdated" | "missing" | "unknown" | null;
+  const [mockFTVaultStatus, setMockFTVaultStatus] = useState<MockFTVaultStatus>(null);
   const [isSettingUpVault, setIsSettingUpVault] = useState(false);
+  const [reinstalling, setReinstalling] = useState(false);
 
   useEffect(() => {
     if (userAddress && !recipient) setRecipient(userAddress);
@@ -72,13 +75,12 @@ function FaucetPageInner() {
 
   // Re-check MockFT vault whenever the wallet address changes or mockft is selected.
   const recheckMockFTVault = useCallback(async (addr: string) => {
-    setHasMockFTVault(null);
+    setMockFTVaultStatus(null);
     try {
-      const ready = await checkReceiverCapability(addr, FT_CONFIGS.mockft);
-      setHasMockFTVault(ready);
+      const status = await checkMockFTVaultVersion(addr);
+      setMockFTVaultStatus(status);
     } catch {
-      // If the check fails (e.g. script error), assume not set up.
-      setHasMockFTVault(false);
+      setMockFTVaultStatus("unknown");
     }
   }, []);
 
@@ -86,7 +88,7 @@ function FaucetPageInner() {
     if (selectedToken === "mockft" && recipient && /^0x[a-fA-F0-9]{16}$/.test(recipient)) {
       recheckMockFTVault(recipient);
     } else if (selectedToken !== "mockft") {
-      setHasMockFTVault(null);
+      setMockFTVaultStatus(null);
     }
   }, [selectedToken, recipient, recheckMockFTVault]);
 
@@ -106,7 +108,7 @@ function FaucetPageInner() {
       toast.success("MockFT receiver set up ✓", {
         description: `tx: ${txId.slice(0, 12)}…`,
       });
-      // Re-check state — should now be true.
+      // Re-check state — should now be "ok".
       await recheckMockFTVault(userAddress);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Setup failed";
@@ -115,6 +117,35 @@ function FaucetPageInner() {
       setIsSettingUpVault(false);
     }
   }, [userAddress, recheckMockFTVault]);
+
+  const handleReinstallMockFT = useCallback(async () => {
+    if (!userAddress) {
+      toast.error("Connect your wallet first");
+      return;
+    }
+    setReinstalling(true);
+    try {
+      const fcl = await import("@onflow/fcl");
+      const txTemplate = reinstallMockFTVault();
+      const txId = await fcl.mutate({
+        cadence: txTemplate.cadence,
+        args: txTemplate.args,
+        proposer: fcl.authz,
+        payer: fcl.authz,
+        authorizations: [fcl.authz],
+        limit: 9999,
+      });
+      await fcl.tx(txId).onceSealed();
+      toast.success("MockFT vault reinstalled — you can now receive v0.8 tokens");
+      const newStatus = await checkMockFTVaultVersion(userAddress);
+      setMockFTVaultStatus(newStatus);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Reinstall failed";
+      toast.error("Reinstall failed", { description: msg });
+    } finally {
+      setReinstalling(false);
+    }
+  }, [userAddress]);
 
   const handleClaim = useCallback(async (token: TokenId) => {
     if (!isValidFlowAddress(recipient)) {
@@ -224,8 +255,36 @@ function FaucetPageInner() {
           </div>
         )}
 
-        {/* Setup vault button — shown when MockFT selected and vault not yet set up */}
-        {selectedToken === "mockft" && hasMockFTVault === false && (
+        {/* Reinstall banner — shown when MockFT selected and vault is outdated (pre-v0.8 cap type) */}
+        {selectedToken === "mockft" && mockFTVaultStatus === "outdated" && (
+          <div className="rounded-lg border border-amber-700/40 bg-amber-900/20 p-4">
+            <p className="text-sm font-medium text-amber-200 mb-1">MockFT vault outdated</p>
+            <p className="text-xs text-amber-100/80 mb-3">
+              Your MockFT vault is from an older version. MockFT v0.8 tokens sent to you will not appear.
+              Reinstall to receive v0.8 tokens.
+            </p>
+            <button
+              onClick={handleReinstallMockFT}
+              disabled={reinstalling || !userAddress}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded border border-amber-500/50 bg-amber-500/10 text-amber-300 text-sm font-medium hover:bg-amber-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {reinstalling ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Reinstalling…
+                </>
+              ) : (
+                <>
+                  <Wrench className="w-4 h-4" />
+                  Reinstall MockFT vault
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* Setup vault button — shown when MockFT selected and vault is missing */}
+        {selectedToken === "mockft" && mockFTVaultStatus === "missing" && (
           <button
             onClick={handleSetupVault}
             disabled={isSettingUpVault || !userAddress}
@@ -246,7 +305,7 @@ function FaucetPageInner() {
         )}
 
         {/* Vault checking spinner */}
-        {selectedToken === "mockft" && hasMockFTVault === null && recipient && (
+        {selectedToken === "mockft" && mockFTVaultStatus === null && recipient && (
           <div className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-white/10 bg-white/5 text-foreground/40 text-sm">
             <Loader2 className="w-4 h-4 animate-spin" />
             Checking MockFT vault…
@@ -259,7 +318,7 @@ function FaucetPageInner() {
           disabled={
             isSubmitting ||
             !recipient ||
-            (selectedToken === "mockft" && hasMockFTVault !== true)
+            (selectedToken === "mockft" && mockFTVaultStatus !== "ok" && mockFTVaultStatus !== "unknown")
           }
           className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded border border-[#00EF8B]/50 bg-[#00EF8B]/10 text-[#00EF8B] font-medium hover:bg-[#00EF8B]/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
@@ -308,7 +367,7 @@ function FaucetPageInner() {
         <div className="flex flex-wrap gap-2">
           {(["flow", "mockusdc", "mockft"] as TokenId[]).map((token) => {
             const s = getState(token);
-            const blockedByVaultSetup = token === "mockft" && hasMockFTVault !== true;
+            const blockedByVaultSetup = token === "mockft" && mockFTVaultStatus !== "ok" && mockFTVaultStatus !== "unknown";
             const isDisabled = s.status === "submitting" || s.status === "success" || blockedByVaultSetup;
             const label = s.status === "success"
               ? "Sent!"

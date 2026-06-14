@@ -124,12 +124,12 @@ transaction {
     let vault <- ${cfg.contractName}.createEmptyVault(vaultType: Type<@${cfg.contractName}.Vault>())
     signer.storage.save(<-vault, to: ${cfg.vaultStoragePath})
 
-    // Publish receiver capability
-    let receiverCap = signer.capabilities.storage.issue<&{FungibleToken.Receiver}>(${cfg.vaultStoragePath})
+    // Publish receiver capability (concrete type so checkMockFTVaultVersion returns "ok")
+    let receiverCap = signer.capabilities.storage.issue<&${cfg.contractName}.Vault>(${cfg.vaultStoragePath})
     signer.capabilities.publish(receiverCap, at: ${cfg.receiverPublicPath})
 
-    // Publish balance capability
-    let balanceCap = signer.capabilities.storage.issue<&{FungibleToken.Balance}>(${cfg.vaultStoragePath})
+    // Publish balance capability (concrete type so checkMockFTVaultVersion returns "ok")
+    let balanceCap = signer.capabilities.storage.issue<&${cfg.contractName}.Vault>(${cfg.vaultStoragePath})
     signer.capabilities.publish(balanceCap, at: ${cfg.balancePublicPath})
   }
 }
