@@ -30,6 +30,11 @@ import {
 import { toast } from "sonner";
 import CheckpointStatus from "@/components/CheckpointStatus";
 import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
+import {
+  checkJanusResourcesStatus,
+  reinstallAllJanusResources,
+  type ResourcesStatus,
+} from "@claucondor/sdk";
 
 interface StatusResult {
   accountExists: boolean;
@@ -79,6 +84,9 @@ export default function StatusPage() {
   const [slotsInitialized, setSlotsInitialized] = useState<boolean | null>(null);
   // COA address captured during status check (needed for step3 handler)
   const [coaForStep3, setCoaForStep3] = useState<string | null>(null);
+  // Janus Cadence resources status (outdated resource detection)
+  const [resourcesStatus, setResourcesStatus] = useState<ResourcesStatus | null>(null);
+  const [reinstallingResources, setReinstallingResources] = useState(false);
 
   // Pre-fill with own wallet on first load.
   useEffect(() => {
@@ -93,6 +101,8 @@ export default function StatusPage() {
     import("@/lib/memo-key-session").then(({ getCachedMemoPrivkey }) => {
       setSessionHasKey(getCachedMemoPrivkey(userAddress) !== null);
     });
+    // Check for outdated Janus Cadence resources (own address only)
+    checkJanusResourcesStatus(userAddress).then(setResourcesStatus).catch(() => null);
   }, [userAddress, result, address]);
 
   const runCheck = useCallback(async (addr: string) => {
@@ -242,6 +252,45 @@ export default function StatusPage() {
       toast.error("Unlock failed", { description: msg });
     }
   }, [userAddress]);
+
+  const handleReinstallResources = useCallback(async () => {
+    if (!userAddress || !resourcesStatus) return;
+    setReinstallingResources(true);
+    try {
+      const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+      const memoPrivkey = getCachedMemoPrivkey(userAddress);
+      if (!memoPrivkey) throw new Error("Session key required. Unlock first.");
+
+      const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
+      const pubkey = await pubkeyFromPrivkey(memoPrivkey);
+
+      const fcl = await import("@onflow/fcl");
+      const tx = reinstallAllJanusResources();
+      const txId = await fcl.mutate({
+        cadence: tx.cadence,
+        args: (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
+          arg(pubkey.x.toString(), t.UInt256),
+          arg(pubkey.y.toString(), t.UInt256),
+          arg(resourcesStatus.mockFTVault === "outdated", t.Bool),
+          arg(resourcesStatus.janusFTRegistry === "outdated", t.Bool),
+          arg(resourcesStatus.memoKey === "outdated", t.Bool),
+        ],
+        proposer: fcl.authz,
+        payer: fcl.authz,
+        authorizations: [fcl.authz],
+        limit: 9999,
+      });
+      await fcl.tx(txId).onceSealed();
+      toast.success("Resources reinstalled — try wrapping again");
+      const newStatus = await checkJanusResourcesStatus(userAddress);
+      setResourcesStatus(newStatus);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error("Reinstall failed", { description: msg });
+    } finally {
+      setReinstallingResources(false);
+    }
+  }, [userAddress, resourcesStatus]);
 
   // Auto-check when address valid (debounced).
   useEffect(() => {
@@ -486,6 +535,28 @@ export default function StatusPage() {
                   <ArrowRight className="w-3.5 h-3.5" />
                 </Link>
               )}
+            </div>
+          )}
+
+          {/* Outdated Janus Cadence resources banner (own address only) */}
+          {isOwnAddress && resourcesStatus?.anyOutdated && (
+            <div className="rounded-lg border border-amber-700/40 bg-amber-900/20 p-4 mt-4">
+              <p className="text-sm font-medium text-amber-200 mb-1">Outdated Janus resources detected</p>
+              <p className="text-xs text-amber-100/80 mb-3">
+                Your Cadence storage has resources from an older Janus deployer. Wrap/send will fail with type mismatch. Reinstall to fix.
+              </p>
+              <ul className="text-xs text-amber-100/70 mb-3 list-disc list-inside">
+                {resourcesStatus.mockFTVault === "outdated" && <li>MockFT vault</li>}
+                {resourcesStatus.janusFTRegistry === "outdated" && <li>JanusFT registry</li>}
+                {resourcesStatus.memoKey === "outdated" && <li>MemoKey</li>}
+              </ul>
+              <button
+                onClick={handleReinstallResources}
+                disabled={reinstallingResources}
+                className="px-3 py-2 rounded bg-amber-700/50 border border-amber-600/50 text-amber-100 text-sm hover:bg-amber-700/70 disabled:opacity-50"
+              >
+                {reinstallingResources ? "Reinstalling…" : "Reinstall outdated resources"}
+              </button>
             </div>
           )}
 
