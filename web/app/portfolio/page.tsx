@@ -19,7 +19,9 @@ import {
   Wallet,
   RefreshCw,
   AlertTriangle,
+  ShieldAlert,
   Key,
+  Copy,
 } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -29,13 +31,13 @@ import {
   getCoaEvmAddress,
   getOrDeriveMemoPrivkey,
   getRecipientMemoPubkey,
+  TOKEN_PROXIES,
 } from "@/lib/tip-actions";
-import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei } from "@claucondor/sdk";
-import {
-  loadShieldedState,
-  type ShieldedTokenState,
-} from "@/lib/store";
-import { recoverShieldedState } from "@/lib/recovery";
+import { sdk, TOKEN_REGISTRY, getFlowVaultBalanceWei, getPortfolioView } from "@claucondor/sdk";
+import { SHIELDED_CHECKPOINT_ADDRESS, SHIELDED_INBOX_ADDRESS, FLOW_EVM_RPC, FLOW_CADENCE_ACCESS } from "@claucondor/sdk/network";
+import type { ShieldedTokenState } from "@/lib/store";
+// Phase 4 will rewrite /portfolio to use ShieldedCheckpointClient.readAndDecrypt() —
+// loadShieldedState / saveShieldedState / recoverShieldedState removed in Phase 1 (v0.8).
 import { TokenBadge } from "@/components/TokenSelector";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -44,8 +46,16 @@ interface TokenPortfolioRow {
   tokenId: TokenId;
   publicBalance: bigint | null;
   shieldedState: ShieldedTokenState | null;
+  /** Pending notes in EVM inbox not yet consolidated into checkpoint. */
+  pendingRaw: bigint | null;
+  pendingCount: number;
+  batchEligible: boolean;
   loading: boolean;
   error: string | null;
+  /** Checkpoint health — populated after getPortfolioView with janusTokenAddr. */
+  checkpointHealth: "coherent" | "stale" | "corrupted" | "not_initialized" | "unknown";
+  /** Which ops are safe to attempt (false when checkpointHealth==="corrupted"). */
+  safeOpsAvailable: { wrap: boolean; send: boolean; claim: boolean; unwrap: boolean };
 }
 
 const initialRows = (): TokenPortfolioRow[] =>
@@ -53,8 +63,13 @@ const initialRows = (): TokenPortfolioRow[] =>
     tokenId: t.id,
     publicBalance: null,
     shieldedState: null,
+    pendingRaw: null,
+    pendingCount: 0,
+    batchEligible: false,
     loading: false,
     error: null,
+    checkpointHealth: "unknown" as const,
+    safeOpsAvailable: { wrap: true, send: true, claim: true, unwrap: true },
   }));
 
 type PortfolioPageState =
@@ -87,17 +102,97 @@ export default function PortfolioPage() {
     []
   );
 
-  // Load from localStorage cache first.
+  // Phase 4 will rehydrate from ShieldedCheckpoint on mount.
+  // loadShieldedState (localStorage) removed in Phase 1 — rows start with null shieldedState.
   useEffect(() => {
     if (!userAddress) return;
-    const updated = initialRows().map((r) => ({
-      ...r,
-      shieldedState: loadShieldedState(userAddress, r.tokenId),
-    }));
-    setRows(updated);
+    setRows(initialRows());
   }, [userAddress]);
 
+  // v0.8.2: use getPortfolioView for per-token shielded + pending in one call.
+  // Reads ShieldedCheckpoint (shielded balance) and ShieldedInbox (pending notes)
+  // simultaneously, filtered per-token by depositor address.
+  const refreshShieldedState = useCallback(async (addr: string, coa: string) => {
+    const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+    const memoPrivkey = getCachedMemoPrivkey(addr);
+    if (memoPrivkey === null) {
+      setPageState("needs_unlock");
+      return;
+    }
+
+    // Build token list for getPortfolioView — map each supported token to its EVM identifier.
+    // Include janusTokenAddr for native/erc20 tokens so getPortfolioView can run the live
+    // Pedersen health check against the on-chain commitment.
+    const tokenList = SUPPORTED_TOKENS.map((t) => {
+      const entry = TOKEN_REGISTRY[t.id];
+      return {
+        id: t.id,
+        address: TOKEN_PROXIES[t.id as keyof typeof TOKEN_PROXIES],
+        // proxy IS the JanusToken contract for native+erc20; cadence-ft omits it.
+        janusTokenAddr: entry.variant !== "cadence-ft" ? entry.proxy : undefined,
+      };
+    });
+
+    try {
+      const view = await getPortfolioView(coa, {
+        rpc: FLOW_EVM_RPC,
+        checkpointAddr: SHIELDED_CHECKPOINT_ADDRESS,
+        inboxAddr: SHIELDED_INBOX_ADDRESS,
+        tokens: tokenList,
+        memoPrivkey,
+        cadenceAddress: addr,           // Cadence address — used to read Cadence inbox for MockFT
+        flowAccessNode: FLOW_CADENCE_ACCESS,
+      });
+
+      for (const t of SUPPORTED_TOKENS) {
+        const tv = view.tokens[t.id];
+        if (!tv) continue;
+        // Surface corruption in sessionStorage so RecoveryBanner can pick it up.
+        if (tv.checkpointHealth === "corrupted") {
+          try { sessionStorage.setItem("janus_corrupted_tokens", JSON.stringify(
+            [...JSON.parse(sessionStorage.getItem("janus_corrupted_tokens") ?? "[]"), t.id]
+          )); } catch { /* ignore */ }
+        }
+        // Write not_initialized tokens to sessionStorage for RecoveryBanner
+        if (tv.checkpointHealth === "not_initialized") {
+          try {
+            const existing = JSON.parse(sessionStorage.getItem("janus_not_initialized_tokens") ?? "[]");
+            if (!existing.includes(t.id)) {
+              sessionStorage.setItem("janus_not_initialized_tokens", JSON.stringify([...existing, t.id]));
+            }
+          } catch { /* ignore */ }
+        }
+
+        setRow(t.id, {
+          shieldedState: tv.shielded > 0n
+            ? {
+                balanceRaw: tv.shielded.toString(),
+                blinding: "0", // blinding not exposed by getPortfolioView — not needed for display
+                checkpointVersion: tv.checkpointVersion.toString(),
+                lastUpdatedBlock: "0",
+                inboxPendingCount: tv.pendingCount,
+              }
+            : null,
+          pendingRaw: tv.pending,
+          pendingCount: tv.pendingCount,
+          batchEligible: tv.batchEligible,
+          loading: false,
+          error: tv.decryptErrors.length > 0 ? tv.decryptErrors[0] : null,
+          checkpointHealth: tv.checkpointHealth,
+          safeOpsAvailable: tv.safeOpsAvailable,
+        });
+      }
+    } catch (err) {
+      // Non-fatal: log and leave rows as-is
+      console.warn("[portfolio] getPortfolioView failed:", err);
+      for (const t of SUPPORTED_TOKENS) {
+        setRow(t.id, { loading: false, error: null });
+      }
+    }
+  }, [setRow, setPageState]);
+
   // Determine page state: needs_wallet / needs_activation / needs_unlock / ready
+  // When transitioning to "ready", kick off shielded balance load.
   useEffect(() => {
     if (!isLoggedIn || !userAddress) {
       setPageState("needs_wallet");
@@ -110,7 +205,13 @@ export default function PortfolioPage() {
         const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
         const sessionKey = getCachedMemoPrivkey(userAddress);
         if (sessionKey !== null) {
-          if (!cancelled) setPageState("ready");
+          if (!cancelled) {
+            setPageState("ready");
+            // Kick off shielded balance read now that we have the privkey in session.
+            if (coaAddr) {
+              refreshShieldedState(userAddress, coaAddr).catch(() => {});
+            }
+          }
           return;
         }
         // No session key — check on-chain
@@ -127,7 +228,8 @@ export default function PortfolioPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [isLoggedIn, userAddress]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn, userAddress, coaAddr, refreshShieldedState]);
 
   const handleUnlock = useCallback(async () => {
     if (!userAddress) return;
@@ -136,6 +238,10 @@ export default function PortfolioPage() {
       await getOrDeriveMemoPrivkey(userAddress);
       toast.success("Private inbox unlocked");
       setPageState("ready");
+      // Immediately load shielded state with the newly-derived key.
+      if (coaAddr) {
+        refreshShieldedState(userAddress, coaAddr).catch(() => {});
+      }
     } catch (err) {
       toast.error("Unlock failed", {
         description: err instanceof Error ? err.message : String(err),
@@ -143,7 +249,7 @@ export default function PortfolioPage() {
     } finally {
       setUnlocking(false);
     }
-  }, [userAddress]);
+  }, [userAddress, coaAddr, refreshShieldedState]);
 
   // Fetch public balances for all tokens.
   const fetchPublicBalances = useCallback(async (addr: string, coa: string) => {
@@ -164,49 +270,12 @@ export default function PortfolioPage() {
         }
         setRow(t.id, { publicBalance: bal, loading: false });
       } catch (err) {
-        console.error(`[portfolio] fetchPublicBalances failed for ${t.id}:`, err);
         const msg = err instanceof Error ? err.message : "Failed";
+        console.error(`[portfolio] fetchPublicBalances failed for ${t.id}:`, err);
         setRow(t.id, { loading: false, error: msg });
       }
     }
   }, [setRow]);
-
-  // Scan on-chain snapshots for fresh shielded state.
-  const refreshShieldedState = useCallback(async (addr: string, coa: string) => {
-    if (!userAddress) return;
-    let memoPrivkey: bigint;
-    try {
-      memoPrivkey = await getOrDeriveMemoPrivkey(userAddress);
-    } catch {
-      toast.error("Wallet signature required to decrypt shielded balances");
-      return;
-    }
-
-    for (const t of SUPPORTED_TOKENS) {
-      setRow(t.id, { loading: true });
-      try {
-        const entry = TOKEN_REGISTRY[t.id];
-        const queryAddr = entry.variant === "cadence-ft" ? addr : coa;
-        const snap = await recoverShieldedState(queryAddr, memoPrivkey, t.id);
-        if (snap) {
-          const state: ShieldedTokenState = {
-            balanceRaw: snap.balance.toString(),
-            blinding: snap.blinding.toString(),
-            lastUpdatedMs: snap.timestampMs,
-          };
-          setRow(t.id, { shieldedState: state, loading: false });
-          // Also persist to localStorage.
-          const { saveShieldedState } = await import("@/lib/store");
-          saveShieldedState(userAddress, t.id, state);
-        } else {
-          setRow(t.id, { shieldedState: null, loading: false });
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Scan failed";
-        setRow(t.id, { loading: false, error: msg });
-      }
-    }
-  }, [userAddress, setRow]);
 
   // Load everything on connect. Deliberately omits `loadingAll` from deps —
   // it's set INSIDE load() and would create a re-entry loop where the
@@ -241,12 +310,19 @@ export default function PortfolioPage() {
   const handleRefresh = useCallback(async () => {
     if (!userAddress || !coaAddr) return;
     setLoadingAll(true);
-    await Promise.all([
-      fetchPublicBalances(userAddress, coaAddr),
-      refreshShieldedState(userAddress, coaAddr),
-    ]);
-    setLoadingAll(false);
-    toast.success("Portfolio refreshed");
+    try {
+      await Promise.all([
+        fetchPublicBalances(userAddress, coaAddr),
+        refreshShieldedState(userAddress, coaAddr),
+      ]);
+      toast.success("Portfolio refreshed");
+    } catch (err) {
+      toast.error("Refresh failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setLoadingAll(false);
+    }
   }, [userAddress, coaAddr, fetchPublicBalances, refreshShieldedState]);
 
   // --- State machine renders ---
@@ -402,10 +478,41 @@ export default function PortfolioPage() {
         <p className="mt-2 text-foreground/70">
           Tip privately in FLOW, USDC, or any supported token.
         </p>
-        {coaAddr && (
-          <p className="mt-1 text-[10px] font-mono text-foreground/30">
-            COA: {coaAddr.slice(0, 10)}…{coaAddr.slice(-6)}
-          </p>
+        {/* Dual identity block — Cadence + EVM COA */}
+        {(userAddress || coaAddr) && (
+          <div className="mt-2 rounded-lg border border-white/8 bg-white/3 px-3 py-2 inline-block">
+            <p className="text-[10px] text-foreground/40 font-medium mb-1">You:</p>
+            <div className="space-y-0.5">
+              {userAddress && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-foreground/40 w-14 shrink-0">Cadence:</span>
+                  <span className="text-[10px] font-mono text-foreground/60">{userAddress}</span>
+                  <button
+                    type="button"
+                    onClick={() => { navigator.clipboard.writeText(userAddress); }}
+                    className="text-foreground/30 hover:text-foreground/60 transition-colors"
+                    title="Copy Cadence address"
+                  >
+                    <Copy className="w-2.5 h-2.5" />
+                  </button>
+                </div>
+              )}
+              {coaAddr && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-foreground/40 w-14 shrink-0">EVM COA:</span>
+                  <span className="text-[10px] font-mono text-foreground/60">{coaAddr.slice(0, 10)}…{coaAddr.slice(-6)}</span>
+                  <button
+                    type="button"
+                    onClick={() => { navigator.clipboard.writeText(coaAddr); }}
+                    className="text-foreground/30 hover:text-foreground/60 transition-colors"
+                    title="Copy EVM COA address"
+                  >
+                    <Copy className="w-2.5 h-2.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
@@ -428,7 +535,30 @@ export default function PortfolioPage() {
                 <div className="flex items-center gap-3">
                   <TokenBadge id={row.tokenId} />
                   <div>
-                    <p className="text-sm font-semibold text-foreground">{token.label}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-semibold text-foreground">{token.label}</p>
+                      {/* Checkpoint health badge — only shown after getPortfolioView runs */}
+                      {row.checkpointHealth === "corrupted" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-red-900/40 border border-red-700/50 text-red-400 font-mono">
+                          corrupted
+                        </span>
+                      )}
+                      {row.checkpointHealth === "stale" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-amber-900/30 border border-amber-700/30 text-amber-400 font-mono">
+                          stale
+                        </span>
+                      )}
+                      {row.checkpointHealth === "coherent" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-emerald-900/30 border border-emerald-700/30 text-emerald-400 font-mono">
+                          coherent
+                        </span>
+                      )}
+                      {row.checkpointHealth === "not_initialized" && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-slate-800/40 border border-slate-600/50 text-slate-300 font-mono">
+                          fresh
+                        </span>
+                      )}
+                    </div>
                     <p className="text-[10px] text-foreground/40">
                       {(() => {
                         const entry = TOKEN_REGISTRY[row.tokenId];
@@ -445,7 +575,36 @@ export default function PortfolioPage() {
                 {row.loading && <Loader2 className="w-4 h-4 animate-spin text-foreground/30" />}
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mb-4">
+              {/* Corruption warning — shown when blinding is corrupted */}
+              {row.checkpointHealth === "corrupted" && (
+                <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-700/40 bg-red-950/30 px-3 py-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-[10px] text-red-300 font-medium">Checkpoint corrupted</p>
+                    <p className="text-[9px] text-red-400/70 mt-0.5">
+                      Your checkpoint blinding does not match the on-chain commitment.
+                      Send and withdraw are disabled. Contact support or use admin reset (testnet).
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* not_initialized info — shown when slot needs Step 3 or first wrap */}
+              {row.checkpointHealth === "not_initialized" && (
+                <div className="mb-3 flex items-start gap-2 rounded-lg border border-blue-700/30 bg-blue-950/20 px-3 py-2">
+                  <ShieldAlert className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-[10px] text-blue-300 font-medium">Slot not initialized</p>
+                    <p className="text-[9px] text-blue-400/70 mt-0.5">
+                      ShieldedCheckpoint slot not yet created. Wrap funds to auto-initialize, or run
+                      {" "}<Link href="/status" className="underline">Step 3 in /status</Link>.
+                      Send and withdraw are disabled until the slot is initialized.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 mb-3">
                 {/* Public balance */}
                 <div className="rounded-lg border border-white/8 bg-white/3 px-3 py-2">
                   <div className="flex items-center gap-1 mb-1">
@@ -467,15 +626,43 @@ export default function PortfolioPage() {
                     <Lock className="w-3 h-3 text-[#00EF8B]/60" />
                     <span className="text-[10px] text-[#00EF8B]/60 uppercase tracking-wide">Shielded</span>
                   </div>
-                  {hasShielded && shieldedBal !== null ? (
-                    <p className="text-sm font-mono text-[#00EF8B]">
-                      {formatTokenAmount(shieldedBal, row.tokenId, 4)} {token.symbol}
-                    </p>
-                  ) : (
-                    <p className="text-sm font-mono text-foreground/30">0.0000</p>
-                  )}
+                  <p className="text-[9px] text-foreground/25 mb-0.5">
+                    {(() => {
+                      const entry = TOKEN_REGISTRY[row.tokenId];
+                      return entry.variant === "cadence-ft" ? "tracked on Cadence" : "tracked on EVM";
+                    })()}
+                  </p>
+                  {(() => {
+                    return hasShielded && shieldedBal !== null ? (
+                      <p className="text-sm font-mono text-[#00EF8B]">
+                        {formatTokenAmount(shieldedBal, row.tokenId, 4)} {token.symbol}
+                      </p>
+                    ) : (
+                      <p className="text-sm font-mono text-foreground/30">0.0000</p>
+                    );
+                  })()}
                 </div>
               </div>
+
+              {/* Pending notes row — shown when getPortfolioView found inbox notes */}
+              {row.pendingCount > 0 && row.pendingRaw !== null && (
+                <div className="rounded-lg border border-[#6B46C1]/20 bg-[#6B46C1]/6 px-3 py-2 mb-3 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="text-[10px] text-[#8B5CF6] uppercase tracking-wide font-medium">Pending</span>
+                      {row.batchEligible && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-[#6B46C1]/25 text-[#8B5CF6] font-mono">
+                          Batch eligible · lower gas
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm font-mono text-[#8B5CF6]">
+                      {formatTokenAmount(row.pendingRaw, row.tokenId, 4)} {token.symbol}
+                      <span className="text-[10px] text-foreground/40 ml-1">({row.pendingCount} note{row.pendingCount !== 1 ? "s" : ""})</span>
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {row.error && (
                 <div className="mb-3 flex items-center gap-2 text-[10px] text-amber-400/70">
@@ -484,8 +671,8 @@ export default function PortfolioPage() {
                 </div>
               )}
 
-              {/* Quick actions */}
-              <div className="flex gap-2">
+              {/* Quick actions — disabled when safeOpsAvailable[op] === false */}
+              <div className="flex gap-2 flex-wrap">
                 <Link
                   href={`/wrap?token=${row.tokenId}`}
                   className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-white/12 bg-white/4 text-xs text-foreground/70 hover:bg-white/8 transition-colors"
@@ -493,21 +680,54 @@ export default function PortfolioPage() {
                   Wrap
                   <ArrowRight className="w-3 h-3" />
                 </Link>
-                <Link
-                  href={`/send?token=${row.tokenId}`}
-                  className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#6B46C1]/25 bg-[#6B46C1]/8 text-xs text-[#6B46C1] hover:bg-[#6B46C1]/15 transition-colors"
-                >
-                  Send
-                  <ArrowRight className="w-3 h-3" />
-                </Link>
-                {hasShielded && (
+                {row.safeOpsAvailable.send ? (
                   <Link
-                    href={`/claim?token=${row.tokenId}`}
-                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#00EF8B]/20 bg-[#00EF8B]/6 text-xs text-[#00EF8B] hover:bg-[#00EF8B]/12 transition-colors"
+                    href={`/send?token=${row.tokenId}`}
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#6B46C1]/25 bg-[#6B46C1]/8 text-xs text-[#6B46C1] hover:bg-[#6B46C1]/15 transition-colors"
                   >
-                    Claim
+                    Send
                     <ArrowRight className="w-3 h-3" />
                   </Link>
+                ) : (
+                  <span
+                    title={row.checkpointHealth === "not_initialized"
+                      ? "Send disabled: slot not initialized. Run Step 3 in /status or wrap funds first."
+                      : "Send disabled: checkpoint corrupted. Admin reset required."}
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#6B46C1]/12 bg-[#6B46C1]/4 text-xs text-[#6B46C1]/30 cursor-not-allowed"
+                  >
+                    Send
+                    <ArrowRight className="w-3 h-3" />
+                  </span>
+                )}
+                {row.pendingCount > 0 && row.safeOpsAvailable.claim && (
+                  <Link
+                    href={`/claim?token=${row.tokenId}`}
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#8B5CF6]/30 bg-[#6B46C1]/8 text-xs text-[#8B5CF6] hover:bg-[#6B46C1]/15 transition-colors"
+                  >
+                    Claim {row.pendingCount}
+                    <ArrowRight className="w-3 h-3" />
+                  </Link>
+                )}
+                {hasShielded && (
+                  row.safeOpsAvailable.unwrap ? (
+                    <Link
+                      href={`/withdraw?token=${row.tokenId}`}
+                      className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#00EF8B]/20 bg-[#00EF8B]/6 text-xs text-[#00EF8B] hover:bg-[#00EF8B]/12 transition-colors"
+                    >
+                      Withdraw
+                      <ArrowRight className="w-3 h-3" />
+                    </Link>
+                  ) : (
+                    <span
+                      title={row.checkpointHealth === "not_initialized"
+                        ? "Withdraw disabled: slot not initialized. Run Step 3 in /status or wrap funds first."
+                        : "Withdraw disabled: checkpoint corrupted. Admin reset required."}
+                      className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-[#00EF8B]/10 bg-[#00EF8B]/3 text-xs text-[#00EF8B]/30 cursor-not-allowed"
+                    >
+                      Withdraw
+                      <ArrowRight className="w-3 h-3" />
+                    </span>
+                  )
                 )}
               </div>
             </motion.div>

@@ -1,0 +1,158 @@
+{
+  "scenario": "batch-claim-musdc",
+  "started": "2026-06-10T16:24:33.855Z",
+  "steps": {
+    "fund_alice": {
+      "cadenceTxId": "897c35f630b407c8dbea9814fe8e0d693d4ed758b66607e74aaf7970fc7e7340"
+    },
+    "admin_reset": {
+      "cadenceTxId": "cf2ff701ee5ce7907219b823a8a403aa988e27747cec1e3c4550c2733ddd5510",
+      "targets": [
+        "0xFc47B35f79d26A060B652E112c53d7c6057d05FF"
+      ],
+      "bobIsFresh": true,
+      "proxy": "0xFD8F82bE1782AF1F85f4673065e94fb3F8D5387d"
+    },
+    "memokeys": {
+      "alice": null,
+      "bob": "0x9e327a320307fef817fb73e406bb4bc278c9574b6601b3d7e24fbb8dcb5cc4f5",
+      "charlie": "0x1423a619b6effc702a1d0179cb29ca9f5df83192662ec3038589248a0890175e"
+    },
+    "mint_approve": {
+      "mintTxHash": "0x56abb61df956b74a5c6f73e0bdcaf0a3654f849496785f5db80574967d924b8c",
+      "approveTxHash": "0x9931a1a02dcd31865131b7efcfad3184f61baa1ca100784fe5bff836527daae9",
+      "mintAmount": "100000000",
+      "balanceAfter": "576500000"
+    },
+    "alice_wrap": {
+      "txHash": "0xd2889aff8888d6ab5b76ba0891e13ff40d36c4c910aca125705fd2f7d7f76ef3",
+      "checkpointTx": "0x3195e078a2fc731ee98ca6a0ea29696a5dc322df5999e9ae113768b54d18e6e4",
+      "netAmount": "60000000"
+    },
+    "alice_checkpoint_after_tips": {
+      "txHash": "0x1b2cddf7a7dd813c64ff19f8eebb2bb722d17491de50fdd77d058852954f3a5a"
+    },
+    "alice_tips": {
+      "count": 6,
+      "tipAmount": "10000000",
+      "txHashes": [
+        "0xec418989aaf92a75d9b27b07edefe25c6941f6d9e36b5568096c23bb645a527e",
+        "0x2a20a5a4359d2bcf4f3dd47bebbe1a90a3ea3c8a79360ff3ffc7f3d99baf925f",
+        "0xe1e799c52b035abda9516848aef6f6c92fd92873dbee488bf5f88674ad2a6810",
+        "0xd087b683f814ac31491bdb82e588907feb9c1cbc504188dde84c09bf037cedc9",
+        "0x7f3147e1d7be701846ff2518802d3bb6a08bc5586f1e821da4fe6a6889a1343b",
+        "0xbb6dce97081f6c6859a75eda5018e2c30aa5ed0f8e4dbd73c3e5cadfeb793bec"
+      ],
+      "aliceResidual": "0"
+    },
+    "inbox_drain": {
+      "drainTxHash": "0xa1456ec183a7ab7a59b9c95baef95a6ff63b3432c9c3557d36c9912681f390dc",
+      "noteCount": 6,
+      "failedCount": 0,
+      "blindingSum": "9854337826614175593221713542697817693762625149307052567884998360777011223453",
+      "blindingOverflows2_252": true,
+      "blindingOverflowsSUBORDER": true,
+      "notes": [
+        {
+          "amount": "10000000",
+          "blinding": "22854402547459922021..."
+        },
+        {
+          "amount": "10000000",
+          "blinding": "26370861896055657765..."
+        },
+        {
+          "amount": "10000000",
+          "blinding": "15349245691669529001..."
+        },
+        {
+          "amount": "10000000",
+          "blinding": "25679740527101712637..."
+        },
+        {
+          "amount": "10000000",
+          "blinding": "16958481984727141560..."
+        },
+        {
+          "amount": "10000000",
+          "blinding": "15064421325577884934..."
+        }
+      ]
+    },
+    "pre_batch_transfer": {
+      "bobCommitX": "17135236148586499029583693636413832859533184299832416180948419574520559020564",
+      "bobCommitY": "14454716270722462933075241320769517411993789316974140138985475484801790976304",
+      "bobCommitIsIdentity": false,
+      "blindingSum": "9854337826614175593221713542697817693762625149307052567884998360777011223453",
+      "blindingOverflows2_252": true,
+      "blindingOverflowsSUBORDER": true,
+      "failed": true,
+      "reason": "Accumulated blinding (98543378266141755932...) >= SUBORDER. computeCommitment would throw RangeError — regular shieldedTransfer impossible without batchClaim."
+    },
+    "batch_claim": {
+      "txHash": "0x9ce8e7e810c17d26738d81915dc0c1075da5fd2331ec09eec3241bf6a9ef8f1b",
+      "verifier": "0x2FBf6baef1D70f5A9aFF2602c934Bd62dcf6Df80",
+      "newBalance": "60000000",
+      "freshBlinding": "528645175237533127019684886530895548366178598834267739106721120725795193616",
+      "newCommit": {
+        "x": "12377787085871906742357939726398188978028409699992879411773309666728826869299",
+        "y": "10765543514023344645590639889202737055163647984542892190887466050387194733169"
+      },
+      "publicInputs": [
+        "17135236148586499029583693636413832859533184299832416180948419574520559020564",
+        "14454716270722462933075241320769517411993789316974140138985475484801790976304",
+        "12377787085871906742357939726398188978028409699992879411773309666728826869299",
+        "10765543514023344645590639889202737055163647984542892190887466050387194733169",
+        "0",
+        "1"
+      ]
+    },
+    "bob_checkpoint": {
+      "txHash": "0x8530ada1eec5fdeb0548db5907baf2e22bffabfe039e2eea90ecd82fe32fd3ad"
+    },
+    "commit_verify": {
+      "onChain": {
+        "x": "12377787085871906742357939726398188978028409699992879411773309666728826869299",
+        "y": "10765543514023344645590639889202737055163647984542892190887466050387194733169"
+      },
+      "local": {
+        "x": "12377787085871906742357939726398188978028409699992879411773309666728826869299",
+        "y": "10765543514023344645590639889202737055163647984542892190887466050387194733169"
+      },
+      "match": true
+    },
+    "post_batch_checkpoint": {
+      "txHash": "0x4789d5c11419cd526b8e942f849972181680cae3d7708d81cf7bb26be7e30bd0"
+    },
+    "post_batch_transfer": {
+      "txHash": "0xc9929632e44605ff1fd63986956cd098c60db39181c90756d40afb9f90ddb3df",
+      "amount": "5000000",
+      "failed": false,
+      "error": null,
+      "bobResidual": "55000000",
+      "expectedResidual": "55000000",
+      "residualDelta": "0",
+      "residualMatch": true
+    }
+  },
+  "verdict": "PASS",
+  "finished": "2026-06-10T16:28:56.318Z",
+  "summary": {
+    "token": "mUSDC",
+    "proxy": "0xFD8F82bE1782AF1F85f4673065e94fb3F8D5387d",
+    "adminReset": true,
+    "aliceWrapped": true,
+    "tipsDelivered": true,
+    "inboxDrained": true,
+    "blindingOverflows2_252": true,
+    "blindingOverflowsSUBORDER": true,
+    "preBatchFailed": true,
+    "batchClaimSucceeded": true,
+    "commitVerified": true,
+    "postBatchOk": true,
+    "balanceVerified": true,
+    "bobFinalBalance": "55000000",
+    "expectedBobFinal": "55000000",
+    "verdict": "PASS"
+  }
+}

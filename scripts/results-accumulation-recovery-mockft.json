@@ -1,0 +1,97 @@
+{
+  "scenario": "accumulation-recovery-mockft",
+  "started": "2026-06-10T16:29:08.923Z",
+  "aliceCadenceAddr": "0x4b6bc58bc8bf5dcc",
+  "bobCadenceAddr": "0xd807a3992d7be612",
+  "steps": {
+    "admin_reset": {
+      "cadenceTxId": "74eb18d0d136e2307c43d28b06e8ef79085e608f40c5398bb0c676b8937c2cff",
+      "target": "0x4b6bc58bc8bf5dcc"
+    },
+    "mint": {
+      "cadenceTxId": "77ba5443b937fd1a266e7f5090d40094278b2d6419bc5bea8f674dfb162a3eea",
+      "amount": "100.00000000"
+    },
+    "bob_inbox": {
+      "cadenceTxId": "d2e4c5a3a555eba7d544df2804b7e761bca7163e7f9f14e4b8082e642640c637"
+    },
+    "fee_query": {
+      "feeBps": 0
+    },
+    "wrap1": {
+      "cadenceTxId": "30a493275671b91de85a68b71e932ff3e0bbef3344d70745771aa665b77bb618",
+      "checkpointTxHash": "0x7f786d634802d8f61f41422afb96068e2bb3b2661a8163dedd302aaade32f5c9",
+      "grossAmount": "1000000000",
+      "netAmount": "1000000000",
+      "cumulativeBalance": "1000000000",
+      "cumulativeBlinding": "226895489432750315280254361060739229384985879413330806417984270796407449158",
+      "onChainCommit": {
+        "x": "13767087564982407648150240006454577132028857588733573571176537328659027655909",
+        "y": "11892499180741124331315238255599462934467271849047890695426835628687129977556"
+      }
+    },
+    "wrap2": {
+      "cadenceTxId": "e80e445fc63073fdddd7a42a33e397227d62e5881610cade210dbaf32b30aacd",
+      "checkpointTxHash": "0x6871e924274489c0e9477fd5735e7c92d1e5b6f77bed2e30ede81274e1e1fd9f",
+      "grossAmount": "500000000",
+      "netAmount": "500000000",
+      "cumulativeBalance": "1500000000",
+      "cumulativeBlinding": "374166097261230522069985689671773137726026430538988879807802726072558425349",
+      "onChainCommit": {
+        "x": "3917229240852083621981428710603127402453157288965277156081594361185224022494",
+        "y": "15374654814361574414934312167304188454416519223009699988408846836141320203914"
+      }
+    },
+    "wrap3": {
+      "cadenceTxId": "b7f51aede66ada1277a635f8a0c1674f80d53d49d444b897a08630cebbde4793",
+      "checkpointTxHash": "0xfc0065628b356d1fcec334727a2b483030bdd9cc7a837dabe23121c88a848ae7",
+      "grossAmount": "300000000",
+      "netAmount": "300000000",
+      "cumulativeBalance": "1800000000",
+      "cumulativeBlinding": "1897825894321925210399852640291723800225490785983155032059710490511816716081",
+      "onChainCommit": {
+        "x": "8084712906125595376813725211988896827319401389079432189429949832285279758302",
+        "y": "3206575198851845217682808193092751562850168936749590557174276271363674814722"
+      }
+    },
+    "state_recovery": {
+      "recoveredBalance": "1800000000",
+      "recoveredBlinding": "1897825894321925210399852640291723800225490785983155032059710490511816716081",
+      "expectedBalance": "1800000000",
+      "expectedBlinding": "1897825894321925210399852640291723800225490785983155032059710490511816716081",
+      "matchesLocal": true
+    },
+    "transfer": {
+      "cadenceTxId": "da223633c8ac46afc141b5b7f6eee7b574a1569af4b63738d0e765c16915e564",
+      "amount": "500000000",
+      "newBalance": "1300000000",
+      "checkpointTx": "0xd499a7450ca885ac2c91db3eb8890df16932693fb4cd554b829609644e70d20a",
+      "couldMismatch": false
+    },
+    "final": {
+      "onChainCommit": {
+        "x": "663086222719557174976035569770388308523755267942707506412327110164810883827",
+        "y": "12673863458668828310727003265826573462624007145729372476914001633204168274335"
+      },
+      "residualBalance": "1300000000",
+      "expectedResidual": "1300000000",
+      "residualMatch": true,
+      "transferFailed": false,
+      "transferError": null
+    }
+  },
+  "verdict": "PASS",
+  "finished": "2026-06-10T16:31:33.293Z",
+  "summary": {
+    "token": "MockFT",
+    "aliceCadence": "0x4b6bc58bc8bf5dcc",
+    "feeBps": 0,
+    "allWrapsGood": true,
+    "recoveryGood": true,
+    "transferGood": true,
+    "balanceGood": true,
+    "residualBalance": "1300000000",
+    "expectedResidual": "1300000000",
+    "verdict": "PASS"
+  }
+}

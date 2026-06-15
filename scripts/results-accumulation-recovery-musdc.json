@@ -1,0 +1,103 @@
+{
+  "scenario": "accumulation-recovery-musdc",
+  "started": "2026-06-10T16:15:33.529Z",
+  "steps": {
+    "admin_reset": {
+      "cadenceTxId": "7f7398e788aa822b0ae6b9381faedb751f6b4c3323d35dfbaedb2b3891051536",
+      "target": "0xFc47B35f79d26A060B652E112c53d7c6057d05FF",
+      "proxy": "0xFD8F82bE1782AF1F85f4673065e94fb3F8D5387d"
+    },
+    "mint": {
+      "txHash": "0x2ba8dbe2acd814ddc896e2b7fb5b1a45575197f2d72f18598826b675878a70b9",
+      "mintAmount": "100000000",
+      "balanceAfter": "454500000"
+    },
+    "approve": {
+      "txHash": "0x2c1b8d450a6452f4ec4638677daeccaa943506a3f374e7783dfcd8bddb67b7d9",
+      "amount": "100000000"
+    },
+    "memokey": {
+      "txHash": null,
+      "pubkeyX": "12795883866327346411977352568599548782053367485317932988771578674903504607179"
+    },
+    "bob_memokey": {
+      "txHash": null
+    },
+    "wrap1": {
+      "txHash": "0xd5e390c9897632d2c7e0c08cad894541b32a565477b1cf19c1c26ef53bbf53d7",
+      "checkpointTx": "0x997bc507f49a02c87f15d876202d062a2ad6a1c2466f9bfa1783329e27cd6c2d",
+      "marginalBalance": "10000000",
+      "cumulativeBalance": "10000000",
+      "cumulativeBlinding": "1934529718866536705751197973907464004330139376165148226870948598269020330471",
+      "onChainCommit": {
+        "x": "8342025125262629837106567087335947817300838188474649120257255670411045676537",
+        "y": "16347912024866217559504746782884847166554475028451971390519333902135012527396"
+      }
+    },
+    "wrap2": {
+      "txHash": "0x982c2dd2387e3c2baa9f2f1fc5e25fc73b7f64ad490d8bd27fb5cc27b720ddd5",
+      "checkpointTx": "0xf7414cbcf17450ad9c73fdf332ae235ed2447b124bd46c804607da896ae1352e",
+      "marginalBalance": "5000000",
+      "cumulativeBalance": "15000000",
+      "cumulativeBlinding": "1690015321616270998424623933088615963995530746031787683156535539958461354152",
+      "onChainCommit": {
+        "x": "7728518445029119690412585781818679676426554451240736081551062692186580737611",
+        "y": "15355960973667785220369553557502287836757135991819613723580245142676073787004"
+      }
+    },
+    "wrap3": {
+      "txHash": "0x74edd971837bcd3bfd149d11cdced58a4f075fbeb1c400be0360cc395d4ae69b",
+      "checkpointTx": "0x3137c091a8e566e52d03bcc6bbd9a1597354634c2fd14d24971a95be2eac96a7",
+      "marginalBalance": "3000000",
+      "cumulativeBalance": "18000000",
+      "cumulativeBlinding": "1387662107877378024019079868225167900456839534973669232970902868704725654818",
+      "onChainCommit": {
+        "x": "5639211123565698358880610394297339701254313281528463565671400522228163965313",
+        "y": "7252651770796709812609290701775853694894989685636552677272767223270437527238"
+      }
+    },
+    "state_recovery": {
+      "recoveredBalance": "18000000",
+      "recoveredBlinding": "1387662107877378024019079868225167900456839534973669232970902868704725654818",
+      "expectedBalance": "18000000",
+      "expectedBlinding": "1387662107877378024019079868225167900456839534973669232970902868704725654818",
+      "matchesLocal": true
+    },
+    "transfer": {
+      "txHash": "0x374e71e303909507648019131bda7e8ff9c655e7bfb3b1e151efbf7fbffafd48",
+      "amount": "5000000",
+      "newBalance": "13000000",
+      "checkpointTx": "0x3aaffd9e85c9fcab70ed9c4c0f7f7e994cf30d0b108f96379612913a192d92d4",
+      "couldMismatch": false
+    },
+    "final": {
+      "onChainAfterWraps": {
+        "x": "5639211123565698358880610394297339701254313281528463565671400522228163965313",
+        "y": "7252651770796709812609290701775853694894989685636552677272767223270437527238"
+      },
+      "onChainFinalCommit": {
+        "x": "17772513174250253768524688835311966386364417604989248539227361071771439912492",
+        "y": "3801553985379773866991445473156110872871958220139328783500755921111199854500"
+      },
+      "residualBalance": "13000000",
+      "expectedResidual": "13000000",
+      "residualMatch": true,
+      "checkpointBalance": "13000000",
+      "transferFailed": false,
+      "transferError": null
+    }
+  },
+  "verdict": "PASS",
+  "finished": "2026-06-10T16:17:34.556Z",
+  "summary": {
+    "token": "mUSDC",
+    "proxy": "0xFD8F82bE1782AF1F85f4673065e94fb3F8D5387d",
+    "allWrapsGood": true,
+    "recoveryGood": true,
+    "transferGood": true,
+    "balanceGood": true,
+    "residualBalance": "13000000",
+    "expectedResidual": "13000000",
+    "verdict": "PASS"
+  }
+}

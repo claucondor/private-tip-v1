@@ -1,11 +1,10 @@
 /// Global Zustand store for PrivateTip application state.
 ///
-/// v0.6: Extended with multi-token shielded balance support.
+/// v0.8: ShieldedTokenState is now checkpoint-backed (from ShieldedCheckpointClient.readAndDecrypt).
+/// localStorage shielded-state helpers are removed — state lives in Zustand + on-chain checkpoint.
 
 import { create } from "zustand";
-import { TOKEN_REGISTRY } from "@claucondor/sdk";
 import type { TokenId } from "./tokens";
-import { SUPPORTED_TOKENS } from "./tokens";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -30,11 +29,16 @@ export interface BalanceState {
   encryptedBalance: string | null; // display only
 }
 
-/** Shielded state for a single token (balance + blinding). */
+/**
+ * Shielded state for a single token — sourced from ShieldedCheckpointClient.readAndDecrypt().
+ * This replaces the v0.7 localStorage-based schema.
+ */
 export interface ShieldedTokenState {
-  balanceRaw: string;   // raw bigint as string (in token's native units)
-  blinding: string;     // blinding scalar as decimal string
-  lastUpdatedMs?: number;
+  balanceRaw: string;           // bigint as string, from SnapshotContent.balance
+  blinding: string;             // bigint as string, from SnapshotContent.blinding
+  checkpointVersion: string;    // from CheckpointMetadata.version
+  lastUpdatedBlock: string;     // from CheckpointMetadata.lastUpdatedBlock
+  inboxPendingCount: number;    // from ShieldedInboxClient.count()
 }
 
 /** Map of tokenId → shielded state. */
@@ -222,100 +226,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSelectedTokenId: (id) => set({ selectedTokenId: id }),
 }));
 
-// ─── localStorage shielded state helpers (per-token, per-address, per-proxy) ──
-
-/**
- * Returns the on-chain identity of a token's deployed contract.
- * For EVM variants this is the proxy address. For Cadence FT it is the
- * Cadence contract address. Used as a fingerprint in cache keys so that
- * a contract redeploy automatically orphans the old entries.
- */
-function proxyFingerprint(tokenId: TokenId): string {
-  const entry = TOKEN_REGISTRY[tokenId as keyof typeof TOKEN_REGISTRY];
-  if (!entry) return "unknown";
-  if (entry.variant === "cadence-ft") return entry.cadenceAddress.toLowerCase();
-  return entry.proxy.toLowerCase();
-}
-
-/**
- * Cache key includes the proxy fingerprint. When a contract is redeployed
- * at a new address, lookups against this key miss, triggering a fresh
- * on-chain scan instead of showing stale state from the abandoned proxy.
- */
-function shieldedKey(addr: string, tokenId: TokenId): string {
-  return `openjanus:shielded:v2:${addr.toLowerCase()}:${tokenId}:${proxyFingerprint(tokenId)}`;
-}
-
-export function loadShieldedState(
-  addr: string,
-  tokenId: TokenId
-): ShieldedTokenState | null {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(shieldedKey(addr, tokenId));
-  return raw ? (JSON.parse(raw) as ShieldedTokenState) : null;
-}
-
-export function saveShieldedState(
-  addr: string,
-  tokenId: TokenId,
-  state: ShieldedTokenState
-): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(shieldedKey(addr, tokenId), JSON.stringify(state));
-}
-
-export function clearShieldedStateForAddr(addr: string): void {
-  if (typeof window === "undefined") return;
-  for (const t of SUPPORTED_TOKENS) {
-    localStorage.removeItem(shieldedKey(addr, t.id));
-  }
-}
-
-/** Load all shielded states for an address into a map. */
-export function loadAllShieldedStates(addr: string): MultiTokenShieldedState {
-  const result: MultiTokenShieldedState = {};
-  for (const t of SUPPORTED_TOKENS) {
-    const s = loadShieldedState(addr, t.id);
-    if (s) result[t.id] = s;
-  }
-  return result;
-}
-
-/**
- * Sweep orphaned cache entries from prior contract deployments or schema
- * versions. Safe to call on every app mount — only removes entries that
- * do not match the current TOKEN_REGISTRY fingerprints.
- *
- * Removes:
- *   - Pre-v2 entries (no proxy fingerprint in key)
- *   - Entries whose fingerprint does not match the currently deployed proxy
- *   - Entries for unknown token ids
- */
-export function sweepStaleShieldedCache(): number {
-  if (typeof window === "undefined") return 0;
-  let removed = 0;
-  const validFingerprints = new Map<string, string>();
-  for (const t of SUPPORTED_TOKENS) {
-    validFingerprints.set(t.id, proxyFingerprint(t.id));
-  }
-  const toDelete: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key || !key.startsWith("openjanus:shielded:")) continue;
-    // v2 format: openjanus:shielded:v2:<addr>:<tokenId>:<fingerprint>
-    const parts = key.split(":");
-    if (parts.length !== 6 || parts[2] !== "v2") {
-      toDelete.push(key);
-      continue;
-    }
-    const tokenId = parts[4] as TokenId;
-    const fingerprintInKey = parts[5];
-    const expected = validFingerprints.get(tokenId);
-    if (!expected || expected !== fingerprintInKey) toDelete.push(key);
-  }
-  for (const key of toDelete) {
-    localStorage.removeItem(key);
-    removed++;
-  }
-  return removed;
-}
+// localStorage shielded-state helpers (loadShieldedState, saveShieldedState, clearShieldedStateForAddr,
+// loadAllShieldedStates, sweepStaleShieldedCache, proxyFingerprint, shieldedKey) were removed in v0.8.
+// State is now checkpoint-backed: use ShieldedCheckpointClient.readAndDecrypt() to rehidrate
+// from on-chain, and store the result in the Zustand shieldedBalances map.

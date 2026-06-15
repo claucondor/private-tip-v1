@@ -1,0 +1,24 @@
+{
+  "name": "private-tip-v1",
+  "version": "0.8.0",
+  "description": "PrivateTip v0.8 orchestration scripts",
+  "type": "commonjs",
+  "scripts": {
+    "01-activate": "node scripts/01-activate.cjs",
+    "02-portfolio": "node scripts/02-portfolio.cjs",
+    "03-wrap": "node scripts/03-wrap.cjs",
+    "04-send-tip": "node scripts/04-send-tip.cjs",
+    "05-tips-received": "node scripts/05-tips-received.cjs",
+    "06-tips-sent": "node scripts/06-tips-sent.cjs",
+    "07-unwrap": "node scripts/07-unwrap.cjs",
+    "08-status": "node scripts/08-status.cjs",
+    "09-faucet": "node scripts/09-faucet.cjs",
+    "10-learn": "node scripts/10-learn.cjs",
+    "99-e2e": "node scripts/99-e2e-full-cycle.cjs"
+  },
+  "dependencies": {
+    "@claucondor/sdk": "file:../../openjanus-sdk/claucondor-sdk-0.8.1-alpha.2.tgz",
+    "@openjanus/commitment": "file:../../openjanus-primitives/packages/commitment",
+    "minimist": "^1.2.8"
+  }
+}

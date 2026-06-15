@@ -4,9 +4,16 @@
 /// file I/O (Node.js only). The browser generates blindings, POSTs here,
 /// and receives the proof + publicInputs to pass into adapter.shieldedTransferViaCoa.
 ///
+/// v0.8 ABI: 6 public inputs — no snapshot in shieldedTransfer calldata.
+///   [C_old_x, C_old_y, C_tx_x, C_tx_y, C_new_x, C_new_y]
+/// Sender snapshot (checkpoint) is written separately via updateCheckpointViaCoa.
+///
+/// The SDK resolves artifact paths automatically via PACKAGE_ROOT walk-up —
+/// no hardcoded paths here.
+///
 /// Body: {
 ///   oldBalance: string,         // decimal string (current shielded balance, wei)
-///   oldBlinding: string,        // decimal string (current blinding from snapshot)
+///   oldBlinding: string,        // decimal string (current blinding from checkpoint)
 ///   transferAmount: string,     // decimal string (wei)
 ///   transferBlinding: string,   // decimal string (fresh blinding, generated client-side)
 ///   newBlinding: string,        // decimal string (fresh blinding for residual, generated client-side)
@@ -17,21 +24,9 @@
 /// }
 
 import { NextRequest, NextResponse } from "next/server";
-import { buildShieldedTransferProof } from "@claucondor/sdk/crypto";
-import path from "path";
+import { buildShieldedTransferProof } from "@claucondor/sdk";
 
 export const runtime = "nodejs";
-
-const SDK_ROOT = path.resolve(
-  process.cwd(),
-  "node_modules",
-  "@claucondor",
-  "sdk",
-  "circuits",
-  "aggregate"
-);
-const CT_WASM = path.join(SDK_ROOT, "confidential_transfer_aggregate.wasm");
-const CT_ZKEY = path.join(SDK_ROOT, "confidential_transfer_aggregate_test.zkey");
 
 export async function POST(req: NextRequest) {
   try {
@@ -48,16 +43,13 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const result = await buildShieldedTransferProof(
-      {
-        oldBalance: BigInt(oldBalance),
-        oldBlinding: BigInt(oldBlinding),
-        transferAmount: BigInt(transferAmount),
-        transferBlinding: BigInt(transferBlinding),
-        newBlinding: BigInt(newBlinding),
-      },
-      { wasmPath: CT_WASM, zkeyPath: CT_ZKEY }
-    );
+    const result = await buildShieldedTransferProof({
+      oldBalance: BigInt(oldBalance),
+      oldBlinding: BigInt(oldBlinding),
+      transferAmount: BigInt(transferAmount),
+      transferBlinding: BigInt(transferBlinding),
+      newBlinding: BigInt(newBlinding),
+    });
 
     return NextResponse.json({
       proof: Array.from(result.proof).map((p) => p.toString()),

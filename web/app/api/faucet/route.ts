@@ -111,11 +111,8 @@ transaction(amount: UFix64, to: Address) {
 `;
 
 // MockFT transfer from faucet Cadence vault to recipient.
-// 0x7599043aea001283 is the underlying MockFT FungibleToken contract (deployer = claucondor).
-// This is TOKEN_REGISTRY.mockft.ftAddress (unchanged in v0.7.2).
-// The JanusFT wrapper (cadenceAddress) changed to 0xc4e8f99915893a2f in v0.7.2 — but the
-// faucet only sends raw MockFT tokens, not wrapped/shielded ones, so we use ftAddress here.
-const MOCKFT_CADENCE_ADDR = "0x7599043aea001283";
+// v0.8: MockFT deployed at 0x4b6bc58bc8bf5dcc (TOKEN_REGISTRY.mockft.ftAddress).
+const MOCKFT_CADENCE_ADDR = "0x4b6bc58bc8bf5dcc";
 const MOCKFT_CONTRACT = "MockFT";
 
 const TRANSFER_MOCKFT_TX = `
@@ -148,9 +145,9 @@ transaction(amount: UFix64, to: Address) {
 const FLOW_EVM_RPC = "https://testnet.evm.nodes.onflow.org";
 const EVM_CHAIN_ID = 545;
 
-// mUSDC ERC20 address on Flow EVM testnet (canonical from janus-erc20-v0.4 deployment).
+// mUSDC ERC20 address on Flow EVM testnet — v0.8 underlying (was 0x686E… v0.7).
 // Faucet sends underlying mUSDC directly (not the shielded proxy).
-const MOCK_USDC_ADDR = "0x686E8d90A7B608540cAF46E527fD8a5631A1b658";
+const MOCK_USDC_ADDR = "0xd49Ff950279841aaEcf642E85C3a0bBc1FB4B524";
 
 const ERC20_TRANSFER_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",

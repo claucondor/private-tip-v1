@@ -16,359 +16,23 @@ import { Key, RefreshCw, AlertTriangle, Menu, X } from "lucide-react";
 import { flowConfig } from "@/lib/fcl-config";
 import ConnectWallet from "@/components/ConnectWallet";
 import MainnetCountdown from "@/components/MainnetCountdown";
+import RecoveryBanner from "@/components/RecoveryBanner";
 // Copy of /flow.json bundled inside web/ so Vercel's build root (web/) can resolve it.
 // Keep web/flow.json in sync with /flow.json when contracts/aliases change.
 import flowJSON from "../flow.json";
 
 // ---------------------------------------------------------------------------
-// Recovery banner — bidirectional sync detector.
-// Three modes:
-//   "recover"     — blue: localStorage empty + chain has state → offer Recover
-//   "stale-local" — yellow: localStorage has state that doesn't match chain
-//                   (admin reset, stale session, etc.) → offer Clear local
-//   "desync"      — red: RecoveryDesyncError → manual escape hatches
+// Recovery banner — Phase 3 rewrite.
+//
+// Reads ShieldedInboxClient.count + ShieldedCheckpointClient.exists via the
+// real RecoveryBanner component. Surfaces pending notes and missing checkpoint.
 // ---------------------------------------------------------------------------
 
-type RecoveryBannerMode = "recover" | "stale-local" | "desync";
-
-function RecoveryBanner() {
+function RecoveryBannerWrapper() {
   const { user } = useFlowCurrentUser();
-  const isLoggedIn = !!user?.loggedIn && !!user?.addr;
-  const userAddress = user?.addr ?? null;
-
-  const [show, setShow] = useState(false);
-  const [mode, setMode] = useState<RecoveryBannerMode>("recover");
-  const [recovering, setRecovering] = useState(false);
-
-  // Restore-from-backup state (manual escape hatch for desync).
-  const [showRestoreForm, setShowRestoreForm] = useState(false);
-  const [restoreJson, setRestoreJson] = useState("");
-  const [restoreError, setRestoreError] = useState<string | null>(null);
-
-  // On wallet connect, validate localStorage state against on-chain commitment.
-  // Three outcomes:
-  //   - localStorage matches chain (or both empty) → no banner
-  //   - localStorage empty + chain has state → blue "recover" banner
-  //   - localStorage has state + chain mismatch → yellow "stale-local" banner
-  // Sweep stale shielded-state cache entries on every mount.
-  // Removes localStorage entries that were saved against a different
-  // (now-redeployed) contract proxy, preventing portfolio from showing
-  // ghost balances after a TOKEN_REGISTRY address change.
-  useEffect(() => {
-    (async () => {
-      const { sweepStaleShieldedCache } = await import("@/lib/store");
-      const removed = sweepStaleShieldedCache();
-      if (removed > 0) {
-        console.log(`[shielded-cache] swept ${removed} stale entries on mount`);
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    if (!userAddress) {
-      setShow(false);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        // Resolve COA — required for both directions of validation.
-        const { getCoaEvmAddress, getCommitment, isIdentityPoint } = await import("@/lib/tip-actions");
-        let coaHex: string;
-        try {
-          coaHex = await getCoaEvmAddress(userAddress);
-        } catch {
-          // No COA yet — nothing to validate against.
-          if (!cancelled) setShow(false);
-          return;
-        }
-        // Check all 3 tokens — show banner if ANY has a non-identity on-chain commitment.
-        // For mockft, getCommitment expects the Cadence address (not COA EVM address).
-        const tokenChecks = await Promise.all([
-          getCommitment(coaHex, "flow").catch(() => ({ x: 0n, y: 1n })),
-          getCommitment(coaHex, "mockusdc").catch(() => ({ x: 0n, y: 1n })),
-          getCommitment(userAddress, "mockft").catch(() => ({ x: 0n, y: 1n })),
-        ]);
-        const chainIsIdentity = tokenChecks.every(c => isIdentityPoint(c));
-
-        // v0.6.6: check the v2 cache (proxy-fingerprinted, multi-token).
-        // Reading raw localStorage with old keys misses the actually-saved entries
-        // and produces a false "no local state" banner while the portfolio is
-        // happily decrypting from the same store.
-        const { loadAllShieldedStates } = await import("@/lib/store");
-        const allLocal = loadAllShieldedStates(userAddress);
-        const hasAnyLocal = Object.keys(allLocal).length > 0;
-        // Also honor pre-v2 legacy key so users upgrading mid-session aren't nagged.
-        const legacyKey = `openjanus:shielded:${userAddress.toLowerCase()}`;
-        const legacyRaw = localStorage.getItem(legacyKey);
-
-        if (hasAnyLocal || legacyRaw) {
-          // Local state exists — skip desync check (computeCommitment from SDK is
-          // available but pulling heavy crypto into the banner is not worth it).
-          // In v0.6 we trust the snapshot events (SDK recovers on demand).
-          if (!cancelled) setShow(false);
-          return;
-        }
-
-        // No local state. If chain has commitment, offer recovery.
-        if (!cancelled) {
-          setShow(!chainIsIdentity);
-          setMode("recover");
-        }
-      } catch {
-        // Non-fatal network error — hide banner.
-        if (!cancelled) setShow(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [userAddress]);
-
-  const handleClearLocal = useCallback(async () => {
-    if (!userAddress) return;
-    const { clearShieldedStateForAddr } = await import("@/lib/store");
-    clearShieldedStateForAddr(userAddress);
-    // Also clear legacy v0.5 key.
-    localStorage.removeItem(`openjanus:shielded:${userAddress.toLowerCase()}`);
-    localStorage.removeItem(`openjanus:tip-ingested:${userAddress.toLowerCase()}`);
-    toast.success("Local shielded state cleared. Reloading…");
-    setShow(false);
-    setTimeout(() => window.location.reload(), 500);
-  }, [userAddress]);
-
-  const handleRecover = useCallback(async () => {
-    if (!userAddress) return;
-    setRecovering(true);
-    // Import both modules upfront — dynamic import results are cached.
-    const { getOrDeriveMemoPrivkey, getCoaEvmAddress } = await import("@/lib/tip-actions");
-    const { recoverShieldedState } = await import("@/lib/recovery");
-    try {
-      toast.info("Recovering your shielded state from chain…");
-      const privkey = await getOrDeriveMemoPrivkey(userAddress);
-
-      let coaHex: string | undefined;
-      try {
-        coaHex = await getCoaEvmAddress(userAddress);
-      } catch { /* no COA */ }
-
-      if (!coaHex) {
-        toast.warning("Cannot recover: no COA found for this account.");
-        setShow(false);
-        setRecovering(false);
-        return;
-      }
-
-      // v0.6: recover per-token via SDK adapter latestSnapshot.
-      // Iterate dynamically over SUPPORTED_TOKENS so adding a new token to
-      // the registry doesn't require manually updating this list (OF-5).
-      const { saveShieldedState } = await import("@/lib/store");
-      const { SUPPORTED_TOKENS } = await import("@/lib/tokens");
-      const { TOKEN_REGISTRY } = await import("@claucondor/sdk/network");
-      let anyRecovered = false;
-      for (const t of SUPPORTED_TOKENS) {
-        try {
-          // cadence-ft variant uses the Cadence wallet address; EVM tokens use the COA hex.
-          const queryAddr = TOKEN_REGISTRY[t.id].variant === "cadence-ft" ? userAddress : coaHex;
-          const snap = await recoverShieldedState(queryAddr, privkey, t.id);
-          if (snap) {
-            saveShieldedState(userAddress, t.id, {
-              balanceRaw: snap.balance.toString(),
-              blinding: snap.blinding.toString(),
-              lastUpdatedMs: snap.timestampMs,
-            });
-            anyRecovered = true;
-          }
-        } catch { /* try next token */ }
-      }
-
-      if (anyRecovered) {
-        toast.success("Shielded state recovered from chain.");
-        setShow(false);
-        window.location.reload();
-      } else {
-        toast.warning("No recoverable state found on-chain. Re-wrap if funds are stuck.");
-        setShow(false);
-      }
-    } catch (err) {
-      toast.error("Recovery failed", {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setRecovering(false);
-    }
-  }, [userAddress]);
-
-  const handleRestoreFromBackup = useCallback(async () => {
-    if (!userAddress) return;
-    setRestoreError(null);
-    try {
-      const parsed = JSON.parse(restoreJson.trim()) as { balance?: string; balanceWei?: string; blinding?: string };
-      const balanceWei = parsed.balanceWei ?? parsed.balance;
-      const blinding = parsed.blinding;
-      if (!balanceWei || !blinding) {
-        setRestoreError("JSON must have balanceWei (or balance) and blinding fields.");
-        return;
-      }
-      // Validate they're parseable bigints.
-      BigInt(balanceWei);
-      BigInt(blinding);
-      // Write to new v0.6 key format (FLOW token).
-      const { saveShieldedState } = await import("@/lib/store");
-      saveShieldedState(userAddress, "flow", { balanceRaw: balanceWei, blinding });
-      toast.success("Shielded state restored from backup.");
-      setShow(false);
-      window.location.reload();
-    } catch (err) {
-      setRestoreError(err instanceof Error ? err.message : "Invalid JSON");
-    }
-  }, [userAddress, restoreJson]);
-
-  if (!isLoggedIn || !show) return null;
-
-  // --- Yellow stale-local banner ---
-  if (mode === "stale-local") {
-    return (
-      <motion.div
-        initial={{ y: -8, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        exit={{ y: -8, opacity: 0 }}
-        transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-        className="sticky top-[calc(theme(spacing.7)+theme(spacing.14)+1px)] z-40 w-full border-b border-yellow-500/40 bg-[#0A1628]/95 px-4 py-3 text-xs backdrop-blur"
-      >
-        <div className="max-w-5xl mx-auto">
-          <div className="flex items-start gap-2 mb-2">
-            <AlertTriangle className="w-4 h-4 shrink-0 text-yellow-400 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="font-semibold text-yellow-200">
-                Your local shielded state is out of sync with the chain.
-              </p>
-              <p className="text-yellow-300/80 mt-0.5">
-                The on-chain commitment doesn&apos;t match what&apos;s stored in this browser.
-                Likely cause: admin reset the slot, or this is stale state from another session.
-                Clear local state to restart fresh.
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2 mt-2">
-            <button
-              onClick={handleClearLocal}
-              className="inline-flex items-center px-3 py-1 rounded border border-yellow-500/50 bg-yellow-950/40 text-yellow-200 font-medium hover:bg-yellow-900/40 transition-colors"
-            >
-              Clear local state
-            </button>
-            <button
-              onClick={() => setShow(false)}
-              className="inline-flex items-center px-3 py-1 rounded border border-yellow-600/30 bg-transparent text-yellow-400 hover:bg-yellow-900/20 transition-colors"
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      </motion.div>
-    );
-  }
-
-  // --- Red desync error banner ---
-  if (mode === "desync") {
-    return (
-      <motion.div
-        initial={{ y: -8, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        exit={{ y: -8, opacity: 0 }}
-        transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-        className="sticky top-[calc(theme(spacing.7)+theme(spacing.14)+1px)] z-40 w-full border-b border-red-500/40 bg-[#0A1628]/95 px-4 py-3 text-xs backdrop-blur"
-      >
-        <div className="max-w-5xl mx-auto">
-          <div className="flex items-start gap-2 mb-2">
-            <AlertTriangle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="font-semibold text-red-200">
-                Recovery failed: chain state cannot be reconstructed.
-              </p>
-              <p className="text-red-300/80 mt-0.5">
-                This wallet has activity from before recovery was enabled, or there&apos;s a deeper desync.
-              </p>
-            </div>
-          </div>
-
-          {!showRestoreForm ? (
-            <div className="flex flex-wrap gap-2 mt-2">
-              <button
-                onClick={() => setShowRestoreForm(true)}
-                className="inline-flex items-center px-3 py-1 rounded border border-red-500/50 bg-red-950/40 text-red-200 font-medium hover:bg-red-900/40 transition-colors"
-              >
-                Restore from backup
-              </button>
-              <button
-                onClick={() => setShow(false)}
-                className="inline-flex items-center px-3 py-1 rounded border border-red-600/30 bg-transparent text-red-400 hover:bg-red-900/20 transition-colors"
-              >
-                Dismiss
-              </button>
-            </div>
-          ) : (
-            <div className="mt-2 space-y-2">
-              <p className="text-red-300/80">
-                Paste your saved shielded state JSON: <code className="font-mono bg-red-950/60 px-1 rounded">{"{\"balanceWei\": \"...\", \"blinding\": \"...\"}"}</code>
-              </p>
-              <textarea
-                value={restoreJson}
-                onChange={(e) => setRestoreJson(e.target.value)}
-                rows={3}
-                className="w-full px-2 py-1.5 text-xs font-mono border border-red-700/40 rounded bg-red-950/30 text-foreground"
-                placeholder='{"balanceWei": "5000000000000000000", "blinding": "12345678..."}'
-              />
-              {restoreError && (
-                <p className="text-red-400 font-medium">{restoreError}</p>
-              )}
-              <div className="flex gap-2">
-                <button
-                  onClick={handleRestoreFromBackup}
-                  className="inline-flex items-center px-3 py-1 rounded border border-red-500/50 bg-red-950/40 text-red-200 font-medium hover:bg-red-900/40 transition-colors"
-                >
-                  Restore
-                </button>
-                <button
-                  onClick={() => { setShowRestoreForm(false); setRestoreError(null); }}
-                  className="inline-flex items-center px-3 py-1 rounded border border-red-600/30 bg-transparent text-red-400 hover:bg-red-900/20 transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </motion.div>
-    );
-  }
-
-  // --- Blue normal recovery banner ---
-  return (
-    <motion.div
-      initial={{ y: -8, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      exit={{ y: -8, opacity: 0 }}
-      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-      className="sticky top-[calc(theme(spacing.7)+theme(spacing.14)+1px)] z-40 w-full border-b border-blue-400/30 bg-[#0A1628]/95 px-4 py-2 text-xs backdrop-blur"
-    >
-      <div className="max-w-5xl mx-auto flex items-center justify-between gap-3">
-        <span className="flex items-center gap-2 text-blue-200 min-w-0">
-          <RefreshCw className="w-3.5 h-3.5 shrink-0 text-blue-400" />
-          <span className="truncate sm:whitespace-normal">
-            <strong>Your shielded state isn&apos;t loaded in this browser.</strong>{" "}
-            Click Recover to reconstruct it from the chain using your wallet.
-          </span>
-        </span>
-        <button
-          onClick={handleRecover}
-          disabled={recovering}
-          className="shrink-0 inline-flex items-center px-3 py-1 rounded border border-blue-400/40 bg-blue-950/40 text-blue-200 font-medium hover:bg-blue-900/40 transition-colors disabled:opacity-50"
-        >
-          {recovering ? "Recovering…" : "Recover"}
-        </button>
-      </div>
-    </motion.div>
-  );
+  return <RecoveryBanner userAddress={user?.addr ?? null} />;
 }
+
 
 type MemoKeyBannerMode = "not_on_chain" | "session_missing";
 
@@ -498,7 +162,8 @@ export default function ClientLayout({
               <NavLink href="/wrap">Wrap</NavLink>
               <NavLink href="/send">Send</NavLink>
               <NavLink href="/tips">Tips</NavLink>
-              <NavLink href="/claim">Withdraw</NavLink>
+              <NavLink href="/claim">Claim</NavLink>
+              <NavLink href="/withdraw">Withdraw</NavLink>
               <NavLink href="/status">Status</NavLink>
               <NavLink href="/faucet">Faucet</NavLink>
               <NavLink href="/learn" highlight>Learn</NavLink>
@@ -516,8 +181,8 @@ export default function ClientLayout({
       {/* Global MemoKey status banner */}
       <MemoKeyStatusBanner />
 
-      {/* Recovery banner — shown when localStorage is empty but chain has state */}
-      <RecoveryBanner />
+      {/* Recovery banner — surfaces pending inbox notes + uninstalled checkpoint */}
+      <RecoveryBannerWrapper />
 
       {/* Main content area */}
       <main className="flex-1">{children}</main>
@@ -536,7 +201,7 @@ export default function ClientLayout({
               GitHub
             </a>
             <span className="text-foreground/30">·</span>
-            <span className="font-mono text-foreground/40">v0.7.5</span>
+            <span className="font-mono text-foreground/40">v0.8.1-alpha.7</span>
             <span className="text-foreground/30">·</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
               testnet
@@ -592,13 +257,14 @@ function MobileNav() {
 
   const links: { href: string; label: string; highlight?: boolean }[] = [
     { href: "/portfolio", label: "Portfolio" },
-    { href: "/wrap",   label: "Wrap" },
-    { href: "/send",   label: "Send" },
-    { href: "/tips",   label: "Tips" },
-    { href: "/claim",  label: "Withdraw" },
-    { href: "/status", label: "Status" },
-    { href: "/faucet", label: "Faucet" },
-    { href: "/learn",  label: "Learn", highlight: true },
+    { href: "/wrap",      label: "Wrap" },
+    { href: "/send",      label: "Send" },
+    { href: "/tips",      label: "Tips" },
+    { href: "/claim",     label: "Claim" },
+    { href: "/withdraw",  label: "Withdraw" },
+    { href: "/status",    label: "Status" },
+    { href: "/faucet",    label: "Faucet" },
+    { href: "/learn",     label: "Learn", highlight: true },
   ];
 
   return (

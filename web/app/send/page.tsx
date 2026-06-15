@@ -24,7 +24,6 @@ import {
 import Link from "next/link";
 import { toast } from "sonner";
 import { useAppStore } from "@/lib/store";
-import { saveSentMemo } from "@/lib/memo-mirror";
 import { useRouter } from "next/navigation";
 
 import {
@@ -32,10 +31,11 @@ import {
   isValidFlowAmount,
   getCoaEvmAddress,
   recipientHasCoa,
-  sendShieldedTipAction,
-  formatPoint,
-  parseFlowToWei,
-  formatWeiToFlow,
+  sendTip,
+  getShieldedStateForCoa,
+  TOKEN_PROXIES,
+  EVM_RPC,
+  EVM_CHAIN_ID,
   PRIVATE_TIP_CADENCE,
   JANUS_FLOW_EVM,
   getRecipientMemoPubkey,
@@ -43,11 +43,17 @@ import {
   getOrDeriveMemoPrivkey,
   type Point,
 } from "@/lib/tip-actions";
-import { loadShieldedState as loadTokenShieldedState, saveShieldedState as saveTokenShieldedState } from "@/lib/store";
+import { TOKEN_REGISTRY, TOKEN_RECIPIENT_TYPES, SHIELDED_CHECKPOINT_ADDRESS, SHIELDED_INBOX_ADDRESS, FLOW_EVM_RPC, FLOW_CADENCE_ACCESS } from "@claucondor/sdk/network";
+import { ethers } from "ethers";
+import { getPortfolioView } from "@claucondor/sdk";
+// loadShieldedState and saveShieldedState removed from @/lib/store in v0.8.
+// Phase 4/5/6 will rewrite — Phase 1 left this here intentionally because it
+// consumes lib functions whose rewrite happens later.
 import { TokenSelector } from "@/components/TokenSelector";
 import type { TokenId } from "@/lib/tokens";
 import { parseTokenAmount, formatTokenAmount, getTokenMeta } from "@/lib/tokens";
 import { ShieldedNoteEncrypt } from "@/components/animations/ShieldedNoteEncrypt";
+import { ClaimFirstWarning } from "@/components/ClaimFirstWarning";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -65,28 +71,21 @@ function isValidRecipient(addr: string): boolean {
   return isFlowAddr(addr) || isEvmAddr(addr);
 }
 
-// --- Local-storage helpers ---------------------------------------------------
+// --- Types ------------------------------------------------------------------
 
+/** Shielded balance state read from the on-chain ShieldedCheckpoint. */
 interface ShieldedState {
   balanceWei: string;
   blinding: string;
+  /** Inbox cursor — last consumed note index (needed for sendTip's inboxCursor param). */
+  lastConsumedNoteIndex: string;
 }
-
-function loadShieldedState(addr: string, tokenId: TokenId = "flow"): ShieldedState | null {
-  const s = loadTokenShieldedState(addr, tokenId);
-  if (!s) return null;
-  return { balanceWei: s.balanceRaw, blinding: s.blinding };
-}
-
-function saveShieldedState(addr: string, state: ShieldedState, tokenId: TokenId = "flow"): void {
-  saveTokenShieldedState(addr, tokenId, { balanceRaw: state.balanceWei, blinding: state.blinding });
-}
-
-// --- Types ------------------------------------------------------------------
 
 type SendStatus =
   | "idle"
-  | "needs_wrap"
+  | "loading_balance" // reading checkpoint from chain
+  | "needs_unlock"    // memoPrivkey not in session — user must sign
+  | "needs_wrap"      // no shielded balance for this token yet
   | "validating"
   | "resolving_coa"
   | "building_proof"
@@ -98,7 +97,6 @@ interface SendState {
   status: SendStatus;
   error: string | null;
   txId: string | null;
-  newCommit: Point | null;
 }
 
 // --- Component --------------------------------------------------------------
@@ -127,14 +125,41 @@ export default function SendTipPage() {
   const [coaWarningAcknowledged, setCoaWarningAcknowledged] = useState(false);
 
   const [shielded, setShielded] = useState<ShieldedState | null>(null);
+  const [senderCoaEvmAddr, setSenderCoaEvmAddr] = useState<string | null>(null);
   const [sendState, setSendState] = useState<SendState>({
     status: "idle",
     error: null,
     txId: null,
-    newCommit: null,
   });
 
   const [showEncryptAnim, setShowEncryptAnim] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Derive the allowed recipient address types for the selected token.
+  // mockft → Cadence only; mockusdc → EVM only; flow → both.
+  const allowedRecipientTypes = TOKEN_RECIPIENT_TYPES[selectedToken as keyof typeof TOKEN_RECIPIENT_TYPES] as ReadonlyArray<"cadence" | "evm">;
+
+  // Validate whether the current recipient input is allowed for this token.
+  const recipientTypeOk = (() => {
+    if (!recipient) return true;
+    if (allowedRecipientTypes.includes("cadence" as never) && allowedRecipientTypes.includes("evm" as never)) return isValidRecipient(recipient);
+    if (allowedRecipientTypes.includes("evm" as never)) return isEvmAddr(recipient);
+    if (allowedRecipientTypes.includes("cadence" as never)) return isFlowAddr(recipient);
+    return false;
+  })();
+
+  // Human-readable label + placeholder for the recipient field.
+  const recipientFieldLabel = (() => {
+    if (allowedRecipientTypes.length === 2) return "Recipient Cadence or EVM address";
+    if (allowedRecipientTypes[0] === "evm") return "Recipient EVM address (0x…40 hex)";
+    return "Recipient Cadence address (0x…16 hex)";
+  })();
+
+  const recipientFieldPlaceholder = (() => {
+    if (allowedRecipientTypes.length === 2) return "0x... (16-hex Cadence or 40-hex EVM)";
+    if (allowedRecipientTypes[0] === "evm") return "0x... (40-hex EVM address)";
+    return "0x... (16-hex Cadence address)";
+  })();
 
   // Debounced recipient check — handles both Flow and EVM addresses
   useEffect(() => {
@@ -163,11 +188,13 @@ export default function SendTipPage() {
             setResolvedMemoPubkey(memoPub);
           }
         } else {
-          // Flow address: check COA + memokey
+          // Cadence address: check COA + memokey
+          // For mockft: COA is needed only for memokey lookup, NOT for the tx address.
           const [coaOk, memoPub] = await Promise.all([
             recipientHasCoa(recipient),
             getRecipientMemoPubkey(recipient, selectedToken === "mockft" ? "flow" : selectedToken),
           ]);
+          // Resolve COA EVM address for display and memokey lookup — never used as tx recipient for mockft.
           let resolvedCoa: string | null = null;
           if (coaOk) {
             try {
@@ -200,22 +227,136 @@ export default function SendTipPage() {
     if (recipientMemoOk === false && memo.length > 0) setMemo("");
   }, [recipientMemoOk, memo]);
 
-  // Load shielded state for selected token on mount + token change
+  // Resolve COA + load shielded balance from on-chain checkpoint on mount + token change.
+  // Requires memoPrivkey in session. If not cached, transitions to "needs_unlock".
   useEffect(() => {
     if (!userAddress) return;
-    const s = loadShieldedState(userAddress, selectedToken);
-    if (!s) {
-      setSendState({ status: "needs_wrap", error: null, txId: null, newCommit: null });
+    let cancelled = false;
+
+    (async () => {
+      setSendState({ status: "loading_balance", error: null, txId: null });
       setShielded(null);
-    } else {
-      setShielded(s);
-      setSendState((prev) =>
-        prev.status === "needs_wrap"
-          ? { status: "idle", error: null, txId: null, newCommit: null }
-          : prev
-      );
-    }
+      try {
+        // Resolve COA EVM address
+        const coa = await getCoaEvmAddress(userAddress);
+        if (cancelled) return;
+        setSenderCoaEvmAddr(coa);
+
+        // Check for cached memoPrivkey — don't prompt wallet on mount
+        const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+        const cachedPrivkey = getCachedMemoPrivkey(userAddress);
+        if (cachedPrivkey === null) {
+          if (!cancelled) setSendState({ status: "needs_unlock", error: null, txId: null });
+          return;
+        }
+
+        // Derive per-token proxy address
+        const entry = TOKEN_REGISTRY[selectedToken];
+        // cadence-ft (MockFT) has no EVM checkpoint — getShieldedStateForCoa will return null
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tokenProxy = entry.variant === "cadence-ft"
+          ? TOKEN_PROXIES[selectedToken as keyof typeof TOKEN_PROXIES]
+          : (entry as any).proxy as string;
+
+        // Read checkpoint (null = no shielded state yet for this token)
+        const state = await getShieldedStateForCoa(coa, cachedPrivkey, tokenProxy).catch(() => null);
+        if (cancelled) return;
+
+        if (!state) {
+          setShielded(null);
+          setSendState({ status: "needs_wrap", error: null, txId: null });
+        } else {
+          setShielded({
+            balanceWei: state.balance.toString(),
+            blinding: state.blinding.toString(),
+            lastConsumedNoteIndex: state.lastConsumedNoteIndex.toString(),
+          });
+          setSendState((prev) =>
+            prev.status === "loading_balance" || prev.status === "needs_wrap"
+              ? { status: "idle", error: null, txId: null }
+              : prev
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : "Failed to load balance";
+          setSendState({ status: "needs_wrap", error: msg, txId: null });
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, [userAddress, selectedToken]);
+
+  // Handle "Unlock" — derive memoPrivkey via wallet sign, then retry balance load
+  const handleUnlock = useCallback(async () => {
+    if (!userAddress) return;
+    setSendState({ status: "loading_balance", error: null, txId: null });
+    try {
+      await getOrDeriveMemoPrivkey(userAddress);
+      // Trigger balance reload: re-set selectedToken to force effect re-run
+      // (useEffect dependency on selectedToken doesn't re-run without a change)
+      // We can force it by calling the logic directly
+      if (!senderCoaEvmAddr) return;
+      const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+      const privkey = getCachedMemoPrivkey(userAddress);
+      if (!privkey) return;
+      const entry = TOKEN_REGISTRY[selectedToken];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tokenProxy = entry.variant === "cadence-ft"
+        ? TOKEN_PROXIES[selectedToken as keyof typeof TOKEN_PROXIES]
+        : (entry as any).proxy as string;
+      const state = await getShieldedStateForCoa(senderCoaEvmAddr, privkey, tokenProxy).catch(() => null);
+      if (!state) {
+        setShielded(null);
+        setSendState({ status: "needs_wrap", error: null, txId: null });
+      } else {
+        setShielded({
+          balanceWei: state.balance.toString(),
+          blinding: state.blinding.toString(),
+          lastConsumedNoteIndex: state.lastConsumedNoteIndex.toString(),
+        });
+        setSendState({ status: "idle", error: null, txId: null });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unlock failed";
+      setSendState({ status: "error", error: msg, txId: null });
+    }
+  }, [userAddress, senderCoaEvmAddr, selectedToken]);
+
+  // Fetch pending inbox count for claim-first warning.
+  // Fires once senderCoaEvmAddr is resolved and again on every token switch.
+  useEffect(() => {
+    if (!userAddress || !senderCoaEvmAddr) return;
+    let cancelled = false;
+    (async () => {
+      const { getCachedMemoPrivkey } = await import("@/lib/memo-key-session");
+      const memoPrivkey = getCachedMemoPrivkey(userAddress);
+      if (!memoPrivkey) { setPendingCount(0); return; }
+      try {
+        const entry = TOKEN_REGISTRY[selectedToken];
+        const tokenList = [{
+          id: selectedToken,
+          address: TOKEN_PROXIES[selectedToken as keyof typeof TOKEN_PROXIES],
+          janusTokenAddr: entry.variant !== "cadence-ft" ? (entry as any).proxy as string : undefined,
+        }];
+        const view = await getPortfolioView(senderCoaEvmAddr, {
+          rpc: FLOW_EVM_RPC,
+          checkpointAddr: SHIELDED_CHECKPOINT_ADDRESS,
+          inboxAddr: SHIELDED_INBOX_ADDRESS,
+          tokens: tokenList,
+          memoPrivkey,
+          cadenceAddress: userAddress,
+          flowAccessNode: FLOW_CADENCE_ACCESS,
+        });
+        if (!cancelled) setPendingCount(view.tokens[selectedToken]?.pendingCount ?? 0);
+      } catch {
+        if (!cancelled) setPendingCount(0);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userAddress, senderCoaEvmAddr, selectedToken]);
 
   // Insufficient balance check
   const insufficientReason: string | null = (() => {
@@ -231,13 +372,13 @@ export default function SendTipPage() {
   })();
 
   const handleSendTip = useCallback(async () => {
-    if (!userAddress || !shielded) {
-      toast.error("Wallet not connected or shielded balance missing.");
+    if (!userAddress) {
+      toast.error("Wallet not connected.");
       return;
     }
 
     setShowEncryptAnim(true);
-    setSendState({ status: "validating", error: null, txId: null, newCommit: null });
+    setSendState({ status: "validating", error: null, txId: null });
 
     // Validate recipient
     const recipientTrimmed = recipient.trim();
@@ -245,40 +386,50 @@ export default function SendTipPage() {
       setSendState({
         status: "error",
         error: "Invalid recipient — expected Flow address (0x + 16 hex) or EVM address (0x + 40 hex).",
-        txId: null, newCommit: null,
+        txId: null,
       });
       setShowEncryptAnim(false);
       return;
     }
 
     if (!isValidFlowAmount(amount)) {
-      setSendState({ status: "error", error: "Invalid amount.", txId: null, newCommit: null });
+      setSendState({ status: "error", error: "Invalid amount.", txId: null });
       setShowEncryptAnim(false);
       return;
     }
 
     // Self-send check
     if (isFlowAddr(recipientTrimmed) && recipientTrimmed.toLowerCase() === userAddress.toLowerCase()) {
-      setSendState({ status: "error", error: "Cannot send a shielded tip to yourself.", txId: null, newCommit: null });
+      setSendState({ status: "error", error: "Cannot send a shielded tip to yourself.", txId: null });
       setShowEncryptAnim(false);
       return;
     }
 
-    // Amount check against shielded balance
     const amountWei = parseTokenAmount(amount, selectedToken);
-    const oldBalanceWei = BigInt(shielded.balanceWei);
-    if (amountWei > oldBalanceWei) {
+
+    // Token-aware type guard — reject mismatched address types before any network call.
+    if (selectedToken === "mockusdc" && !isEvmAddr(recipientTrimmed)) {
       setSendState({
         status: "error",
-        error: `Insufficient shielded balance: have ${formatTokenAmount(oldBalanceWei, selectedToken, 4)} ${tokenMeta.symbol}, need ${amount}.`,
-        txId: null, newCommit: null,
+        error: "mUSDC tips require an EVM address (0x + 40 hex chars). You entered a Cadence address.",
+        txId: null,
+      });
+      setShowEncryptAnim(false);
+      return;
+    }
+    if (selectedToken === "mockft" && !isFlowAddr(recipientTrimmed)) {
+      setSendState({
+        status: "error",
+        error: "MockFT tips require a Cadence address (0x + 16 hex chars). You entered an EVM address.",
+        txId: null,
       });
       setShowEncryptAnim(false);
       return;
     }
 
-    // COA warning for Flow addresses without COA
-    if (isFlowAddr(recipientTrimmed)) {
+    // COA warning for Cadence addresses without COA (only relevant for FLOW/EVM tokens).
+    // mockft uses Cadence address directly — COA presence is needed only for memokey lookup.
+    if (isFlowAddr(recipientTrimmed) && selectedToken !== "mockft") {
       let coaOk = recipientCoaOk;
       if (coaOk === null) {
         coaOk = await recipientHasCoa(recipientTrimmed);
@@ -288,38 +439,57 @@ export default function SendTipPage() {
         setSendState({
           status: "error",
           error: "Recipient has no COA at /public/evm. They cannot unwrap this tip until they set one up. Acknowledge the warning below to proceed anyway.",
-          txId: null, newCommit: null,
+          txId: null,
         });
         setShowEncryptAnim(false);
         return;
       }
     }
 
-    setSendState({ status: "resolving_coa", error: null, txId: null, newCommit: null });
+    setSendState({ status: "resolving_coa", error: null, txId: null });
 
-    // Resolve final recipient EVM address
-    let finalRecipientEvmHex: string;
-    if (isEvmAddr(recipientTrimmed)) {
-      finalRecipientEvmHex = recipientTrimmed;
+    // Resolve final recipient address:
+    //   mockft   → Cadence address (used directly by JanusFT.shieldedTransfer)
+    //   flow     → EVM COA (Cadence input resolved; EVM input used as-is)
+    //   mockusdc → EVM address (always)
+    let finalRecipientAddr: string;
+    if (selectedToken === "mockft") {
+      // For mockft, the transaction recipient IS the Cadence address.
+      finalRecipientAddr = recipientTrimmed;
+    } else if (isEvmAddr(recipientTrimmed)) {
+      finalRecipientAddr = recipientTrimmed;
     } else {
-      // Flow address → resolve COA
+      // FLOW with Cadence address input → resolve EVM COA
       try {
-        finalRecipientEvmHex = await getCoaEvmAddress(recipientTrimmed);
+        finalRecipientAddr = await getCoaEvmAddress(recipientTrimmed);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "COA resolution failed";
-        setSendState({ status: "error", error: msg, txId: null, newCommit: null });
+        setSendState({ status: "error", error: msg, txId: null });
         setShowEncryptAnim(false);
         return;
       }
     }
 
-    // MemoKey check — use already-resolved key or re-fetch
+    // For memokey lookup we always need the EVM COA, regardless of token type.
+    // For mockft with Cadence input, resolve COA separately for the memokey query.
+    let evmAddrForMemoKey: string = finalRecipientAddr;
+    if (selectedToken === "mockft" && isFlowAddr(recipientTrimmed)) {
+      try {
+        evmAddrForMemoKey = recipientEvmAddr ?? await getCoaEvmAddress(recipientTrimmed);
+      } catch {
+        // If COA lookup fails for mockft, the memokey check below will catch it.
+        evmAddrForMemoKey = finalRecipientAddr;
+      }
+    }
+
+    // MemoKey check — use already-resolved key or re-fetch.
     let recipientMemoPubkey = resolvedMemoPubkey;
     if (!recipientMemoPubkey) {
-      if (isEvmAddr(recipientTrimmed)) {
-        recipientMemoPubkey = await getMemoPubkeyByEvmAddr(finalRecipientEvmHex, selectedToken === "mockft" ? "flow" : selectedToken);
+      const memoTokenId = selectedToken === "mockft" ? "flow" : selectedToken;
+      if (isEvmAddr(recipientTrimmed) || selectedToken === "mockft") {
+        recipientMemoPubkey = await getMemoPubkeyByEvmAddr(evmAddrForMemoKey, memoTokenId);
       } else {
-        recipientMemoPubkey = await getRecipientMemoPubkey(recipientTrimmed, selectedToken === "mockft" ? "flow" : selectedToken);
+        recipientMemoPubkey = await getRecipientMemoPubkey(recipientTrimmed, memoTokenId);
       }
     }
 
@@ -327,52 +497,77 @@ export default function SendTipPage() {
       setSendState({
         status: "error",
         error: "Recipient hasn't activated their MemoKey — they need to /status first OR publish via MemoKeyRegistry.",
-        txId: null, newCommit: null,
+        txId: null,
       });
       setShowEncryptAnim(false);
       return;
     }
 
-    setSendState({ status: "building_proof", error: null, txId: null, newCommit: null });
+    setSendState({ status: "building_proof", error: null, txId: null });
 
     try {
-      setSendState({ status: "submitting", error: null, txId: null, newCommit: null });
+      setSendState({ status: "submitting", error: null, txId: null });
 
-      // Derive memoKeypair for snapshot encryption
-      let memoKeypair;
-      try {
-        const privkey = await getOrDeriveMemoPrivkey(userAddress);
-        const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
-        const pubkey = await pubkeyFromPrivkey(privkey);
-        memoKeypair = { privkey, pubkey };
-      } catch { /* non-fatal */ }
+      // Derive memoPrivkey (wallet sign if not cached)
+      const privkey = await getOrDeriveMemoPrivkey(userAddress);
+      const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
+      const pubkey = await pubkeyFromPrivkey(privkey);
+      const memoKeypair = { privkey, pubkey };
 
-      // Resolve sender's own COA address
-      let senderCoaEvmAddr: string | undefined;
-      try {
-        senderCoaEvmAddr = await getCoaEvmAddress(userAddress);
-      } catch { /* non-fatal */ }
+      // Resolve sender COA (use cached state or re-resolve)
+      const coaAddr = senderCoaEvmAddr ?? (await getCoaEvmAddress(userAddress));
+      if (!senderCoaEvmAddr) setSenderCoaEvmAddr(coaAddr);
 
-      const result = await sendShieldedTipAction({
-        recipientFlowAddr: isFlowAddr(recipientTrimmed) ? recipientTrimmed : finalRecipientEvmHex,
-        recipientCoaHex: finalRecipientEvmHex,
-        transferAmountWei: amountWei,
-        oldBalanceWei,
-        oldBlinding: BigInt(shielded.blinding),
-        memo: memo || undefined,
-        recipientMemoPubkey,
+      // Read current shielded state from checkpoint (re-read to get fresh cursor)
+      const entry = TOKEN_REGISTRY[selectedToken];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tokenProxy = entry.variant === "cadence-ft"
+        ? TOKEN_PROXIES[selectedToken as keyof typeof TOKEN_PROXIES]
+        : (entry as any).proxy as string;
+      const freshState = await getShieldedStateForCoa(coaAddr, privkey, tokenProxy).catch(() => null);
+
+      // Determine current balance and blinding: prefer fresh checkpoint, fall back to local state
+      const currentBalance = freshState ? freshState.balance : (shielded ? BigInt(shielded.balanceWei) : 0n);
+      const currentBlinding = freshState ? freshState.blinding : (shielded ? BigInt(shielded.blinding) : 0n);
+      const inboxCursor = freshState ? freshState.lastConsumedNoteIndex
+        : (shielded ? BigInt(shielded.lastConsumedNoteIndex) : 0n);
+
+      if (amountWei > currentBalance) {
+        setSendState({
+          status: "error",
+          error: `Insufficient shielded balance: have ${formatTokenAmount(currentBalance, selectedToken, 4)} ${tokenMeta.symbol}, need ${amount}.`,
+          txId: null,
+        });
+        setShowEncryptAnim(false);
+        return;
+      }
+
+      // VoidSigner for non-native paths (evmSigner needed by sendTip signature but only
+      // used in cadence-ft shieldedTransfer; native + erc20 paths use FCL/COA internally).
+      const provider = new ethers.JsonRpcProvider(EVM_RPC, EVM_CHAIN_ID);
+      const evmSigner = new ethers.VoidSigner(coaAddr, provider) as unknown as import("ethers").Wallet;
+
+      const result = await sendTip({
         tokenId: selectedToken,
+        recipientAddr: finalRecipientAddr,
+        amount: amountWei,
+        memo: memo || undefined,
+        coaEvmAddr: coaAddr,
         memoKeypair,
-        senderCoaEvmAddr,
-        userCadenceAddr: userAddress ?? undefined,
+        userCadenceAddr: userAddress,
+        currentBalance,
+        currentBlinding,
+        evmSigner,
+        inboxCursor,
       });
 
-      const newState: ShieldedState = {
-        balanceWei: result.newBalanceWei.toString(),
-        blinding: result.newBlinding.toString(),
-      };
-      saveShieldedState(userAddress, newState, selectedToken);
-      setShielded(newState);
+      // Update local shielded state with new residual balance
+      const newBalance = currentBalance - amountWei;
+      setShielded({
+        balanceWei: newBalance.toString(),
+        blinding: "0", // blinding refreshed by sendTip on-chain; local value approximated
+        lastConsumedNoteIndex: inboxCursor.toString(),
+      });
 
       addSentTip({
         tipID: Date.now(),
@@ -383,21 +578,18 @@ export default function SendTipPage() {
         claimed: false,
       });
 
-      if (memo && memo.length > 0) {
-        saveSentMemo({ sender: userAddress, recipient: recipientTrimmed, memo });
-      }
-
-      setSendState({ status: "success", error: null, txId: result.txId, newCommit: result.newCommit });
-      toast.success("Shielded tip sent!", { description: "Amount is HIDDEN on-chain. Ciphertext shown below." });
+      setSendState({ status: "success", error: null, txId: result.txHash });
+      toast.success("Shielded tip sent!", { description: `${tokenMeta.symbol} amount hidden on-chain.` });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Send failed";
       setShowEncryptAnim(false);
-      setSendState({ status: "error", error: msg, txId: null, newCommit: null });
+      setSendState({ status: "error", error: msg, txId: null });
       toast.error("Send failed", { description: msg });
     }
-  }, [userAddress, shielded, recipient, amount, memo, addSentTip, recipientCoaOk, coaWarningAcknowledged, resolvedMemoPubkey, selectedToken, tokenMeta]);
+  }, [userAddress, shielded, senderCoaEvmAddr, recipient, amount, memo, addSentTip, recipientCoaOk, coaWarningAcknowledged, resolvedMemoPubkey, selectedToken, tokenMeta]);
 
   const isSubmitting =
+    sendState.status === "loading_balance" ||
     sendState.status === "validating" ||
     sendState.status === "resolving_coa" ||
     sendState.status === "building_proof" ||
@@ -425,6 +617,58 @@ export default function SendTipPage() {
             className="janus-button-primary px-6 py-3 rounded-xl text-base"
           >
             Connect Wallet
+          </motion.button>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading balance screen
+  if (sendState.status === "loading_balance") {
+    return (
+      <div className="max-w-lg mx-auto px-4 py-12 janus-page">
+        <div className="mb-8">
+          <Link href="/" className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors">
+            <ArrowLeft className="w-4 h-4 mr-1" />Back
+          </Link>
+        </div>
+        <div className="flex items-center justify-center gap-3 py-16">
+          <Loader2 className="w-5 h-5 animate-spin text-foreground/40" />
+          <p className="text-sm text-foreground/50">Loading {tokenMeta.symbol} shielded balance…</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Needs unlock screen (memoPrivkey not in session)
+  if (sendState.status === "needs_unlock") {
+    return (
+      <div className="max-w-lg mx-auto px-4 py-12 janus-page">
+        <div className="mb-8">
+          <Link href="/" className="inline-flex items-center text-sm text-foreground/40 hover:text-foreground transition-colors">
+            <ArrowLeft className="w-4 h-4 mr-1" />Back
+          </Link>
+        </div>
+        <div className="flex items-center gap-3 mb-8">
+          <div className="w-10 h-10 rounded-lg bg-[#D4AF37]/12 border border-[#D4AF37]/30 flex items-center justify-center">
+            <Shield className="w-5 h-5 text-[#D4AF37]" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-fraunces, Georgia, serif)" }}>Unlock your private inbox</h1>
+            <p className="text-sm text-foreground/50">One wallet signature re-derives your session key.</p>
+          </div>
+        </div>
+        <div className="rounded-xl border border-[#D4AF37]/20 bg-[#D4AF37]/5 p-6 space-y-4">
+          <p className="text-sm text-amber-200/80">
+            Your shielded balance is encrypted to your wallet-derived MemoKey. Sign once to read it — the key stays in session memory and clears when you close the tab.
+          </p>
+          <motion.button
+            onClick={handleUnlock}
+            whileHover={{ scale: 1.01, y: -1 }}
+            whileTap={{ scale: 0.99 }}
+            className="janus-button-primary w-full py-3 rounded-xl text-sm"
+          >
+            Unlock (1 wallet signature)
           </motion.button>
         </div>
       </div>
@@ -472,8 +716,8 @@ export default function SendTipPage() {
               addr={userAddress!}
               tokenId={selectedToken}
               onSaved={(s) => {
-                setShielded(s);
-                setSendState({ status: "idle", error: null, txId: null, newCommit: null });
+                setShielded({ ...s, lastConsumedNoteIndex: "0" });
+                setSendState({ status: "idle", error: null, txId: null });
               }}
             />
           </div>
@@ -516,12 +760,12 @@ export default function SendTipPage() {
           <div className="flex items-start gap-3">
             <Shield className="w-5 h-5 text-[#00EF8B] shrink-0 mt-0.5" />
             <div className="text-xs flex-1">
-              <p className="font-medium text-foreground/70 mb-1">Your shielded {tokenMeta.symbol} balance (local-known)</p>
+              <p className="font-medium text-foreground/70 mb-1">Your shielded {tokenMeta.symbol} balance (from on-chain checkpoint)</p>
               <p className="text-sm text-[#00EF8B] font-mono">
                 {formatTokenAmount(BigInt(shielded.balanceWei), selectedToken, 4)} {tokenMeta.symbol}
               </p>
               <p className="text-[10px] text-foreground/30 mt-1">
-                (decryptable with your locally-stored blinding; on-chain only the Pedersen commit point is visible)
+                Decrypted from ShieldedCheckpoint — on-chain only a Pedersen commit point is visible.
               </p>
             </div>
           </div>
@@ -534,6 +778,9 @@ export default function SendTipPage() {
         success={false}
         onDismiss={() => setShowEncryptAnim(false)}
       />
+
+      {/* Claim-first warning — shown when pending inbox notes exist for selected token */}
+      <ClaimFirstWarning pendingCount={pendingCount} tokenSymbol={tokenMeta.symbol} variant="send" />
 
       {/* Form */}
       <motion.div
@@ -554,18 +801,43 @@ export default function SendTipPage() {
 
         {/* Recipient field */}
         <div>
-          <label className="text-xs font-medium text-foreground/50 mb-1 block">Recipient (Flow or EVM address)</label>
+          <label className="text-xs font-medium text-foreground/50 mb-1 block">{recipientFieldLabel}</label>
           <input
             type="text"
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
-            placeholder="0x... (16 hex Flow, or 40 hex EVM)"
+            placeholder={recipientFieldPlaceholder}
             className="janus-input font-mono"
             disabled={isSubmitting || sendState.status === "success"}
           />
-          <p className="text-[10px] text-foreground/30 mt-1">
-            Cadence wallets use Flow addresses (16 hex). MetaMask/EVM-only wallets use full 40-char EVM addresses. Both work if the recipient has activated MemoKey.
-          </p>
+          {/* Token-specific address type hint */}
+          {selectedToken === "mockft" && (
+            <p className="text-[10px] text-foreground/30 mt-1">
+              MockFT tips go directly to a Cadence FT vault. Enter a Cadence address (16 hex). EVM addresses are not supported for this token.
+            </p>
+          )}
+          {selectedToken === "mockusdc" && (
+            <p className="text-[10px] text-foreground/30 mt-1">
+              mUSDC is an ERC20 token — enter a 40-char EVM address. Cadence addresses are not supported for this token.
+            </p>
+          )}
+          {selectedToken === "flow" && (
+            <p className="text-[10px] text-foreground/30 mt-1">
+              Cadence wallets use Flow addresses (16 hex). MetaMask/EVM-only wallets use full 40-char EVM addresses. Both work if the recipient has activated MemoKey.
+            </p>
+          )}
+          {/* Address type mismatch error */}
+          {recipient && !recipientTypeOk && (
+            <div className="rounded-lg border border-red-500/30 bg-red-950/20 p-2 mt-1">
+              <p className="text-[10px] text-red-400/80">
+                {selectedToken === "mockusdc" && isFlowAddr(recipient)
+                  ? "mUSDC tips require an EVM address. You entered a Cadence address."
+                  : selectedToken === "mockft" && isEvmAddr(recipient)
+                  ? "MockFT tips require a Cadence address. You entered an EVM address."
+                  : "Invalid address format for this token."}
+              </p>
+            </div>
+          )}
 
           {/* Address type + validation feedback */}
           {isValidRecipient(recipient) && (
@@ -668,7 +940,7 @@ export default function SendTipPage() {
 
         <motion.button
           onClick={handleSendTip}
-          disabled={isSubmitting || sendState.status === "success" || !shielded || recipientMemoOk === false || !!insufficientReason}
+          disabled={isSubmitting || sendState.status === "success" || !shielded || recipientMemoOk === false || !!insufficientReason || !recipientTypeOk || pendingCount > 0}
           whileHover={!isSubmitting && !!shielded && recipientMemoOk !== false && !insufficientReason ? { scale: 1.01, y: -1 } : {}}
           whileTap={{ scale: 0.99 }}
           className="janus-button-primary w-full py-3 rounded-xl text-base disabled:opacity-50 disabled:cursor-not-allowed"
@@ -692,7 +964,7 @@ export default function SendTipPage() {
       </motion.div>
 
       {/* Success */}
-      {sendState.status === "success" && sendState.newCommit && (
+      {sendState.status === "success" && sendState.txId && (
         <>
           <ShieldedNoteEncrypt trigger={true} success={true} onDismiss={() => {}} />
           <motion.div
@@ -704,16 +976,16 @@ export default function SendTipPage() {
             <div className="flex items-start gap-3 mb-3">
               <CheckCircle className="w-6 h-6 text-[#00EF8B] shrink-0" />
               <div>
-                <h3 className="text-lg font-bold mb-1 text-foreground">Shielded tip sent!</h3>
-                <p className="text-xs text-foreground/50">Amount HIDDEN on calldata, events, and storage. Only the Pedersen commit point updated on-chain.</p>
+                <h3 className="text-lg font-bold mb-1 text-foreground">Shielded {tokenMeta.symbol} tip sent!</h3>
+                <p className="text-xs text-foreground/50">Amount HIDDEN on calldata, events, and storage. Pedersen commitment updated on-chain.</p>
               </div>
             </div>
             <div className="mb-3">
-              <p className="text-xs font-medium text-foreground/60 mb-1">Your new residual commitment (point on BabyJubJub):</p>
-              <p className="font-mono text-[10px] break-all text-[#00EF8B]/70">{formatPoint(sendState.newCommit)}</p>
+              <p className="text-xs font-medium text-foreground/60 mb-1">Token sent:</p>
+              <p className="font-mono text-xs text-[#00EF8B]">{tokenMeta.symbol}</p>
             </div>
             <div className="mb-3">
-              <p className="text-xs font-medium text-foreground/60 mb-1">Transaction:</p>
+              <p className="text-xs font-medium text-foreground/60 mb-1">Transaction (Cadence tx ID / EVM hash):</p>
               <p className="font-mono text-[10px] break-all text-foreground/40">{sendState.txId}</p>
             </div>
             <div className="flex items-center gap-1.5 text-xs text-foreground/40 mb-4">
@@ -733,7 +1005,7 @@ export default function SendTipPage() {
                 whileHover={{ scale: 1.02, y: -1 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => {
-                  setSendState({ status: "idle", error: null, txId: null, newCommit: null });
+                  setSendState({ status: "idle", error: null, txId: null });
                   setRecipient(""); setAmount(""); setMemo("");
                   setShowEncryptAnim(false);
                 }}
@@ -791,8 +1063,8 @@ function PasteShieldedStateForm({
     try {
       const balanceWei = parseTokenAmount(balanceAmount, tokenId).toString();
       const blindingDec = BigInt(blinding.trim()).toString();
-      const s: ShieldedState = { balanceWei, blinding: blindingDec };
-      saveShieldedState(addr, s, tokenId);
+      // lastConsumedNoteIndex defaults to 0 when pasting state manually
+      const s: ShieldedState = { balanceWei, blinding: blindingDec, lastConsumedNoteIndex: "0" };
       onSaved(s);
       toast.success("Shielded state saved (session only)");
     } catch (err) {

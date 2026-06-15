@@ -42,15 +42,18 @@ import {
   buildGetShieldedTipsBySenderWithSnapshotScript,
   decryptNote,
   getOrDeriveMemoPrivkey,
+  getCoaEvmAddress,
 } from "@/lib/tip-actions";
-import { decryptSnapshot } from "@claucondor/sdk/crypto";
+import { ShieldedInboxClient, getCadenceInboxNotes } from "@claucondor/sdk";
+import type { InboxNote, NoteContent, CadenceInboxNote } from "@claucondor/sdk";
+import { TOKEN_REGISTRY, FLOW_CADENCE_ACCESS, CADENCE_DEPLOYER_ADDRESS } from "@claucondor/sdk/network";
 import { getCachedMemoPrivkey } from "@/lib/memo-key-session";
 import {
   findSentMemo,
-  getCachedDecryptedMemo,
-  cacheDecryptedMemo,
-  ingestTipIfNew,
 } from "@/lib/memo-mirror";
+// getCachedDecryptedMemo, cacheDecryptedMemo, ingestTipIfNew removed in v0.8.
+// Phase 5 will rewrite — Phase 1 left this here intentionally because it
+// consumes lib functions whose rewrite happens later.
 
 // --- Types ---------------------------------------------------------------------
 
@@ -133,6 +136,88 @@ export default function TipsPage() {
   const userAddress = user?.addr ?? null;
 
   const [activeFilter, setActiveFilter] = useState<TipFilter>("all");
+
+  // EVM ShieldedInbox — FLOW + mUSDC notes (JanusFlow / JanusERC20 shieldedTransfer)
+  const [coaAddr, setCoaAddr] = useState<string | null>(null);
+  const [inboxNotes, setInboxNotes] = useState<InboxNote[]>([]);
+  const [inboxLoading, setInboxLoading] = useState(false);
+
+  // Cadence ShieldedInbox — MockFT notes (JanusFT.shieldedTransfer writes here)
+  // depositor field = sender's Cadence address (not the JanusFT contract)
+  const [mockftCadenceNotes, setMockftCadenceNotes] = useState<CadenceInboxNote[]>([]);
+  const [mockftCadenceLoading, setMockftCadenceLoading] = useState(false);
+
+  // Helper: load MockFT Cadence inbox for a given Cadence address
+  const loadMockftCadenceInbox = useCallback(async (cadenceAddr: string, signal?: { cancelled: boolean }) => {
+    setMockftCadenceLoading(true);
+    try {
+      const notes = await getCadenceInboxNotes(cadenceAddr, {
+        flowAccessNode: FLOW_CADENCE_ACCESS,
+        inboxContractAddress: CADENCE_DEPLOYER_ADDRESS,
+      }).catch(() => [] as CadenceInboxNote[]);
+      if (!signal?.cancelled) setMockftCadenceNotes(notes);
+    } catch { /* non-fatal */ } finally {
+      if (!signal?.cancelled) setMockftCadenceLoading(false);
+    }
+  }, []);
+
+  // Resolve COA and load EVM inbox + Cadence inbox on mount
+  useEffect(() => {
+    if (!userAddress) return;
+    let cancelled = false;
+    const signal = { cancelled };
+    (async () => {
+      try {
+        const coa = await getCoaEvmAddress(userAddress);
+        if (cancelled) return;
+        setCoaAddr(coa);
+        setInboxLoading(true);
+        const ibClient = new ShieldedInboxClient();
+        const notes = await ibClient.peekAll(coa).catch(() => [] as InboxNote[]);
+        if (!cancelled) setInboxNotes(notes);
+      } catch { /* non-fatal */ } finally {
+        if (!cancelled) setInboxLoading(false);
+      }
+      // Load Cadence inbox for MockFT (uses Cadence address, not EVM COA)
+      await loadMockftCadenceInbox(userAddress, signal);
+    })();
+    return () => { cancelled = true; signal.cancelled = true; };
+  }, [userAddress, loadMockftCadenceInbox]);
+
+  const handleRefreshInbox = useCallback(async () => {
+    if (!coaAddr) return;
+    setInboxLoading(true);
+    try {
+      const ibClient = new ShieldedInboxClient();
+      const notes = await ibClient.peekAll(coaAddr).catch(() => [] as InboxNote[]);
+      setInboxNotes(notes);
+    } catch { /* non-fatal */ } finally {
+      setInboxLoading(false);
+    }
+    // Also refresh Cadence inbox
+    if (userAddress) {
+      await loadMockftCadenceInbox(userAddress);
+    }
+  }, [coaAddr, userAddress, loadMockftCadenceInbox]);
+
+  // Filter EVM inbox notes by depositor (token contract address — FLOW + mUSDC only)
+  const flowInboxNotes = inboxNotes.filter(
+    (n) => n.depositor.toLowerCase() === TOKEN_REGISTRY.flow.proxy.toLowerCase()
+  );
+  const musdcInboxNotes = inboxNotes.filter(
+    (n) => n.depositor.toLowerCase() === TOKEN_REGISTRY.mockusdc.proxy.toLowerCase()
+  );
+
+  // MockFT notes come from the Cadence inbox (JanusFT.shieldedTransfer writes there).
+  // Convert CadenceInboxNote → InboxNote shape so TokenInboxSection/InboxNoteCard can render them.
+  // blockHeight maps to blockNumber; sender (Cadence addr) maps to depositor.
+  const mockftInboxNotes: InboxNote[] = mockftCadenceNotes.map((n) => ({
+    ciphertext: n.ciphertext,
+    ephPubkeyX: n.ephPubkeyX,
+    ephPubkeyY: n.ephPubkeyY,
+    depositor: n.sender,       // Cadence address of sender (e.g. "0x7599043aea001283")
+    blockNumber: n.blockHeight, // Cadence block height used as blockNumber for display
+  }));
 
   const receivedQuery = useFlowQuery({
     cadence: buildGetShieldedTipsByRecipientWithMemoScript(),
@@ -352,9 +437,59 @@ export default function TipsPage() {
         </div>
       )}
 
-      {/* List */}
+      {/* Per-token received sections (ShieldedInbox) — shown on All + Received tabs */}
+      {activeFilter !== "sent" && (
+        <div className="mb-8 space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-foreground/70">Received Tips (on-chain inbox)</h2>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRefreshInbox}
+              disabled={inboxLoading}
+              className="shrink-0"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${inboxLoading ? "animate-spin" : ""}`} />
+              <span className="ml-1 hidden sm:inline">Refresh</span>
+            </Button>
+          </div>
+
+          {/* FLOW inbox section */}
+          <TokenInboxSection
+            label="FLOW tips received"
+            symbol="FLOW"
+            notes={flowInboxNotes}
+            loading={inboxLoading}
+            currentUser={userAddress ?? ""}
+          />
+
+          {/* mUSDC inbox section */}
+          <TokenInboxSection
+            label="mUSDC tips received"
+            symbol="mUSDC"
+            notes={musdcInboxNotes}
+            loading={inboxLoading}
+            currentUser={userAddress ?? ""}
+          />
+
+          {/* MockFT inbox section — Cadence ShieldedInbox (JanusFT.shieldedTransfer writes here) */}
+          <TokenInboxSection
+            label="MockFT tips received (Cadence inbox)"
+            symbol="MockFT"
+            notes={mockftInboxNotes}
+            loading={mockftCadenceLoading}
+            currentUser={userAddress ?? ""}
+          />
+        </div>
+      )}
+
+      {/* Legacy Cadence-script tip history (Sent + historical received) */}
       {!loading && filteredSorted.length > 0 && (
         <div className="space-y-2">
+          <h2 className="text-sm font-semibold text-foreground/70 mb-3">
+            {activeFilter === "received" ? "Historical received (Cadence contract)" :
+             activeFilter === "sent" ? "Sent tips" : "Tip history (Cadence contract)"}
+          </h2>
           {filteredSorted.map((tip) => (
             <TipCard
               key={`${tip.tipID}-${tip.sender}`}
@@ -372,6 +507,174 @@ export default function TipsPage() {
     </div>
   );
 }
+
+// ─── Per-token inbox section (ShieldedInbox v0.8) ────────────────────────────
+
+function TokenInboxSection({
+  label,
+  symbol,
+  notes,
+  loading,
+  currentUser,
+  cadencePathNote,
+}: {
+  label: string;
+  symbol: string;
+  notes: InboxNote[];
+  loading: boolean;
+  currentUser: string;
+  cadencePathNote?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-[#0A1628]/40 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-foreground/70 uppercase tracking-wider">{label}</h3>
+        <span className="text-xs font-mono text-foreground/40">{notes.length} note{notes.length !== 1 ? "s" : ""}</span>
+      </div>
+
+      {loading && (
+        <div className="flex items-center gap-2 text-xs text-foreground/40 py-2">
+          <RefreshCw className="w-3 h-3 animate-spin" />
+          Loading inbox…
+        </div>
+      )}
+
+      {cadencePathNote && !loading && (
+        <div className="rounded bg-white/5 px-3 py-2 text-xs text-foreground/40 italic">
+          {cadencePathNote}
+        </div>
+      )}
+
+      {!loading && !cadencePathNote && notes.length === 0 && (
+        <p className="text-xs text-foreground/40 italic">No tips received for {symbol} yet.</p>
+      )}
+
+      {!loading && notes.length > 0 && (
+        <div className="space-y-2">
+          {notes.map((note, i) => (
+            <InboxNoteCard
+              key={`${symbol}-${i}-${note.blockNumber}`}
+              note={note}
+              symbol={symbol}
+              currentUser={currentUser}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InboxNoteCard({
+  note,
+  symbol,
+  currentUser,
+}: {
+  note: InboxNote;
+  symbol: string;
+  currentUser: string;
+}) {
+  const [decrypted, setDecrypted] = useState<NoteContent | null>(null);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [decrypting, setDecrypting] = useState(false);
+
+  const handleDecrypt = useCallback(async () => {
+    setDecrypting(true);
+    setDecryptError(null);
+    try {
+      const privkey = await getOrDeriveMemoPrivkey(currentUser);
+      const content = await decryptNote(
+        note.ciphertext,
+        { x: note.ephPubkeyX, y: note.ephPubkeyY },
+        privkey
+      );
+      setDecrypted(content);
+    } catch (err) {
+      setDecryptError(err instanceof Error ? err.message : "Decryption failed");
+    } finally {
+      setDecrypting(false);
+    }
+  }, [note, currentUser]);
+
+  // Auto-decrypt on mount when memokey is already in sessionStorage
+  // (operator has already signed this session via wrap/portfolio).
+  // Does NOT trigger a wallet popup — falls back to manual button if not cached.
+  useEffect(() => {
+    const privkey = getCachedMemoPrivkey(currentUser);
+    if (!privkey) return;
+    let cancelled = false;
+    setDecrypting(true);
+    decryptNote(note.ciphertext, { x: note.ephPubkeyX, y: note.ephPubkeyY }, privkey)
+      .then((content) => { if (!cancelled) setDecrypted(content); })
+      .catch((err) => {
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : "Decryption failed";
+          console.debug("[InboxNoteCard] auto-decrypt failed:", msg);
+          setDecryptError(msg);
+        }
+      })
+      .finally(() => { if (!cancelled) setDecrypting(false); });
+    return () => { cancelled = true; };
+  // note and currentUser are stable per card instance; run once on mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="rounded border border-border bg-card p-3 text-xs space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-foreground/60">
+          <Inbox className="w-3 h-3" />
+          <span>Block {note.blockNumber.toString()}</span>
+        </div>
+        <span className="text-foreground/40 font-mono text-[10px] truncate max-w-[120px]" title={note.depositor}>
+          via {note.depositor.slice(0, 6)}…{note.depositor.slice(-4)}
+        </span>
+      </div>
+
+      {!decrypted && !decryptError && (
+        <div className="flex items-center gap-2">
+          <EyeOff className="w-3 h-3 text-foreground/40 shrink-0" />
+          <span className="text-foreground/40 italic">Amount encrypted</span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px] ml-auto"
+            onClick={handleDecrypt}
+            disabled={decrypting}
+          >
+            {decrypting ? "Decrypting…" : "Reveal amount"}
+          </Button>
+        </div>
+      )}
+
+      {decryptError && (
+        <p className="text-amber-400/80 text-[10px]">Decryption failed: {decryptError}</p>
+      )}
+
+      {decrypted && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5 text-[#00EF8B]">
+            <Shield className="w-3 h-3 shrink-0" />
+            <span className="font-mono font-medium">
+              {(() => {
+                const scale = symbol === "FLOW" ? 18n : symbol === "mUSDC" ? 6n : 8n;
+                const divisor = 10n ** scale;
+                const whole = decrypted.amount / divisor;
+                const frac = (decrypted.amount % divisor).toString().padStart(Number(scale), "0").slice(0, 4);
+                return `${whole}.${frac} ${symbol}`;
+              })()}
+            </span>
+          </div>
+          {decrypted.memo && (
+            <p className="text-foreground/70">&ldquo;{decrypted.memo}&rdquo;</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Legacy TipCard (Cadence-contract based tips) ────────────────────────────
 
 function TipCard({
   tip,
@@ -392,14 +695,15 @@ function TipCard({
   //   - error: wrong privkey, or ciphertext doesn't match this recipient.
   const [decrypted, setDecrypted] = useState<string | null>(() => {
     if (!isReceived || !tip.memo) return null;
-    return getCachedDecryptedMemo(currentUser, tip.tipID);
+    // Phase 5: getCachedDecryptedMemo removed in Phase 1; no session cache.
+    return null;
   });
   const [decryptError, setDecryptError] = useState<string | null>(null);
   const [decrypting, setDecrypting] = useState(false);
   // locked = privkey not in sessionStorage yet; user clicks to derive.
   const [locked, setLocked] = useState<boolean>(() => {
     if (!isReceived || !tip.memo) return false;
-    if (getCachedDecryptedMemo(currentUser, tip.tipID)) return false;
+    // Phase 5: getCachedDecryptedMemo removed in Phase 1.
     return getCachedMemoPrivkey(currentUser) === null;
   });
 
@@ -408,24 +712,11 @@ function TipCard({
   // ingestTipIfNew, just need to surface it in the render.
   const [receivedAmount, setReceivedAmount] = useState<bigint | null>(null);
 
-  // v0.5 — sender-side snapshot decryption (for Sent tips post-upgrade).
-  // Reveals memo + txAmt the sender wrote, decoded from their own self-snapshot.
-  const [senderSnap, setSenderSnap] = useState<{ memo?: string; txAmt?: bigint; rcp?: string } | null>(null);
-  useEffect(() => {
-    if (isReceived || !tip.senderSnapshot) return;
-    const privkey = getCachedMemoPrivkey(currentUser);
-    if (!privkey) return;
-    let cancelled = false;
-    decryptSnapshot(
-      tip.senderSnapshot.ciphertext,
-      { x: tip.senderSnapshot.ephPubkeyX, y: tip.senderSnapshot.ephPubkeyY },
-      privkey
-    ).then((snap) => {
-      if (cancelled || !snap) return;
-      setSenderSnap({ memo: snap.memo, txAmt: snap.txAmt, rcp: snap.rcp });
-    }).catch(() => { /* silent — fall back to placeholder */ });
-    return () => { cancelled = true; };
-  }, [isReceived, tip.senderSnapshot, currentUser]);
+  // v0.5 — sender-side snapshot decryption.
+  // Phase 5 will rewrite — v0.8 SnapshotContent has balance+blinding (not memo+txAmt+rcp).
+  // Sender snapshot field mapping needs redesign for the v0.8 checkpoint model.
+  // Phase 1 left this here intentionally because it consumes lib functions whose rewrite happens later.
+  const [senderSnap] = useState<{ memo?: string; txAmt?: bigint; rcp?: string } | null>(null);
 
   const runDecrypt = useCallback((privkey: bigint) => {
     if (!tip.memo) return;
@@ -438,22 +729,14 @@ function TipCard({
     )
       .then((note) => {
         if (cancelled) return;
-        // The `data` field is the app-level payload — for PrivateTip that's
-        // the optional memo text. Empty data → display "(no memo text)".
-        const displayText = note.data ?? "";
+        // v0.8 NoteContent: memo is the memo string field (was `data` in v0.7).
+        const displayText = note.memo ?? "";
         setDecrypted(displayText);
         setReceivedAmount(note.amount);
         setLocked(false);
-        cacheDecryptedMemo(currentUser, tip.tipID, displayText);
-        // Auto-ingest (amount, blinding) into the recipient's local shielded
-        // state if we haven't already. This is what makes /claim work for
-        // accounts that only received tips (never wrapped themselves).
-        ingestTipIfNew({
-          recipient: currentUser,
-          tipID: tip.tipID,
-          amount: note.amount,
-          blinding: note.blinding,
-        });
+        // Phase 5: cacheDecryptedMemo removed in Phase 1 — no session memo cache.
+        // Phase 5: ingestTipIfNew removed in Phase 1 — inbox drain handled by
+        // ShieldedInboxClient.drainAndDecrypt() + checkpoint write via cadenceTx.
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -474,11 +757,8 @@ function TipCard({
     if (!isReceived || !tip.memo || decryptError || locked) return;
     if (decrypted && receivedAmount !== null) return;  // already have both
     if (!decrypted) {
-      const cached = getCachedDecryptedMemo(currentUser, tip.tipID);
-      if (cached) {
-        setDecrypted(cached);
-        // fall through — still need amount, so let runDecrypt also run
-      }
+      // Phase 5: getCachedDecryptedMemo removed in Phase 1 — no session memo cache.
+      // fall through to runDecrypt
     }
     const privkey = getCachedMemoPrivkey(currentUser);
     if (!privkey) {
