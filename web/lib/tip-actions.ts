@@ -651,8 +651,10 @@ export async function activateAccount(
   // Submit a single atomic FCL tx: memoKey publish + inbox + checkpoint install.
   // TX_ACTIVATE_ACCOUNT_ATOMIC is a local template (no SDK equivalent) — inlined here.
   const TX_ACTIVATE_ACCOUNT_ATOMIC = `
+import MockFT from 0x4b6bc58bc8bf5dcc
 import JanusFT from 0x4b6bc58bc8bf5dcc
 import JanusFlow from 0x5dcbeb41055ec57e
+import FungibleToken from 0x9a0766d93b6608b7
 import ShieldedInbox from 0x4b6bc58bc8bf5dcc
 import ShieldedCheckpoint from 0xd1a02aa46d9151bb
 import EVM from 0x8c5303eaa26202d6
@@ -729,6 +731,15 @@ transaction(memoPubX: UInt256, memoPubY: UInt256) {
     signer.capabilities.unpublish(cpPublicPath)
     let cpCap = signer.capabilities.storage.issue<&{ShieldedCheckpoint.Metadata}>(cpStoragePath)
     signer.capabilities.publish(cpCap, at: cpPublicPath)
+
+    // ── JanusFT.CommitmentRegistry (idempotent) ────────────────────────────────
+    // Install registry for fresh wallets so wrap_ft_atomic can borrow it.
+    // Uses createRegistry(vault:) which requires an empty MockFT.Vault.
+    if signer.storage.type(at: JanusFT.CommitmentRegistryStoragePath) == nil {
+      let emptyVault <- MockFT.createEmptyVault(vaultType: Type<@MockFT.Vault>())
+      let reg <- JanusFT.createRegistry(vault: <- emptyVault)
+      signer.storage.save(<- reg, to: JanusFT.CommitmentRegistryStoragePath)
+    }
   }
 }
 `;

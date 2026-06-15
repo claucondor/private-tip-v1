@@ -34,6 +34,7 @@ import {
   checkJanusResourcesStatus,
   reinstallAllJanusResources,
   type ResourcesStatus,
+  type ResourceStatus,
 } from "@claucondor/sdk";
 
 interface StatusResult {
@@ -46,6 +47,11 @@ interface StatusResult {
 
 function isValidFlowAddress(addr: string): boolean {
   return /^0x[a-fA-F0-9]{16}$/.test(addr.trim());
+}
+
+/** Returns true when a Janus resource needs to be installed (missing or wrong deployer). */
+function needsInstall(s: ResourceStatus | undefined): boolean {
+  return s === "outdated" || s === "missing";
 }
 
 const PRIVATETIP_BASE =
@@ -271,9 +277,9 @@ export default function StatusPage() {
         args: (arg: (v: unknown, t: unknown) => unknown, t: Record<string, unknown>) => [
           arg(pubkey.x.toString(), t.UInt256),
           arg(pubkey.y.toString(), t.UInt256),
-          arg(resourcesStatus.mockFTVault === "outdated", t.Bool),
-          arg(resourcesStatus.janusFTRegistry === "outdated", t.Bool),
-          arg(resourcesStatus.memoKey === "outdated", t.Bool),
+          arg(needsInstall(resourcesStatus.mockFTVault), t.Bool),
+          arg(needsInstall(resourcesStatus.janusFTRegistry), t.Bool),
+          arg(needsInstall(resourcesStatus.memoKey), t.Bool),
         ],
         proposer: fcl.authz,
         payer: fcl.authz,
@@ -538,24 +544,24 @@ export default function StatusPage() {
             </div>
           )}
 
-          {/* Outdated Janus Cadence resources banner (own address only) */}
+          {/* Missing or outdated Janus Cadence resources banner (own address only) */}
           {isOwnAddress && resourcesStatus?.anyOutdated && (
             <div className="rounded-lg border border-amber-700/40 bg-amber-900/20 p-4 mt-4">
-              <p className="text-sm font-medium text-amber-200 mb-1">Outdated Janus resources detected</p>
+              <p className="text-sm font-medium text-amber-200 mb-1">Missing or outdated Janus resources</p>
               <p className="text-xs text-amber-100/80 mb-3">
-                Your Cadence storage has resources from an older Janus deployer. Wrap/send will fail with type mismatch. Reinstall to fix.
+                One or more Janus Cadence resources are missing or from an older deployer. Wrap/send will fail until they are installed.
               </p>
               <ul className="text-xs text-amber-100/70 mb-3 list-disc list-inside">
-                {resourcesStatus.mockFTVault === "outdated" && <li>MockFT vault</li>}
-                {resourcesStatus.janusFTRegistry === "outdated" && <li>JanusFT registry</li>}
-                {resourcesStatus.memoKey === "outdated" && <li>MemoKey</li>}
+                {needsInstall(resourcesStatus.mockFTVault) && <li>MockFT vault</li>}
+                {needsInstall(resourcesStatus.janusFTRegistry) && <li>JanusFT registry</li>}
+                {needsInstall(resourcesStatus.memoKey) && <li>MemoKey</li>}
               </ul>
               <button
                 onClick={handleReinstallResources}
                 disabled={reinstallingResources}
                 className="px-3 py-2 rounded bg-amber-700/50 border border-amber-600/50 text-amber-100 text-sm hover:bg-amber-700/70 disabled:opacity-50"
               >
-                {reinstallingResources ? "Reinstalling…" : "Reinstall outdated resources"}
+                {reinstallingResources ? "Reinstalling…" : "Install missing / outdated resources"}
               </button>
             </div>
           )}
