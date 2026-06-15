@@ -33,6 +33,7 @@ import { TOKEN_REGISTRY } from "@claucondor/sdk/network";
 import {
   checkJanusResourcesStatus,
   reinstallAllJanusResources,
+  cadenceAddrToEvmToken,
   type ResourcesStatus,
   type ResourceStatus,
 } from "@claucondor/sdk";
@@ -369,7 +370,7 @@ export default function StatusPage() {
             />
             <CheckpointStatus
               userAddress={userAddress}
-              tokenAddress={TOKEN_REGISTRY.mockft.cadenceAddress}
+              tokenAddress={cadenceAddrToEvmToken(TOKEN_REGISTRY.mockft.cadenceAddress)}
               tokenLabel="MockFT"
             />
           </div>
