@@ -201,7 +201,7 @@ export default function ClientLayout({
               GitHub
             </a>
             <span className="text-foreground/30">·</span>
-            <span className="font-mono text-foreground/40">v0.8.1-alpha.7</span>
+            <span className="font-mono text-foreground/40">v0.8.2</span>
             <span className="text-foreground/30">·</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#D4AF37]/40 bg-[#D4AF37]/10 text-[#D4AF37] font-mono text-[10px]">
               testnet
