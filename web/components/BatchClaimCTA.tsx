@@ -197,25 +197,52 @@ export function BatchClaimCTA({
       const prevState = await getShieldedStateForCoa(coaAddr, memoPrivkey, tokenAddress);
       const cursor = prevState?.lastConsumedNoteIndex ?? 0n;
 
-      // Step 2: Peek pending notes; filter by depositor AND by absolute position >= cursor.
-      // Notes at absoluteIndex < cursor were consumed by a prior claimBatchAtomic and must
-      // not be re-processed. absoluteIndex = headOffset + relativeIdx (headOffset > 0 when
-      // drainAll has been called historically — read from inbox storage slot 1).
-      const ibClient = new ShieldedInboxClient(SHIELDED_INBOX_ADDRESS);
-      const [allNotes, claimHeadOffset] = await Promise.all([
-        ibClient.peekAll(coaAddr),
-        getInboxHeadOffset(coaAddr),
-      ]);
-      const rawNotes = allNotes.filter(
-        (n, idx) =>
-          n.depositor.toLowerCase() === tokenAddress.toLowerCase() &&
-          claimHeadOffset + BigInt(idx) >= cursor
-      );
-      if (rawNotes.length === 0) {
-        toast.info(`No new ${tokenMeta.symbol} notes to claim.`);
-        setInboxCount(0);
-        setStatus("idle");
-        return;
+      // Step 2: Peek pending notes.
+      // cadence-ft (MockFT) notes live in the Cadence ShieldedInbox, NOT the EVM inbox.
+      // peekAll() returns 0 for cadence-ft because those notes are stored on the Cadence side.
+      // EVM tokens (FLOW, mUSDC) keep the existing peekAll + depositor-filter path.
+      const isCadenceFt = TOKEN_REGISTRY[tokenId]?.variant === "cadence-ft";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let rawNotes: any[];
+      let evmClaimHead = 0n;
+      let evmAllNotesCount = 0;
+
+      if (isCadenceFt) {
+        // Cadence inbox peek — peek() returns only UNREAD (pending) notes; no depositor or
+        // cursor filter needed (inbox is per-user and already advances its own head pointer).
+        const cadenceNotes = await getCadenceInboxNotes(userAddress, {
+          flowAccessNode: FLOW_CADENCE_ACCESS,
+          inboxContractAddress: CADENCE_DEPLOYER_ADDRESS,
+        });
+        if (cadenceNotes.length === 0) {
+          toast.info(`No new ${tokenMeta.symbol} notes to claim.`);
+          setInboxCount(0);
+          setStatus("idle");
+          return;
+        }
+        rawNotes = cadenceNotes;
+      } else {
+        // EVM inbox peek — filter by depositor AND absolute index >= cursor to skip
+        // notes consumed by prior claimBatchAtomic calls.
+        const ibClient = new ShieldedInboxClient(SHIELDED_INBOX_ADDRESS);
+        const [allNotes, claimHeadOffset] = await Promise.all([
+          ibClient.peekAll(coaAddr),
+          getInboxHeadOffset(coaAddr),
+        ]);
+        evmClaimHead = claimHeadOffset;
+        evmAllNotesCount = allNotes.length;
+        const filteredEvm = allNotes.filter(
+          (n, idx) =>
+            n.depositor.toLowerCase() === tokenAddress.toLowerCase() &&
+            claimHeadOffset + BigInt(idx) >= cursor
+        );
+        if (filteredEvm.length === 0) {
+          toast.info(`No new ${tokenMeta.symbol} notes to claim.`);
+          setInboxCount(0);
+          setStatus("idle");
+          return;
+        }
+        rawNotes = filteredEvm;
       }
 
       // Step 3: Decrypt notes locally.
@@ -310,7 +337,9 @@ export function BatchClaimCTA({
       const newBalance = actualOldBalance;
       // Advance cursor to absolute end of inbox at fetch time (headOffset + count),
       // consuming ALL pending notes across all tokens — matches fuzz _claimBatch behaviour.
-      const newCursor = claimHeadOffset + BigInt(allNotes.length);
+      // cadence-ft cursor = number of notes being drained this batch (Cadence inbox manages its
+      // own head pointer, so we just record the batch size). EVM cursor = absolute head end.
+      const newCursor = isCadenceFt ? BigInt(rawNotes.length) : evmClaimHead + BigInt(evmAllNotesCount);
 
       // Load memoKeypair for checkpoint encryption.
       const { pubkeyFromPrivkey } = await import("@claucondor/sdk");
@@ -323,7 +352,7 @@ export function BatchClaimCTA({
       );
 
       // Route: cadence-ft (MockFT) → claimBatchFtAtomic; EVM tokens → claimBatchAtomic.
-      const isCadenceFt = TOKEN_REGISTRY[tokenId].variant === "cadence-ft";
+      // isCadenceFt is already set in Step 2 above.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const ftContractAddr = isCadenceFt ? (TOKEN_REGISTRY[tokenId] as any).cadenceAddress as string : tokenAddress;
 
