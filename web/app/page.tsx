@@ -352,7 +352,7 @@ export default function Home() {
                   animate={{ opacity: [1, 0.3, 1] }}
                   transition={{ duration: 2, repeat: Infinity }}
                 />
-                @claucondor/sdk · v0.5.6 · audit in progress
+                @claucondor/sdk · v0.8.3 · audit in progress
               </div>
               <h2
                 className="text-3xl sm:text-4xl font-bold tracking-tight mb-3 text-foreground"
@@ -362,7 +362,7 @@ export default function Home() {
                 <br className="sm:hidden" /> drop-in for any Flow app.
               </h2>
               <p className="text-base text-foreground/50 max-w-2xl mx-auto">
-                PrivateTip is a 250-line demo on top of the Janus stack. The SDK ships
+                PrivateTip is a reference app on top of the Janus stack. The SDK ships
                 the hard parts so you can ship the app.
               </p>
             </div>
@@ -396,7 +396,7 @@ export default function Home() {
                   accent: "amber" as const,
                   name: "Groth16 + ceremony",
                   tagline: "Production-grade ZK",
-                  detail: "Multi-party trusted setup (Hermez pot18 + Flow VRF beacon) backing every privacy proof.",
+                  detail: "Multi-party trusted setup (Hermez pot22 + Flow VRF beacon) backing every privacy proof.",
                   ceremony: true,
                 },
                 {
